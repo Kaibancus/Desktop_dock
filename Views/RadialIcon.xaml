@@ -14,7 +14,7 @@
         <Border Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CornerRadius="12"
-                Background="#22FFFFFF"
+                Background="#08FFFFFF"
                 Padding="8">
             <Border.Effect>
                 <DropShadowEffect x:Name="Glow" Color="{Binding GlowColor, RelativeSource={RelativeSource AncestorType=UserControl}}"

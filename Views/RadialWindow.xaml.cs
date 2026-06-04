@@ -29,6 +29,29 @@ public partial class RadialWindow : Window
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.18;
 
+    // Saturn's self-rotation period (seconds per turn) used for the centre
+    // planet's idle spin and as the reference for the ring revolution speeds.
+    private const double PlanetSpinSeconds = 60.0;
+
+    // Ring revolution periods are set in real Saturn proportion to the planet's
+    // self-rotation. With Saturn rotating in ~10.656 h, Keplerian orbital
+    // periods give: B ring (inner icons, 1.739 Rs) ~9.62 h and F ring (outer
+    // icons, 2.324 Rs) ~14.86 h, i.e. 0.902x and 1.394x the rotation period.
+    private const double InnerOrbitRatio = 0.9023;
+    private const double OuterOrbitRatio = 1.3941;
+
+    // Rotation transforms applied to the two ring "orbit" layers so the inner
+    // and outer ring bands slowly revolve about the planet. The icons do NOT
+    // sit on these layers, so they stay put while the rings turn beneath them.
+    private readonly RotateTransform _innerOrbit = new RotateTransform(0);
+    private readonly RotateTransform _outerOrbit = new RotateTransform(0);
+
+    // The two rotating ring layers, and the layer ring strokes are drawn into
+    // (null = the static PanelCanvas, used for the disc background and icons).
+    private Canvas? _innerOrbitLayer;
+    private Canvas? _outerOrbitLayer;
+    private Canvas? _ringLayer;
+
     private readonly AppConfig _config;
     private readonly Action _persist;
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
@@ -163,6 +186,33 @@ public partial class RadialWindow : Window
         _hoverIcon = null;
         ComputeLayout(_config.Apps.Count);
 
+        // Two rotating layers that carry the ring bands so the inner and outer
+        // ring groups revolve about the planet at real Saturn proportions. The
+        // layers span the whole panel so their rotation centre (0.5,0.5)
+        // coincides with the panel centre. Icons are NOT placed on these layers.
+        double pw = _center.X * 2.0;
+        double ph = _center.Y * 2.0;
+        _innerOrbitLayer = new Canvas
+        {
+            Width = pw,
+            Height = ph,
+            IsHitTestVisible = false,
+            Opacity = 0.88,                   // match the planet's translucency
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = _innerOrbit,
+        };
+        _outerOrbitLayer = new Canvas
+        {
+            Width = pw,
+            Height = ph,
+            IsHitTestVisible = false,
+            Opacity = 0.88,                   // match the planet's translucency
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = _outerOrbit,
+        };
+        PanelCanvas.Children.Add(_innerOrbitLayer);
+        PanelCanvas.Children.Add(_outerOrbitLayer);
+
         DrawBackingDisc();
 
         int r0 = EffectiveRing0Count(_config.Apps.Count);
@@ -178,6 +228,26 @@ public partial class RadialWindow : Window
         }
 
         DrawCenterButton();
+        StartOrbits();
+    }
+
+    /// <summary>Starts (or restarts) the inner/outer ring revolution at periods
+    /// proportional to the planet's self-rotation, matching real Saturn ratios.</summary>
+    private void StartOrbits()
+    {
+        StartOrbit(_innerOrbit, PlanetSpinSeconds * InnerOrbitRatio);
+        StartOrbit(_outerOrbit, PlanetSpinSeconds * OuterOrbitRatio);
+    }
+
+    private static void StartOrbit(RotateTransform rt, double secondsPerTurn)
+    {
+        rt.BeginAnimation(RotateTransform.AngleProperty, null);
+        rt.Angle = 0;
+        var anim = new DoubleAnimation(0, 360, TimeSpan.FromSeconds(secondsPerTurn))
+        {
+            RepeatBehavior = RepeatBehavior.Forever,
+        };
+        rt.BeginAnimation(RotateTransform.AngleProperty, anim);
     }
 
     private RadialIcon CreateIcon(AppEntry entry, double iconSize)
@@ -202,78 +272,135 @@ public partial class RadialWindow : Window
         double r = _outerRadius + outerIcon;
         double d = r * 2;
 
-        // --- Saturn-ring background -------------------------------------------
-        // The centre is the planet (drawn by DrawCenterButton); the icon rings
-        // ride on top of Saturn's banded rings drawn here.
+        // --- Realistic Saturn ring system ------------------------------------
+        // Ring order from the planet outward (matching the real Saturn):
+        //   D · C · B · [Cassini Division] · A · [Roche Division] · F
+        // The inner-ring icons (centred at InnerRadius) ride on the bright B
+        // ring; the Cassini Division forms the empty gap between the inner and
+        // outer icon groups; the outer-ring icons (centred at InnerRadius +
+        // RingStep) ride on the thin F ringlet.
 
-        // Hit-test layer so only the disc area is interactive / a drop target.
+        // Near-black disc background, slightly translucent so the desktop shows
+        // through faintly; also the interactive / drop-target area.
         var hit = new Ellipse
         {
             Width = d,
             Height = d,
-            Fill = Brushes.Transparent,
+            Fill = new SolidColorBrush(Color.FromArgb(0xE6, 0, 0, 0)),
         };
-        StackCentered(hit, r);
+        // Place the disc at the very bottom so the rotating ring layers (already
+        // added to PanelCanvas) render on top of it rather than being hidden.
+        Canvas.SetLeft(hit, _center.X - r);
+        Canvas.SetTop(hit, _center.Y - r);
+        PanelCanvas.Children.Insert(0, hit);
 
         bool hasOuter = _outerRadius > InnerRadius + 0.5;
 
-        // Tight, equidistant spacing between adjacent bands within a ring group
-        // (smaller gap + wider bands => denser, more solid-looking rings).
-        double gap = icon * 0.30;
+        double rB = InnerRadius;                 // bright B ring -> inner icons
+        double rF = InnerRadius + RingStep;      // thin F ringlet -> outer icons
 
-        // Inner Saturn ring: 3 bands, equally spaced; the inner-ring icons
-        // (centred at InnerRadius) sit on band 2 (the middle band).
-        double[] innerBands =
-        {
-            InnerRadius - gap,
-            InnerRadius,
-            InnerRadius + gap,
-        };
+        // Planet body radius (must match DrawCenterButton: IconSize * 2.5 / 2).
+        double planetR = icon * 2.5 / 2.0;
+
+        // --- Real Saturn ring radii (in units of Saturn's equatorial radius) -
+        // From NASA/Cassini data; the planet surface is at 1.0.
+        const double Rplanet = 1.000;
+        const double RDin = 1.110, RDout = 1.236;   // D ring
+        const double RCin = 1.239, RCout = 1.526;   // C ring (crepe)
+        const double RBin = 1.526, RBmid = 1.739, RBout = 1.951; // B ring (brightest)
+        const double RCassIn = 1.951, RCassOut = 2.025;          // Cassini Division
+        const double RAin = 2.025, REncke = 2.214, RAout = 2.269; // A ring + Encke gap
+        const double RRoche = 2.320, RF = 2.324;    // Roche Division + F ringlet
+
+        // Piecewise-linear map R (Saturn radii) -> pixels, anchored so that the
+        // planet edge sits at planetR, the B-ring centre at rB (inner icons),
+        // and the F ring at rF (outer icons). The inner segment governs the
+        // planet->B span; the outer segment the B->F span. This preserves the
+        // *relative* widths and gaps of the real rings (notably the wide
+        // Cassini Division) while keeping the icon anchors exact.
+        double kIn = (rB - planetR) / (RBmid - Rplanet);
+        double bOutPx = planetR + (RBout - Rplanet) * kIn;
+        double kOut = (rF - bOutPx) / (RF - RBout);
+        double MapR(double rr) => rr <= RBout
+            ? planetR + (rr - Rplanet) * kIn
+            : bOutPx + (rr - RBout) * kOut;
+
+        // Particle tints: B ring is the brightest/whitest, A a touch greyer,
+        // C ring is the dim translucent "crepe" ring, D the faintest dust,
+        // G/E rings are icy and slightly bluish. Kept a little dim/muted so the
+        // rings sit calmly on the black disc.
+        Color paleB = Color.FromRgb(0xCB, 0xBC, 0x95);
+        Color tanA = Color.FromRgb(0xAA, 0x8E, 0x64);
+        Color dimC = Color.FromRgb(0x70, 0x5C, 0x3D);
+        Color faintD = Color.FromRgb(0x54, 0x46, 0x30);
+        Color icyG = Color.FromRgb(0x97, 0xA3, 0xA8);
+
+        // --- Inner group: D, C, B (icons land on the B ring) -----------------
+        // Drawn into the inner rotating layer so the inner bands revolve.
+        _ringLayer = _innerOrbitLayer;
+        DrawRingZone(MapR(RDin), MapR(RDout), faintD, 0.07, 0.14, icon);   // D ring (faint dust)
+        DrawRingZone(MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);     // C ring (crepe)
+        DrawRingZone(MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);    // B ring (bright, widest)
 
         if (hasOuter)
         {
-            // Outer Saturn ring: 5 bands, equally spaced; the outer-ring icons
-            // (centred at InnerRadius + RingStep) sit on band 3 (the middle).
-            double ro = InnerRadius + RingStep;
-            double[] outerBands =
-            {
-                ro - 2 * gap,
-                ro - gap,
-                ro,
-                ro + gap,
-                ro + 2 * gap,
-            };
-            DrawSaturnRingBands(outerBands, icon * 0.20);
+            // Outer group drawn into the outer rotating layer (slower revolution).
+            _ringLayer = _outerOrbitLayer;
+
+            // Cassini Division: the prominent dark gap between B and A. Drawn
+            // only as a barely-there dust hint so it reads as empty space; it
+            // also forms the separation between the inner and outer icon groups.
+            DrawRingZone(MapR(RCassIn), MapR(RCassOut), faintD, 0.03, 0.04, icon);
+
+            // A ring, split by the thin dark Encke gap.
+            DrawRingZone(MapR(RAin), MapR(REncke - 0.004), tanA, 0.42, 0.50, icon);   // A inner
+            DrawRingZone(MapR(REncke + 0.004), MapR(RAout), tanA, 0.44, 0.48, icon);  // A outer
+
+            // Roche Division then the narrow, bright F ringlet centred on rF.
+            DrawRingZone(MapR(RRoche), MapR(RF) - icon * 0.06, faintD, 0.03, 0.05, icon); // Roche gap
+            DrawRingZone(rF - icon * 0.09, rF + icon * 0.09, paleB, 0.62, 0.70, icon * 0.42); // F ring
+
+            // --- Faint outer rings: a modest gap, then the narrow G ring,
+            // then the very broad, diffuse E ring fading to the disc edge.
+            // (G/E are radially compressed to sit close to F inside the disc.) --
+            double gIn = rF + outerIcon * 0.34;            // tighter Roche-to-G gap
+            DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.16, 0.22, icon * 0.5); // G ring (narrow)
+            double eIn = gIn + icon * 0.18;
+            double eOut = r - icon * 0.04;
+            DrawRingZone(eIn, eOut, icyG, 0.13, 0.03, icon);                    // E ring (broad halo)
         }
 
-        DrawSaturnRingBands(innerBands, icon * 0.24);
+        _ringLayer = null; // subsequent draws (icons, planet) stay on PanelCanvas
     }
 
     /// <summary>
-    /// Draws a set of concentric Saturn-ring bands at the given
-    /// <paramref name="radii"/>, each <paramref name="thickness"/> thick, with tan
-    /// colouring that varies across the set and fades slightly at the ends.
+    /// Draws one named Saturn ring zone as a dense stack of concentric particle
+    /// strokes from <paramref name="rInner"/> to <paramref name="rOuter"/>, with
+    /// alpha ramping from <paramref name="aInner"/> to <paramref name="aOuter"/>
+    /// and a subtle per-radius brightness flicker for a granular look.
     /// </summary>
-    private void DrawSaturnRingBands(double[] radii, double thickness)
+    private void DrawRingZone(double rInner, double rOuter, Color color,
+        double aInner, double aOuter, double iconSize)
     {
-        Color tanDark = Color.FromRgb(0x7A, 0x60, 0x3C);
-        Color tanMid = Color.FromRgb(0xC9, 0xA8, 0x76);
-        Color tanLight = Color.FromRgb(0xF2, 0xE2, 0xB6);
+        if (rOuter <= rInner || rOuter <= 1)
+            return;
 
-        int n = radii.Length;
-        for (int i = 0; i < n; i++)
+        double spacing = Math.Max(1.4, iconSize * 0.030);
+        double thickness = spacing * 1.7;
+        int n = Math.Max(1, (int)Math.Round((rOuter - rInner) / spacing));
+
+        for (int i = 0; i <= n; i++)
         {
-            double rr = radii[i];
+            double t = n == 0 ? 0.5 : i / (double)n;
+            double rr = rInner + (rOuter - rInner) * t;
             if (rr <= 1)
                 continue;
 
-            double t = n == 1 ? 0.5 : i / (double)(n - 1);
-            double s = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2.0);
-            Color shade = s < 0.5
-                ? LerpColor(tanDark, tanMid, s * 2.0)
-                : LerpColor(tanMid, tanLight, (s - 0.5) * 2.0);
-            double edgeFade = 1.0 - Math.Pow(Math.Abs(t - 0.5) * 2.0, 2.4);
-            double alpha = Math.Clamp(0.55 + 0.25 * edgeFade, 0, 1);
+            // Granular density variation across the zone.
+            double flick = 0.80 + 0.20 * Math.Sin(rr * 0.7) * Math.Cos(rr * 0.23);
+            double alpha = Math.Clamp((aInner + (aOuter - aInner) * t) * flick, 0, 1);
+            double shadeT = 0.5 + 0.5 * Math.Sin(rr * 0.5);
+            Color shade = LerpColor(Darken(color, 0.18), Lighten(color, 0.12), shadeT);
 
             var ring = new Ellipse
             {
@@ -286,17 +413,16 @@ public partial class RadialWindow : Window
             StackCentered(ring, rr);
         }
 
-        // Soft highlight on the outermost band's edge.
-        double outer = radii[n - 1];
+        // Crisp bright edge on the outer rim of the zone.
         var rim = new Ellipse
         {
-            Width = outer * 2,
-            Height = outer * 2,
-            Stroke = new SolidColorBrush(Color.FromArgb(80, 0xFF, 0xF4, 0xD8)),
+            Width = rOuter * 2,
+            Height = rOuter * 2,
+            Stroke = new SolidColorBrush(WithAlpha(Lighten(color, 0.25), aOuter * 0.5)),
             StrokeThickness = 1.0,
             IsHitTestVisible = false,
         };
-        StackCentered(rim, outer);
+        StackCentered(rim, rOuter);
     }
 
     private static Color LerpColor(Color a, Color b, double t)
@@ -312,7 +438,7 @@ public partial class RadialWindow : Window
     {
         Canvas.SetLeft(el, _center.X - r);
         Canvas.SetTop(el, _center.Y - r);
-        PanelCanvas.Children.Add(el);
+        (_ringLayer ?? PanelCanvas).Children.Add(el);
     }
 
     private static Color WithAlpha(Color c, double opacity)
@@ -339,7 +465,7 @@ public partial class RadialWindow : Window
 
     private void DrawCenterButton()
     {
-        double size = _config.Settings.IconSize * 2.0;
+        double size = _config.Settings.IconSize * 2.5;
         double r = size / 2;
 
         // Saturn planet at the centre. Click opens settings; hovering slowly
@@ -352,6 +478,7 @@ public partial class RadialWindow : Window
             Cursor = Cursors.Hand,
             Background = Brushes.Transparent, // keep the full square hit-testable
             ToolTip = "设置",
+            Opacity = 0.88,                   // planet slightly translucent
             RenderTransformOrigin = new Point(0.5, 0.5),
         };
 
@@ -393,69 +520,85 @@ public partial class RadialWindow : Window
             },
         };
 
-        // Atmospheric texture that scrolls horizontally to simulate the planet
-        // spinning on its own axis (self-rotation), rather than the whole disc
-        // tumbling. The texture is drawn twice (a seamless tile of width `size`)
-        // and translated left; clipped to the circular globe.
-        var bandsScroll = new TranslateTransform(0, 0);
-        var bands = new Canvas
+        // Polar (top-down) view of Saturn: looking straight down the rotation
+        // axis, perpendicular to the equatorial/ring plane. The latitude belts
+        // therefore appear as concentric circles, and the whole disc spins
+        // about its centre. Hosted in a rotating Canvas clipped to the globe.
+        var discRotate = new RotateTransform(0);
+        var disc = new Canvas
         {
-            Width = size * 2,
+            Width = size,
             Height = size,
-            RenderTransform = bandsScroll,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = discRotate,
         };
 
-        // Builds one tile of latitude bands + a few storm spots at x-offset ox.
-        void BuildBandTile(double ox)
+        // Concentric latitude belts (circles) from the limb in to the pole.
+        int beltCount = 7;
+        for (int i = 0; i < beltCount; i++)
         {
-            int bandCount = 9;
-            for (int i = 0; i < bandCount; i++)
+            double tt = i / (double)(beltCount - 1);     // 0 = limb, 1 = pole
+            double br = r * (1.0 - tt * 0.86);           // shrinking radius
+            double s = 0.5 + 0.5 * Math.Sin(i * 2.0 + 0.6);
+            Color shade = s < 0.5
+                ? LerpColor(amberDark, amber, s * 2.0)
+                : LerpColor(amber, amberLight, (s - 0.5) * 2.0);
+            byte a = (byte)(70 + 80 * Math.Abs(Math.Sin(i * 1.4)));
+            var belt = new Ellipse
             {
-                double t = (i + 0.5) / bandCount;          // 0..1 top->bottom
-                double y = t * size;
-                double h = size / bandCount * (0.6 + 0.5 * Math.Sin(i * 1.7));
-                h = Math.Max(3, h);
-                double s = 0.5 + 0.5 * Math.Sin(i * 2.1);
-                Color shade = s < 0.5
-                    ? LerpColor(amberDark, amber, s * 2.0)
-                    : LerpColor(amber, amberLight, (s - 0.5) * 2.0);
-                byte a = (byte)(60 + 70 * Math.Abs(Math.Sin(i * 1.3)));
-                var band = new System.Windows.Shapes.Rectangle
-                {
-                    Width = size,
-                    Height = h,
-                    Fill = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
-                };
-                Canvas.SetLeft(band, ox);
-                Canvas.SetTop(band, y - h / 2);
-                bands.Children.Add(band);
-            }
-
-            // Storm spots give the horizontal motion something to "carry",
-            // so the self-rotation reads clearly. Positions are tile-relative.
-            (double fx, double fy, double fw, double fh, Color c, byte a)[] spots =
-            {
-                (0.30, 0.40, 0.26, 0.12, Lighten(amber, 0.20), 120),
-                (0.62, 0.58, 0.18, 0.10, Darken(amber, 0.22), 110),
-                (0.82, 0.34, 0.14, 0.08, amberLight, 90),
-                (0.14, 0.66, 0.16, 0.09, Darken(amber, 0.18), 100),
+                Width = br * 2,
+                Height = br * 2,
+                Stroke = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
+                StrokeThickness = Math.Max(2.0, size / beltCount * 0.62),
+                IsHitTestVisible = false,
             };
-            foreach (var sp in spots)
-            {
-                var spot = new Ellipse
-                {
-                    Width = size * sp.fw,
-                    Height = size * sp.fh,
-                    Fill = new SolidColorBrush(Color.FromArgb(sp.a, sp.c.R, sp.c.G, sp.c.B)),
-                };
-                Canvas.SetLeft(spot, ox + size * sp.fx - size * sp.fw / 2);
-                Canvas.SetTop(spot, size * sp.fy - size * sp.fh / 2);
-                bands.Children.Add(spot);
-            }
+            Canvas.SetLeft(belt, r - br);
+            Canvas.SetTop(belt, r - br);
+            disc.Children.Add(belt);
         }
-        BuildBandTile(0);
-        BuildBandTile(size);
-        globe.Child = bands;
+
+        // Off-centre storm ovals so the rotation is clearly visible.
+        (double fr, double ang, double fw, double fh, Color c, byte a)[] storms =
+        {
+            (0.52, 0.4, 0.22, 0.13, Lighten(amber, 0.22), 150),
+            (0.40, 2.3, 0.16, 0.10, Darken(amber, 0.22), 140),
+            (0.62, 4.1, 0.13, 0.08, amberLight, 120),
+            (0.30, 5.2, 0.12, 0.08, Darken(amber, 0.16), 130),
+        };
+        foreach (var st in storms)
+        {
+            double cx = r + Math.Cos(st.ang) * r * st.fr;
+            double cy = r + Math.Sin(st.ang) * r * st.fr;
+            var storm = new Ellipse
+            {
+                Width = size * st.fw,
+                Height = size * st.fh,
+                Fill = new SolidColorBrush(Color.FromArgb(st.a, st.c.R, st.c.G, st.c.B)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(storm, cx - size * st.fw / 2);
+            Canvas.SetTop(storm, cy - size * st.fh / 2);
+            disc.Children.Add(storm);
+        }
+
+        // Saturn's north-polar hexagon at the centre — a hallmark of the
+        // top-down view, and a clear visual anchor for the spin.
+        var hex = new System.Windows.Shapes.Polygon
+        {
+            Stroke = new SolidColorBrush(Color.FromArgb(170, 0xF6, 0xE6, 0xBE)),
+            StrokeThickness = Math.Max(1.0, size * 0.012),
+            Fill = new SolidColorBrush(Color.FromArgb(60, 0x9A, 0x78, 0x44)),
+            IsHitTestVisible = false,
+        };
+        double hexR = r * 0.16;
+        for (int k = 0; k < 6; k++)
+        {
+            double ang = -Math.PI / 2 + k * Math.PI / 3;
+            hex.Points.Add(new Point(r + Math.Cos(ang) * hexR, r + Math.Sin(ang) * hexR));
+        }
+        disc.Children.Add(hex);
+
+        globe.Child = disc;
         root.Children.Add(globe);
 
         // Terminator shadow: darken the lower-right to give a spherical feel.
@@ -515,28 +658,25 @@ public partial class RadialWindow : Window
         };
         root.Children.Add(rim);
 
-        // --- Self-rotation: scroll the band texture horizontally. Always spins
-        // slowly (a planet is always turning); hovering speeds it up. The tile
-        // repeats every `size`, so looping any one-tile range is seamless. -----
-        void StartScroll(double secondsPerTurn)
+        // --- Rotation: spin the polar disc about its centre. Always turning
+        // slowly; hovering speeds it up. The animation is restarted from the
+        // current angle so speed changes are seamless. --------------------
+        void StartSpin(double secondsPerTurn)
         {
-            double cur = bandsScroll.X;
-            // Normalise into [-size, 0] so the value never runs away; identical
-            // content thanks to the tiled texture.
-            cur = -(((-cur) % size + size) % size);
-            bandsScroll.BeginAnimation(TranslateTransform.XProperty, null);
-            bandsScroll.X = cur;
-            var anim = new DoubleAnimation(cur, cur - size,
+            double cur = discRotate.Angle % 360;
+            discRotate.BeginAnimation(RotateTransform.AngleProperty, null);
+            discRotate.Angle = cur;
+            var anim = new DoubleAnimation(cur, cur + 360,
                 TimeSpan.FromSeconds(secondsPerTurn))
             {
                 RepeatBehavior = RepeatBehavior.Forever,
             };
-            bandsScroll.BeginAnimation(TranslateTransform.XProperty, anim);
+            discRotate.BeginAnimation(RotateTransform.AngleProperty, anim);
         }
 
-        StartScroll(18.0);                       // gentle idle self-rotation
-        root.MouseEnter += (_, _) => StartScroll(6.0);
-        root.MouseLeave += (_, _) => StartScroll(18.0);
+        StartSpin(PlanetSpinSeconds);            // gentle idle self-rotation
+        root.MouseEnter += (_, _) => StartSpin(3.0);
+        root.MouseLeave += (_, _) => StartSpin(PlanetSpinSeconds);
 
         root.MouseLeftButtonUp += (_, e) =>
         {
