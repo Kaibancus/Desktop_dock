@@ -40,17 +40,28 @@ public partial class RadialWindow : Window
     private const double InnerOrbitRatio = 0.9023;
     private const double OuterOrbitRatio = 1.3941;
 
-    // Rotation transforms applied to the two ring "orbit" layers so the inner
-    // and outer ring bands slowly revolve about the planet. The icons do NOT
-    // sit on these layers, so they stay put while the rings turn beneath them.
+    // Vertical squash applied to the ring plane so it reads as a tilted disc
+    // seen in perspective (1.0 = top-down circle, smaller = more edge-on). The
+    // planet body stays a circle (a sphere looks round from any angle); only
+    // the flat ring plane and the icon orbits are foreshortened into ellipses.
+    private const double RingTiltY = 0.98;
+
+    // Orbit-angle transforms. They no longer rotate the (now elliptical) ring
+    // layers — spinning a concentric ellipse would make it tumble — instead
+    // they drive the two "shimmer" highlights that sweep along the elliptical
+    // ring orbits, which is what now conveys the revolution.
     private readonly RotateTransform _innerOrbit = new RotateTransform(0);
     private readonly RotateTransform _outerOrbit = new RotateTransform(0);
 
-    // The two rotating ring layers, and the layer ring strokes are drawn into
-    // (null = the static PanelCanvas, used for the disc background and icons).
+    // The two ring layers the bands are drawn into (kept static now that the
+    // bands are foreshortened ellipses). null = the static PanelCanvas.
     private Canvas? _innerOrbitLayer;
     private Canvas? _outerOrbitLayer;
     private Canvas? _ringLayer;
+
+    // Current per-ring vertical radius factor used by StackCentered so a band
+    // can be stacked as an ellipse (height = width * factor). 1.0 = circle.
+    private double _stackTiltY = 1.0;
 
     private readonly AppConfig _config;
     private readonly Action _persist;
@@ -193,14 +204,50 @@ public partial class RadialWindow : Window
         SizeToPrimaryScreen();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
+        AnimateRingsExpand();           // grow the rings out from the centre
         Topmost = true;
         Activate();
         _runningTimer.Start();
 
         BeginAnimation(OpacityProperty, null);
         Opacity = 0;
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(240));
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(210));
         BeginAnimation(OpacityProperty, fade);
+    }
+
+    /// <summary>Animates the two ring layers growing out from the planet, the
+    /// inner band leading and the outer band following, for a "summon" feel.</summary>
+    private void AnimateRingsExpand()
+    {
+        ExpandLayer(_innerOrbitLayer, 0.0);
+        ExpandLayer(_outerOrbitLayer, 0.11);
+    }
+
+    private void ExpandLayer(Canvas? layer, double delaySeconds)
+    {
+        if (layer == null)
+            return;
+
+        layer.RenderTransformOrigin = new Point(0.5, 0.5);
+        var sc = new ScaleTransform(0.55, 0.55);
+        layer.RenderTransform = sc;
+
+        var begin = TimeSpan.FromSeconds(delaySeconds);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var grow = new DoubleAnimation(0.55, 1.0, TimeSpan.FromMilliseconds(380))
+        {
+            BeginTime = begin,
+            EasingFunction = ease,
+        };
+        sc.BeginAnimation(ScaleTransform.ScaleXProperty, grow);
+        sc.BeginAnimation(ScaleTransform.ScaleYProperty, grow.Clone());
+
+        var fadeIn = new DoubleAnimation(0, 0.78, TimeSpan.FromMilliseconds(380))
+        {
+            BeginTime = begin,
+            EasingFunction = ease,
+        };
+        layer.BeginAnimation(OpacityProperty, fadeIn);
     }
 
     public void HidePanel()
@@ -211,8 +258,12 @@ public partial class RadialWindow : Window
         _runningTimer.Stop();
 
         // Fade out instead of hiding; at Opacity 0 the window is click-through.
-        BeginAnimation(OpacityProperty, null);
-        var fade = new DoubleAnimation(Opacity, 0, TimeSpan.FromMilliseconds(200));
+        // Capture the current (animated) opacity BEFORE replacing the animation
+        // so we start the fade from what's on screen. Do NOT clear the animation
+        // first: clearing snaps Opacity back to its base value (0, set in
+        // ShowFaded), which would make the fade run 0->0 and the panel vanish.
+        double from = Opacity;
+        var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(24));
         BeginAnimation(OpacityProperty, fade);
     }
 
@@ -274,8 +325,6 @@ public partial class RadialWindow : Window
             Height = ph,
             IsHitTestVisible = false,
             Opacity = 0.78,                   // match the planet's translucency
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = _innerOrbit,
         };
         _outerOrbitLayer = new Canvas
         {
@@ -283,8 +332,6 @@ public partial class RadialWindow : Window
             Height = ph,
             IsHitTestVisible = false,
             Opacity = 0.78,                   // match the planet's translucency
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = _outerOrbit,
         };
         PanelCanvas.Children.Add(_innerOrbitLayer);
         PanelCanvas.Children.Add(_outerOrbitLayer);
@@ -375,6 +422,9 @@ public partial class RadialWindow : Window
         double r = _outerRadius + outerIcon;
         double d = r * 2;
 
+        // Foreshorten every ring band stacked from here on into an ellipse.
+        _stackTiltY = RingTiltY;
+
         // --- Realistic Saturn ring system ------------------------------------
         // Ring order from the planet outward (matching the real Saturn):
         //   D · C · B · [Cassini Division] · A · [Roche Division] · F
@@ -383,19 +433,35 @@ public partial class RadialWindow : Window
         // outer icon groups; the outer-ring icons (centred at InnerRadius +
         // RingStep) ride on the thin F ringlet.
 
-        // Near-black disc background, slightly translucent so the desktop shows
-        // through faintly; also the interactive / drop-target area.
+        // Near-black disc background, foreshortened into an ellipse so it sits
+        // in the same tilted plane as the rings. Slightly translucent so the
+        // desktop shows through faintly.
         var hit = new Ellipse
         {
             Width = d,
-            Height = d,
-            Fill = new SolidColorBrush(Color.FromArgb(0xE6, 0, 0, 0)),
+            Height = d * RingTiltY,
+            Fill = new RadialGradientBrush
+            {
+                GradientOrigin = new Point(0.5, 0.46),
+                Center = new Point(0.5, 0.5),
+                RadiusX = 0.5,
+                RadiusY = 0.5,
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0xF0, 0x05, 0x06, 0x0C), 0.0),
+                    new GradientStop(Color.FromArgb(0xEC, 0x02, 0x03, 0x07), 0.72),
+                    new GradientStop(Color.FromArgb(0xDA, 0, 0, 0), 1.0),
+                },
+            },
         };
         // Place the disc at the very bottom so the rotating ring layers (already
         // added to PanelCanvas) render on top of it rather than being hidden.
         Canvas.SetLeft(hit, _center.X - r);
-        Canvas.SetTop(hit, _center.Y - r);
+        Canvas.SetTop(hit, _center.Y - r * RingTiltY);
         PanelCanvas.Children.Insert(0, hit);
+
+        // Faint starfield sprinkled over the disc, behind the rings.
+        DrawStarfield(r);
 
         bool hasOuter = _outerRadius > InnerRadius + 0.5;
 
@@ -471,9 +537,111 @@ public partial class RadialWindow : Window
             double eIn = gIn + icon * 0.18;
             double eOut = r - icon * 0.04;
             DrawRingZone(eIn, eOut, icyG, 0.147, 0.034, icon);                  // E ring (broad halo)
+
+            // Soft outer bloom: a blurred icy halo over the faint G/E rings so
+            // they glow and fade out rather than ending abruptly.
+            AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.10);
         }
 
+        // Shimmer highlights that sweep along the elliptical ring orbits — this
+        // is what now conveys the revolution. The inner shimmer rides the bright
+        // B ring, the outer one the A ring, each revolved by its orbit transform.
+        AddShimmer(rB, _innerOrbit, paleB);
+        if (hasOuter)
+            AddShimmer((MapR(RAin) + MapR(RAout)) / 2, _outerOrbit, paleB);
+
+        _stackTiltY = 1.0;
         _ringLayer = null; // subsequent draws (icons, planet) stay on PanelCanvas
+    }
+
+    /// <summary>Sprinkles a faint, mostly-static starfield across the disc, with
+    /// a few twinkling stars, so the planet reads as floating in space.</summary>
+    private void DrawStarfield(double r)
+    {
+        const int count = 84;
+        for (int i = 0; i < count; i++)
+        {
+            double ang = Hash01(i * 2.17) * Math.PI * 2;
+            double rad = Math.Sqrt(Hash01(i * 5.31)) * r * 0.96;
+            double px = _center.X + Math.Cos(ang) * rad;
+            double py = _center.Y + Math.Sin(ang) * rad * RingTiltY;
+            double sz = 0.6 + 1.9 * Hash01(i * 7.7);
+            byte br = (byte)(60 + 150 * Hash01(i * 3.3));
+            var star = new Ellipse
+            {
+                Width = sz,
+                Height = sz,
+                Fill = new SolidColorBrush(Color.FromArgb(br, 255, 255, 250)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(star, px - sz / 2);
+            Canvas.SetTop(star, py - sz / 2);
+            PanelCanvas.Children.Add(star);
+
+            if (Hash01(i * 11.1) > 0.68)   // a subset twinkles
+            {
+                double full = br / 255.0;
+                var tw = new DoubleAnimation(full * 0.3, full,
+                    TimeSpan.FromSeconds(1.4 + 2.2 * Hash01(i * 4.9)))
+                {
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever,
+                    BeginTime = TimeSpan.FromSeconds(2.0 * Hash01(i * 6.2)),
+                };
+                star.BeginAnimation(OpacityProperty, tw);
+            }
+        }
+    }
+
+    /// <summary>Adds a blurred elliptical halo (bloom) at the given mean radius.</summary>
+    private void AddBloomRing(double rMid, double thickness, Color color, double alpha)
+    {
+        var glow = new Ellipse
+        {
+            Width = rMid * 2,
+            Height = rMid * 2 * _stackTiltY,
+            Stroke = new SolidColorBrush(WithAlpha(color, alpha)),
+            StrokeThickness = Math.Max(2, thickness),
+            IsHitTestVisible = false,
+            Effect = new System.Windows.Media.Effects.BlurEffect
+            {
+                Radius = Math.Max(8, thickness * 0.6),
+            },
+        };
+        Canvas.SetLeft(glow, _center.X - rMid);
+        Canvas.SetTop(glow, _center.Y - rMid * _stackTiltY);
+        (_ringLayer ?? PanelCanvas).Children.Add(glow);
+    }
+
+    /// <summary>Adds a soft glow that sits on the ring at angle 0 and is revolved
+    /// about the centre by <paramref name="orbit"/>; an outer ScaleY squashes its
+    /// circular orbit into the tilted ellipse so it tracks the ring plane.</summary>
+    private void AddShimmer(double radius, RotateTransform orbit, Color baseColor)
+    {
+        orbit.CenterX = _center.X;
+        orbit.CenterY = _center.Y;
+
+        var glow = new System.Windows.Shapes.Path
+        {
+            IsHitTestVisible = false,
+            Fill = new RadialGradientBrush
+            {
+                GradientStops =
+                {
+                    new GradientStop(WithAlpha(Lighten(baseColor, 0.65), 0.55), 0.0),
+                    new GradientStop(WithAlpha(baseColor, 0.0), 1.0),
+                },
+            },
+            Data = new EllipseGeometry(
+                new Point(_center.X + radius, _center.Y),
+                Math.Max(26, radius * 0.30),
+                Math.Max(5, radius * 0.06)),
+        };
+        var tg = new TransformGroup();
+        tg.Children.Add(orbit);                                       // revolve
+        tg.Children.Add(new ScaleTransform(1, _stackTiltY, _center.X, _center.Y)); // tilt
+        glow.RenderTransform = tg;
+        (_ringLayer ?? PanelCanvas).Children.Add(glow);
     }
 
     /// <summary>
@@ -499,11 +667,21 @@ public partial class RadialWindow : Window
             if (rr <= 1)
                 continue;
 
-            // Granular density variation across the zone.
-            double flick = 0.80 + 0.20 * Math.Sin(rr * 0.7) * Math.Cos(rr * 0.23);
-            double alpha = Math.Clamp((aInner + (aOuter - aInner) * t) * flick, 0, 1);
-            double shadeT = 0.5 + 0.5 * Math.Sin(rr * 0.5);
-            Color shade = LerpColor(Darken(color, 0.18), Lighten(color, 0.12), shadeT);
+            // Multi-frequency granular density. A broad low-frequency envelope
+            // gives the band large-scale bright/dark structure, while medium and
+            // fine sinusoids plus deterministic noise add an icy-particle speckle
+            // so the rings no longer look like flat concentric strokes.
+            double grain =
+                  0.60
+                + 0.22 * Math.Sin(rr * 0.018 + 1.3)   // broad brightness envelope
+                + 0.12 * Math.Sin(rr * 0.071)         // medium undulation
+                + 0.10 * Math.Sin(rr * 0.193 + 0.7)   // fine ripple
+                + 0.12 * (Hash01(rr) - 0.5);          // high-frequency speckle
+            grain = Math.Clamp(grain, 0.32, 1.12);
+            double alpha = Math.Clamp((aInner + (aOuter - aInner) * t) * grain, 0, 1);
+            double shadeT = Math.Clamp(0.5 + 0.5 * Math.Sin(rr * 0.5)
+                                       + 0.18 * (Hash01(rr * 3.1) - 0.5), 0, 1);
+            Color shade = LerpColor(Darken(color, 0.20), Lighten(color, 0.16), shadeT);
 
             var ring = new Ellipse
             {
@@ -526,6 +704,39 @@ public partial class RadialWindow : Window
             IsHitTestVisible = false,
         };
         StackCentered(rim, rOuter);
+
+        // Sparse bright/dark speckle scattered through the zone to break up the
+        // perfect concentric stroke pattern (icy-particle grain). Positions are
+        // deterministic so the look is stable across rebuilds.
+        int speckles = (int)Math.Clamp((rOuter - rInner) * 0.7, 0, 46);
+        for (int i = 0; i < speckles; i++)
+        {
+            double rr = rInner + (rOuter - rInner) * Hash01(rInner * 7.1 + i * 2.3);
+            double ang = Hash01(rOuter * 3.7 + i * 5.9) * Math.PI * 2;
+            double br = Hash01(i * 1.7 + rInner);
+            double px = _center.X + Math.Cos(ang) * rr;
+            double py = _center.Y + Math.Sin(ang) * rr * _stackTiltY;
+            byte sa = (byte)(34 + 120 * br);
+            Color sc = br > 0.5 ? Lighten(color, 0.45) : Darken(color, 0.45);
+            double sz = 0.8 + 1.9 * Hash01(i * 9.3 + rOuter);
+            var dot = new Ellipse
+            {
+                Width = sz,
+                Height = sz,
+                Fill = new SolidColorBrush(Color.FromArgb(sa, sc.R, sc.G, sc.B)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(dot, px - sz / 2);
+            Canvas.SetTop(dot, py - sz / 2);
+            (_ringLayer ?? PanelCanvas).Children.Add(dot);
+        }
+    }
+
+    /// <summary>Deterministic pseudo-random value in [0,1) from a scalar seed.</summary>
+    private static double Hash01(double x)
+    {
+        double s = Math.Sin(x * 12.9898) * 43758.5453;
+        return s - Math.Floor(s);
     }
 
     private static Color LerpColor(Color a, Color b, double t)
@@ -539,8 +750,14 @@ public partial class RadialWindow : Window
 
     private void StackCentered(FrameworkElement el, double r)
     {
+        double ry = r * _stackTiltY;
+        // Foreshorten the concentric circle into an ellipse so the ring plane
+        // reads as a tilted disc. Width stays r*2 (set by the caller); we only
+        // squash the height and re-centre vertically.
+        if (_stackTiltY != 1.0)
+            el.Height = ry * 2;
         Canvas.SetLeft(el, _center.X - r);
-        Canvas.SetTop(el, _center.Y - r);
+        Canvas.SetTop(el, _center.Y - ry);
         (_ringLayer ?? PanelCanvas).Children.Add(el);
     }
 
@@ -628,12 +845,14 @@ public partial class RadialWindow : Window
         // therefore appear as concentric circles, and the whole disc spins
         // about its centre. Hosted in a rotating Canvas clipped to the globe.
         var discRotate = new RotateTransform(0);
+        var discBlur = new System.Windows.Media.Effects.BlurEffect { Radius = 0, KernelType = System.Windows.Media.Effects.KernelType.Gaussian };
         var disc = new Canvas
         {
             Width = size,
             Height = size,
             RenderTransformOrigin = new Point(0.5, 0.5),
             RenderTransform = discRotate,
+            Effect = discBlur,             // motion blur, scaled to spin speed
         };
 
         // Concentric latitude belts (circles) from the limb in to the pole.
@@ -668,19 +887,39 @@ public partial class RadialWindow : Window
             (0.62, 4.1, 0.13, 0.08, amberLight, 120),
             (0.30, 5.2, 0.12, 0.08, Darken(amber, 0.16), 130),
         };
-        foreach (var st in storms)
+        for (int si = 0; si < storms.Length; si++)
         {
+            var st = storms[si];
             double cx = r + Math.Cos(st.ang) * r * st.fr;
             double cy = r + Math.Sin(st.ang) * r * st.fr;
+            double w = size * st.fw;
+            double h = size * st.fh;
             var storm = new Ellipse
             {
-                Width = size * st.fw,
-                Height = size * st.fh,
+                Width = w,
+                Height = h,
                 Fill = new SolidColorBrush(Color.FromArgb(st.a, st.c.R, st.c.G, st.c.B)),
                 IsHitTestVisible = false,
             };
-            Canvas.SetLeft(storm, cx - size * st.fw / 2);
-            Canvas.SetTop(storm, cy - size * st.fh / 2);
+            Canvas.SetLeft(storm, cx - w / 2);
+            Canvas.SetTop(storm, cy - h / 2);
+
+            // Tiny independent libration about the pole so the storms drift in
+            // phase relative to the overall self-rotation, making the spin look
+            // organic rather than perfectly rigid (option: storm phase drift).
+            double ox = r - cx + w / 2;
+            double oy = r - cy + h / 2;
+            var drift = new RotateTransform(0, ox, oy);
+            storm.RenderTransform = drift;
+            double amp = 2.5 + 1.6 * si;
+            var da = new DoubleAnimation(-amp, amp, TimeSpan.FromSeconds(6.0 + 2.0 * si))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                BeginTime = TimeSpan.FromSeconds(0.7 * si),
+            };
+            drift.BeginAnimation(RotateTransform.AngleProperty, da);
+
             disc.Children.Add(storm);
         }
 
@@ -775,6 +1014,28 @@ public partial class RadialWindow : Window
                 RepeatBehavior = RepeatBehavior.Forever,
             };
             discRotate.BeginAnimation(RotateTransform.AngleProperty, anim);
+
+            // Faster spin -> stronger motion blur. Below a small threshold the
+            // blur is dropped entirely (Effect = null) so the perpetually
+            // spinning disc isn't re-rasterised through the blur pipeline every
+            // frame -- that constant per-frame cost is what made the panel feel
+            // progressively "slow-motion" the longer it stayed open.
+            double targetBlur = Math.Clamp(8.0 / secondsPerTurn, 0.0, 2.2);
+            if (targetBlur < 0.4)
+            {
+                discBlur.BeginAnimation(System.Windows.Media.Effects.BlurEffect.RadiusProperty, null);
+                discBlur.Radius = 0;
+                disc.Effect = null;
+            }
+            else
+            {
+                disc.Effect = discBlur;
+                var blurAnim = new DoubleAnimation(targetBlur, TimeSpan.FromMilliseconds(380))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                };
+                discBlur.BeginAnimation(System.Windows.Media.Effects.BlurEffect.RadiusProperty, blurAnim);
+            }
         }
 
         StartSpin(PlanetSpinSeconds);            // gentle idle self-rotation
@@ -786,6 +1047,30 @@ public partial class RadialWindow : Window
             e.Handled = true;
             RequestOpenSettings?.Invoke();
         };
+        // Warm bloom halo behind the planet. Drawn as a separate static element
+        // (not affected by the spinning disc) so its blur is cached once.
+        double halo = size * 1.4;
+        var bloom = new Ellipse
+        {
+            Width = halo,
+            Height = halo,
+            IsHitTestVisible = false,
+            Fill = new RadialGradientBrush
+            {
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(120, 0xF2, 0xD4, 0x96), 0.0),
+                    new GradientStop(Color.FromArgb(64, 0xDA, 0xB2, 0x72), 0.46),
+                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 1.0),
+                },
+            },
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 24 },
+        };
+        Panel.SetZIndex(bloom, 1999); // just under the planet (root is 2000)
+        Canvas.SetLeft(bloom, _center.X - halo / 2);
+        Canvas.SetTop(bloom, _center.Y - halo / 2);
+        PanelCanvas.Children.Add(bloom);
+
         Panel.SetZIndex(root, 2000); // keep Saturn above the ring bands
         Canvas.SetLeft(root, _center.X - size / 2);
         Canvas.SetTop(root, _center.Y - size / 2);
@@ -983,7 +1268,7 @@ public partial class RadialWindow : Window
     {
         double angle = -Math.PI / 2 + 2 * Math.PI * k / Math.Max(1, count);
         return new Point(_center.X + radius * Math.Cos(angle),
-                         _center.Y + radius * Math.Sin(angle));
+                         _center.Y + radius * Math.Sin(angle) * RingTiltY);
     }
 
     /// <summary>
@@ -1111,7 +1396,7 @@ public partial class RadialWindow : Window
             return;
 
         _hoverIcon = ic;
-        Panel.SetZIndex(ic, 500);
+        Panel.SetZIndex(ic, 3000); // above Saturn (root=2000) so the label isn't hidden
         SpreadNeighbours(idx);
     }
 
@@ -1203,8 +1488,8 @@ public partial class RadialWindow : Window
         double left = center.X - s / 2;
         double top = center.Y - s / 2;
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var la = new DoubleAnimation(left, TimeSpan.FromMilliseconds(180)) { EasingFunction = ease };
-        var ta = new DoubleAnimation(top, TimeSpan.FromMilliseconds(180)) { EasingFunction = ease };
+        var la = new DoubleAnimation(left, TimeSpan.FromMilliseconds(130)) { EasingFunction = ease };
+        var ta = new DoubleAnimation(top, TimeSpan.FromMilliseconds(130)) { EasingFunction = ease };
         el.BeginAnimation(Canvas.LeftProperty, la);
         el.BeginAnimation(Canvas.TopProperty, ta);
     }

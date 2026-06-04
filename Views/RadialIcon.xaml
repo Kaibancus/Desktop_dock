@@ -71,14 +71,14 @@
         <Canvas IsHitTestVisible="False">
             <Border x:Name="LabelChrome"
                     Opacity="0"
-                    Background="#CC1A1A1A"
+                    Background="#801A1A1A"
                     CornerRadius="7"
                     Padding="8,3"
                     Panel.ZIndex="50">
                 <TextBlock x:Name="Label"
                            Text="{Binding DisplayName, RelativeSource={RelativeSource AncestorType=UserControl}}"
                            Foreground="{Binding LabelBrush, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                           FontSize="12.5"
+                           FontSize="11.5"
                            FontWeight="SemiBold"
                            TextAlignment="Center"
                            TextTrimming="CharacterEllipsis"

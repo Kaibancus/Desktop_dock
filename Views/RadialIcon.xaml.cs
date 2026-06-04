@@ -11,7 +11,7 @@ namespace DesktopPanel.Views;
 
 public partial class RadialIcon : UserControl
 {
-    private static readonly Duration Anim = new(TimeSpan.FromMilliseconds(150));
+    private static readonly Duration Anim = new(TimeSpan.FromMilliseconds(110));
     private const double HoverScale = 1.7;
     private const double LabelWidth = 150;
 
