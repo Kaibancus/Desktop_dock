@@ -132,17 +132,6 @@ public partial class App : Application
     private void OnHotkeyPressed() => _panel?.ShowPanel();
     private void OnHotkeyReleased() => _panel?.HideIfNotPinned();
 
-    private void TogglePanel()
-    {
-        if (_panel == null)
-            return;
-
-        if (_panel.IsVisible)
-            _panel.HidePanel();
-        else
-            _panel.ShowPinned();
-    }
-
     private void OpenSettings()
     {
         _panel?.HidePanel();
@@ -167,7 +156,6 @@ public partial class App : Application
     private void SetupTray()
     {
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("显示圆盘(可拖入快捷方式)", null, (_, _) => TogglePanel());
         menu.Items.Add("设置", null, (_, _) => OpenSettings());
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitApp());

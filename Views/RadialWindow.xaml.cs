@@ -26,6 +26,9 @@ public partial class RadialWindow : Window
     private const int Ring0Cap = 12;
     private const int Ring1Cap = 24;
 
+    // Outer-ring icons are drawn slightly larger than inner-ring icons.
+    private const double OuterIconScale = 1.18;
+
     private readonly AppConfig _config;
     private readonly Action _persist;
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
@@ -162,10 +165,13 @@ public partial class RadialWindow : Window
 
         DrawBackingDisc();
 
+        int r0 = EffectiveRing0Count(_config.Apps.Count);
         for (int i = 0; i < _config.Apps.Count; i++)
         {
             var entry = _config.Apps[i];
-            var icon = CreateIcon(entry);
+            double size = i < r0 ? _config.Settings.IconSize
+                                 : _config.Settings.IconSize * OuterIconScale;
+            var icon = CreateIcon(entry, size);
             PlaceCentered(icon, _slotPositions[i]);
             PanelCanvas.Children.Add(icon);
             _iconElements.Add(icon);
@@ -174,7 +180,7 @@ public partial class RadialWindow : Window
         DrawCenterButton();
     }
 
-    private RadialIcon CreateIcon(AppEntry entry)
+    private RadialIcon CreateIcon(AppEntry entry, double iconSize)
     {
         if (!_iconCache.TryGetValue(entry.EffectiveIconSource, out var bmp))
         {
@@ -182,7 +188,7 @@ public partial class RadialWindow : Window
             _iconCache[entry.EffectiveIconSource] = bmp;
         }
 
-        var icon = new RadialIcon(entry, bmp, _config.Settings.IconSize, AccentColor, LabelBrush);
+        var icon = new RadialIcon(entry, bmp, iconSize, AccentColor, LabelBrush);
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;
@@ -191,19 +197,16 @@ public partial class RadialWindow : Window
 
     private void DrawBackingDisc()
     {
-        double r = _outerRadius + _config.Settings.IconSize;
+        double icon = _config.Settings.IconSize;
+        double outerIcon = icon * OuterIconScale;
+        double r = _outerRadius + outerIcon;
         double d = r * 2;
-        Color baseColor = ParseColor(_config.Settings.PanelColor, Color.FromRgb(0x1E, 0x1E, 0x1E));
-        Color accent = AccentColor;
-        double op = _config.Settings.PanelOpacity;
 
-        // --- Liquid-glass disc: translucent tinted base + glossy top highlight
-        //     + soft inner glow + bright rim. Layered ellipses stacked at center.
+        // --- Saturn-ring background -------------------------------------------
+        // The centre is the planet (drawn by DrawCenterButton); the icon rings
+        // ride on top of Saturn's banded rings drawn here.
 
-        // 0) Hit-test layer. The window background is null so empty regions let
-        //    mouse clicks fall through to the desktop (so you can click desktop
-        //    icons or grab a shortcut to drag in). This transparent-but-hittable
-        //    disc makes only the disc area interactive / a valid drop target.
+        // Hit-test layer so only the disc area is interactive / a drop target.
         var hit = new Ellipse
         {
             Width = d,
@@ -212,95 +215,97 @@ public partial class RadialWindow : Window
         };
         StackCentered(hit, r);
 
-        // 1) Frosted translucent body — radial gradient from a lighter center to
-        //    the base tint at the edge, kept semi-transparent so the desktop
-        //    shows through like real glass.
-        var body = new Ellipse
-        {
-            Width = d,
-            Height = d,
-            Fill = new RadialGradientBrush
-            {
-                GradientOrigin = new Point(0.5, 0.42),
-                Center = new Point(0.5, 0.5),
-                RadiusX = 0.6,
-                RadiusY = 0.6,
-                GradientStops =
-                {
-                    new GradientStop(WithAlpha(Lighten(baseColor, 0.22), op * 0.82), 0.0),
-                    new GradientStop(WithAlpha(baseColor, op * 0.78), 0.72),
-                    new GradientStop(WithAlpha(Darken(baseColor, 0.18), op * 0.92), 1.0),
-                },
-            },
-            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 0.6 },
-            IsHitTestVisible = false,
-        };
-        StackCentered(body, r);
+        bool hasOuter = _outerRadius > InnerRadius + 0.5;
 
-        // 2) Accent inner glow ring near the edge for a colored liquid sheen.
-        var glow = new Ellipse
-        {
-            Width = d,
-            Height = d,
-            Fill = new RadialGradientBrush
-            {
-                Center = new Point(0.5, 0.5),
-                GradientOrigin = new Point(0.5, 0.5),
-                RadiusX = 0.5,
-                RadiusY = 0.5,
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 0.78),
-                    new GradientStop(Color.FromArgb(70, accent.R, accent.G, accent.B), 0.96),
-                    new GradientStop(Color.FromArgb(0, accent.R, accent.G, accent.B), 1.0),
-                },
-            },
-            IsHitTestVisible = false,
-        };
-        StackCentered(glow, r);
+        // Tight, equidistant spacing between adjacent bands within a ring group
+        // (smaller gap + wider bands => denser, more solid-looking rings).
+        double gap = icon * 0.30;
 
-        // 3) Glossy top highlight — an off-center white sheen, like light on glass.
-        var gloss = new Ellipse
+        // Inner Saturn ring: 3 bands, equally spaced; the inner-ring icons
+        // (centred at InnerRadius) sit on band 2 (the middle band).
+        double[] innerBands =
         {
-            Width = d,
-            Height = d,
-            Fill = new RadialGradientBrush
-            {
-                GradientOrigin = new Point(0.5, 0.12),
-                Center = new Point(0.5, 0.0),
-                RadiusX = 0.75,
-                RadiusY = 0.55,
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(90, 255, 255, 255), 0.0),
-                    new GradientStop(Color.FromArgb(28, 255, 255, 255), 0.30),
-                    new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.55),
-                },
-            },
-            IsHitTestVisible = false,
+            InnerRadius - gap,
+            InnerRadius,
+            InnerRadius + gap,
         };
-        StackCentered(gloss, r);
 
-        // 4) Bright rim stroke for the crisp glass edge.
+        if (hasOuter)
+        {
+            // Outer Saturn ring: 5 bands, equally spaced; the outer-ring icons
+            // (centred at InnerRadius + RingStep) sit on band 3 (the middle).
+            double ro = InnerRadius + RingStep;
+            double[] outerBands =
+            {
+                ro - 2 * gap,
+                ro - gap,
+                ro,
+                ro + gap,
+                ro + 2 * gap,
+            };
+            DrawSaturnRingBands(outerBands, icon * 0.20);
+        }
+
+        DrawSaturnRingBands(innerBands, icon * 0.24);
+    }
+
+    /// <summary>
+    /// Draws a set of concentric Saturn-ring bands at the given
+    /// <paramref name="radii"/>, each <paramref name="thickness"/> thick, with tan
+    /// colouring that varies across the set and fades slightly at the ends.
+    /// </summary>
+    private void DrawSaturnRingBands(double[] radii, double thickness)
+    {
+        Color tanDark = Color.FromRgb(0x7A, 0x60, 0x3C);
+        Color tanMid = Color.FromRgb(0xC9, 0xA8, 0x76);
+        Color tanLight = Color.FromRgb(0xF2, 0xE2, 0xB6);
+
+        int n = radii.Length;
+        for (int i = 0; i < n; i++)
+        {
+            double rr = radii[i];
+            if (rr <= 1)
+                continue;
+
+            double t = n == 1 ? 0.5 : i / (double)(n - 1);
+            double s = 0.5 + 0.5 * Math.Sin(t * Math.PI * 2.0);
+            Color shade = s < 0.5
+                ? LerpColor(tanDark, tanMid, s * 2.0)
+                : LerpColor(tanMid, tanLight, (s - 0.5) * 2.0);
+            double edgeFade = 1.0 - Math.Pow(Math.Abs(t - 0.5) * 2.0, 2.4);
+            double alpha = Math.Clamp(0.55 + 0.25 * edgeFade, 0, 1);
+
+            var ring = new Ellipse
+            {
+                Width = rr * 2,
+                Height = rr * 2,
+                Stroke = new SolidColorBrush(WithAlpha(shade, alpha)),
+                StrokeThickness = thickness,
+                IsHitTestVisible = false,
+            };
+            StackCentered(ring, rr);
+        }
+
+        // Soft highlight on the outermost band's edge.
+        double outer = radii[n - 1];
         var rim = new Ellipse
         {
-            Width = d,
-            Height = d,
-            Stroke = new LinearGradientBrush
-            {
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(0, 1),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(150, 255, 255, 255), 0.0),
-                    new GradientStop(Color.FromArgb(40, 255, 255, 255), 0.5),
-                    new GradientStop(Color.FromArgb(110, accent.R, accent.G, accent.B), 1.0),
-                },
-            },
-            StrokeThickness = 1.4,
+            Width = outer * 2,
+            Height = outer * 2,
+            Stroke = new SolidColorBrush(Color.FromArgb(80, 0xFF, 0xF4, 0xD8)),
+            StrokeThickness = 1.0,
             IsHitTestVisible = false,
         };
-        StackCentered(rim, r);
+        StackCentered(rim, outer);
+    }
+
+    private static Color LerpColor(Color a, Color b, double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        return Color.FromRgb(
+            (byte)(a.R + (b.R - a.R) * t),
+            (byte)(a.G + (b.G - a.G) * t),
+            (byte)(a.B + (b.B - a.B) * t));
     }
 
     private void StackCentered(FrameworkElement el, double r)
@@ -334,119 +339,149 @@ public partial class RadialWindow : Window
 
     private void DrawCenterButton()
     {
-        double size = _config.Settings.IconSize * 1.4;
+        double size = _config.Settings.IconSize * 2.0;
         double r = size / 2;
 
-        // Skeuomorphic metal gear built from vector layers, hosted in a Grid so
-        // the whole thing can scale/rotate around its centre.
+        // Saturn planet at the centre. Click opens settings; hovering slowly
+        // rotates the atmospheric bands. Hosted in a Grid so it can scale/rotate
+        // around its centre.
         var root = new Grid
         {
             Width = size,
             Height = size,
             Cursor = Cursors.Hand,
             Background = Brushes.Transparent, // keep the full square hit-testable
-            ToolTip = "Settings",
+            ToolTip = "设置",
             RenderTransformOrigin = new Point(0.5, 0.5),
         };
 
-        // Soft drop shadow under the whole gear for depth.
+        // Soft drop shadow under the planet for depth.
         root.Effect = new System.Windows.Media.Effects.DropShadowEffect
         {
             Color = Colors.Black,
-            BlurRadius = 14,
-            ShadowDepth = 2,
-            Opacity = 0.45,
+            BlurRadius = 22,
+            ShadowDepth = 0,
+            Opacity = 0.55,
         };
 
-        // --- Rotating gear group (teeth + body) -----------------------------
-        var gearRotate = new RotateTransform(0);
-        var gear = new Grid
+        Color amber = Color.FromRgb(0xD8, 0xB4, 0x76);
+        Color amberDark = Color.FromRgb(0x6E, 0x52, 0x2E);
+        Color amberLight = Color.FromRgb(0xF6, 0xE6, 0xBE);
+
+        // Circular planet body with a clip so the bands stay inside the globe.
+        var globe = new Border
         {
             Width = size,
             Height = size,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = gearRotate,
-        };
-
-        Color metal = Color.FromRgb(0xAB, 0xB4, 0xC0);
-        Color metalDark = Darken(metal, 0.45);
-        Color metalLight = Lighten(metal, 0.55);
-
-        // Gear teeth + disc as a single filled geometry.
-        var gearShape = new System.Windows.Shapes.Path
-        {
-            Data = BuildGearGeometry(r, r, r * 0.96, r * 0.74, 9, 0.42),
-            Fill = new RadialGradientBrush
+            CornerRadius = new CornerRadius(r),
+            // Clip to a true circle so the atmospheric bands never fill the
+            // square corners (ClipToBounds alone would clip to the rectangle).
+            Clip = new EllipseGeometry(new Point(r, r), r, r),
+            Background = new RadialGradientBrush
             {
-                GradientOrigin = new Point(0.4, 0.34),
+                GradientOrigin = new Point(0.36, 0.30),
                 Center = new Point(0.5, 0.5),
-                RadiusX = 0.62,
-                RadiusY = 0.62,
+                RadiusX = 0.72,
+                RadiusY = 0.72,
                 GradientStops =
                 {
-                    new GradientStop(metalLight, 0.0),
-                    new GradientStop(metal, 0.55),
-                    new GradientStop(metalDark, 1.0),
-                },
-            },
-            Stroke = new SolidColorBrush(Darken(metal, 0.6)),
-            StrokeThickness = 1.0,
-        };
-        gear.Children.Add(gearShape);
-
-        // Recessed hub ring (darker) for a machined look.
-        double hubR = r * 0.5;
-        var hub = new Ellipse
-        {
-            Width = hubR * 2,
-            Height = hubR * 2,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Fill = new RadialGradientBrush
-            {
-                GradientOrigin = new Point(0.5, 0.5),
-                Center = new Point(0.5, 0.5),
-                RadiusX = 0.5,
-                RadiusY = 0.5,
-                GradientStops =
-                {
-                    new GradientStop(metalDark, 0.0),
-                    new GradientStop(Darken(metal, 0.25), 0.72),
-                    new GradientStop(metal, 1.0),
-                },
-            },
-            Stroke = new SolidColorBrush(Lighten(metal, 0.3)),
-            StrokeThickness = 1.0,
-        };
-        gear.Children.Add(hub);
-
-        // Center bore.
-        double boreR = r * 0.22;
-        var bore = new Ellipse
-        {
-            Width = boreR * 2,
-            Height = boreR * 2,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Fill = new RadialGradientBrush
-            {
-                GradientOrigin = new Point(0.5, 0.35),
-                Center = new Point(0.5, 0.5),
-                RadiusX = 0.5,
-                RadiusY = 0.5,
-                GradientStops =
-                {
-                    new GradientStop(Darken(metal, 0.7), 0.0),
-                    new GradientStop(metalDark, 1.0),
+                    new GradientStop(amberLight, 0.0),
+                    new GradientStop(amber, 0.5),
+                    new GradientStop(Darken(amber, 0.25), 0.82),
+                    new GradientStop(amberDark, 1.0),
                 },
             },
         };
-        gear.Children.Add(bore);
 
-        root.Children.Add(gear);
+        // Atmospheric texture that scrolls horizontally to simulate the planet
+        // spinning on its own axis (self-rotation), rather than the whole disc
+        // tumbling. The texture is drawn twice (a seamless tile of width `size`)
+        // and translated left; clipped to the circular globe.
+        var bandsScroll = new TranslateTransform(0, 0);
+        var bands = new Canvas
+        {
+            Width = size * 2,
+            Height = size,
+            RenderTransform = bandsScroll,
+        };
 
-        // --- Static glossy highlight (does NOT rotate) ----------------------
-        var gloss = new Ellipse
+        // Builds one tile of latitude bands + a few storm spots at x-offset ox.
+        void BuildBandTile(double ox)
+        {
+            int bandCount = 9;
+            for (int i = 0; i < bandCount; i++)
+            {
+                double t = (i + 0.5) / bandCount;          // 0..1 top->bottom
+                double y = t * size;
+                double h = size / bandCount * (0.6 + 0.5 * Math.Sin(i * 1.7));
+                h = Math.Max(3, h);
+                double s = 0.5 + 0.5 * Math.Sin(i * 2.1);
+                Color shade = s < 0.5
+                    ? LerpColor(amberDark, amber, s * 2.0)
+                    : LerpColor(amber, amberLight, (s - 0.5) * 2.0);
+                byte a = (byte)(60 + 70 * Math.Abs(Math.Sin(i * 1.3)));
+                var band = new System.Windows.Shapes.Rectangle
+                {
+                    Width = size,
+                    Height = h,
+                    Fill = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
+                };
+                Canvas.SetLeft(band, ox);
+                Canvas.SetTop(band, y - h / 2);
+                bands.Children.Add(band);
+            }
+
+            // Storm spots give the horizontal motion something to "carry",
+            // so the self-rotation reads clearly. Positions are tile-relative.
+            (double fx, double fy, double fw, double fh, Color c, byte a)[] spots =
+            {
+                (0.30, 0.40, 0.26, 0.12, Lighten(amber, 0.20), 120),
+                (0.62, 0.58, 0.18, 0.10, Darken(amber, 0.22), 110),
+                (0.82, 0.34, 0.14, 0.08, amberLight, 90),
+                (0.14, 0.66, 0.16, 0.09, Darken(amber, 0.18), 100),
+            };
+            foreach (var sp in spots)
+            {
+                var spot = new Ellipse
+                {
+                    Width = size * sp.fw,
+                    Height = size * sp.fh,
+                    Fill = new SolidColorBrush(Color.FromArgb(sp.a, sp.c.R, sp.c.G, sp.c.B)),
+                };
+                Canvas.SetLeft(spot, ox + size * sp.fx - size * sp.fw / 2);
+                Canvas.SetTop(spot, size * sp.fy - size * sp.fh / 2);
+                bands.Children.Add(spot);
+            }
+        }
+        BuildBandTile(0);
+        BuildBandTile(size);
+        globe.Child = bands;
+        root.Children.Add(globe);
+
+        // Terminator shadow: darken the lower-right to give a spherical feel.
+        var shadow = new Ellipse
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            Fill = new RadialGradientBrush
+            {
+                GradientOrigin = new Point(0.68, 0.72),
+                Center = new Point(0.68, 0.72),
+                RadiusX = 0.85,
+                RadiusY = 0.85,
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(150, 0, 0, 0), 0.0),
+                    new GradientStop(Color.FromArgb(40, 0, 0, 0), 0.5),
+                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.85),
+                },
+            },
+        };
+        root.Children.Add(shadow);
+
+        // Specular highlight on the upper-left.
+        var highlight = new Ellipse
         {
             Width = size * 0.9,
             Height = size * 0.9,
@@ -455,106 +490,68 @@ public partial class RadialWindow : Window
             IsHitTestVisible = false,
             Fill = new RadialGradientBrush
             {
-                GradientOrigin = new Point(0.5, 0.1),
-                Center = new Point(0.5, -0.05),
-                RadiusX = 0.75,
-                RadiusY = 0.75,
+                GradientOrigin = new Point(0.34, 0.26),
+                Center = new Point(0.30, 0.22),
+                RadiusX = 0.6,
+                RadiusY = 0.6,
                 GradientStops =
                 {
                     new GradientStop(Color.FromArgb(150, 255, 255, 255), 0.0),
-                    new GradientStop(Color.FromArgb(40, 255, 255, 255), 0.3),
+                    new GradientStop(Color.FromArgb(30, 255, 255, 255), 0.35),
                     new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.6),
                 },
             },
         };
-        root.Children.Add(gloss);
+        root.Children.Add(highlight);
 
-        // --- Hover: spin the gear continuously; settle when leaving ----------
-        root.MouseEnter += (_, _) =>
+        // Crisp rim around the globe.
+        var rim = new Ellipse
         {
-            var spin = new DoubleAnimation
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            Stroke = new SolidColorBrush(Color.FromArgb(120, 0xFF, 0xF0, 0xCE)),
+            StrokeThickness = 1.2,
+        };
+        root.Children.Add(rim);
+
+        // --- Self-rotation: scroll the band texture horizontally. Always spins
+        // slowly (a planet is always turning); hovering speeds it up. The tile
+        // repeats every `size`, so looping any one-tile range is seamless. -----
+        void StartScroll(double secondsPerTurn)
+        {
+            double cur = bandsScroll.X;
+            // Normalise into [-size, 0] so the value never runs away; identical
+            // content thanks to the tiled texture.
+            cur = -(((-cur) % size + size) % size);
+            bandsScroll.BeginAnimation(TranslateTransform.XProperty, null);
+            bandsScroll.X = cur;
+            var anim = new DoubleAnimation(cur, cur - size,
+                TimeSpan.FromSeconds(secondsPerTurn))
             {
-                By = 360,
-                Duration = TimeSpan.FromSeconds(2.2),
                 RepeatBehavior = RepeatBehavior.Forever,
             };
-            gearRotate.BeginAnimation(RotateTransform.AngleProperty, spin);
-        };
-        root.MouseLeave += (_, _) =>
-        {
-            // Freeze at the current angle, then ease back smoothly to 0..360.
-            double current = gearRotate.Angle % 360;
-            gearRotate.BeginAnimation(RotateTransform.AngleProperty, null);
-            gearRotate.Angle = current;
-            var settle = new DoubleAnimation(current, current + (360 - current % 360),
-                TimeSpan.FromMilliseconds(600))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            };
-            gearRotate.BeginAnimation(RotateTransform.AngleProperty, settle);
-        };
+            bandsScroll.BeginAnimation(TranslateTransform.XProperty, anim);
+        }
+
+        StartScroll(18.0);                       // gentle idle self-rotation
+        root.MouseEnter += (_, _) => StartScroll(6.0);
+        root.MouseLeave += (_, _) => StartScroll(18.0);
 
         root.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
             RequestOpenSettings?.Invoke();
         };
+        Panel.SetZIndex(root, 2000); // keep Saturn above the ring bands
         Canvas.SetLeft(root, _center.X - size / 2);
         Canvas.SetTop(root, _center.Y - size / 2);
         PanelCanvas.Children.Add(root);
     }
 
-    /// <summary>
-    /// Builds a gear outline: <paramref name="teeth"/> trapezoidal teeth around a
-    /// disc. <paramref name="outerR"/> is the tooth tip radius, <paramref name="rootR"/>
-    /// the valley radius, <paramref name="toothFraction"/> the tip width as a
-    /// fraction of one tooth pitch.
-    /// </summary>
-    private static Geometry BuildGearGeometry(double cx, double cy, double outerR,
-        double rootR, int teeth, double toothFraction)
-    {
-        var fig = new PathFigure { IsClosed = true, IsFilled = true };
-        double step = 2 * Math.PI / teeth;
-        double half = step / 2.0;
-        double tipHalf = half * toothFraction;
-        double flank = half * 0.18; // slight slope on tooth flanks
-
-        Point P(double radius, double ang) =>
-            new(cx + radius * Math.Cos(ang), cy + radius * Math.Sin(ang));
-
-        bool first = true;
-        for (int i = 0; i < teeth; i++)
-        {
-            double c = -Math.PI / 2 + i * step; // tooth centre angle (start at top)
-
-            Point valleyStart = P(rootR, c - half + flank);
-            Point tipStart = P(outerR, c - tipHalf);
-            Point tipEnd = P(outerR, c + tipHalf);
-            Point valleyEnd = P(rootR, c + half - flank);
-
-            if (first)
-            {
-                fig.StartPoint = valleyStart;
-                first = false;
-            }
-            else
-            {
-                fig.Segments.Add(new LineSegment(valleyStart, true));
-            }
-            fig.Segments.Add(new LineSegment(tipStart, true));
-            fig.Segments.Add(new LineSegment(tipEnd, true));
-            fig.Segments.Add(new LineSegment(valleyEnd, true));
-        }
-
-        var geo = new PathGeometry();
-        geo.Figures.Add(fig);
-        geo.Freeze();
-        return geo;
-    }
-
     private void PlaceCentered(FrameworkElement el, Point center)
     {
-        double s = _config.Settings.IconSize;
+        double s = el is RadialIcon ri ? ri.IconSize : _config.Settings.IconSize;
         Canvas.SetLeft(el, center.X - s / 2);
         Canvas.SetTop(el, center.Y - s / 2);
     }
@@ -755,37 +752,103 @@ public partial class RadialWindow : Window
     {
         int n = _config.Apps.Count;
         int r0 = EffectiveRing0Count(n);
-        int o0 = (src < r0) ? r0 - 1 : r0;
-        int m = n - 1;
+        int srcRing = src < r0 ? 0 : 1;
 
-        var others = new List<int>(m);
-        for (int i = 0; i < n; i++)
-            if (i != src)
-                others.Add(i);
+        // Current angular sequences per ring. Rebuild() places entry i at flat
+        // slot i, so the inner ring is entries 0..r0-1 and the outer ring is the
+        // rest, both already in angular (clockwise-from-top) order.
+        var inner = new List<int>();
+        for (int i = 0; i < r0; i++)
+            inner.Add(i);
+        var outer = new List<int>();
+        for (int i = r0; i < n; i++)
+            outer.Add(i);
 
-        int insertAt;
         int newR0;
-        if (ring == 0)
+        if (ring == srcRing)
         {
-            insertAt = Math.Clamp(pos, 0, o0);
-            newR0 = o0 + 1;
+            // Same ring: shift only the icons on the shorter arc between the
+            // dragged icon's current angular slot and the target slot, so
+            // crossing the 12 o'clock boundary nudges neighbours instead of
+            // rotating the whole ring.
+            var seq = ring == 0 ? inner : outer;
+            int len = seq.Count;
+            int cur = seq.IndexOf(src);
+            int tgt = Math.Clamp(pos, 0, Math.Max(0, len - 1));
+            int[] newIdx = ShortestArcShift(len, cur, tgt);
+
+            var newSeq = new int[len];
+            for (int j = 0; j < len; j++)
+                newSeq[newIdx[j]] = seq[j];
+
+            seq.Clear();
+            seq.AddRange(newSeq);
+            newR0 = r0;
         }
         else
         {
-            int ring1Len = m - o0;
-            insertAt = o0 + Math.Clamp(pos, 0, ring1Len);
-            newR0 = o0;
+            // Cross ring: remove from the source ring and insert into the target
+            // ring at the angular position. Both rings re-space by their new
+            // counts, which is the expected behaviour when moving between rings.
+            if (srcRing == 0)
+                inner.Remove(src);
+            else
+                outer.Remove(src);
+
+            var tgt = ring == 0 ? inner : outer;
+            int insertAt = Math.Clamp(pos, 0, tgt.Count);
+            tgt.Insert(insertAt, src);
+            newR0 = inner.Count;
         }
 
-        var newOrder = new List<int>(n);
-        newOrder.AddRange(others.GetRange(0, insertAt));
-        newOrder.Add(src);
-        newOrder.AddRange(others.GetRange(insertAt, m - insertAt));
-
         int[] slotOfEntry = new int[n];
-        for (int slot = 0; slot < n; slot++)
-            slotOfEntry[newOrder[slot]] = slot;
+        int slot = 0;
+        foreach (int e in inner)
+            slotOfEntry[e] = slot++;
+        foreach (int e in outer)
+            slotOfEntry[e] = slot++;
         return (slotOfEntry, newR0);
+    }
+
+    /// <summary>
+    /// For a ring of <paramref name="len"/> slots, returns the new angular index
+    /// of each current index when the icon at <paramref name="cur"/> moves to
+    /// <paramref name="tgt"/>, shifting only the shorter arc between them by one.
+    /// </summary>
+    private static int[] ShortestArcShift(int len, int cur, int tgt)
+    {
+        int[] newIdx = new int[Math.Max(0, len)];
+        if (len <= 0)
+            return newIdx;
+
+        cur = Math.Clamp(cur, 0, len - 1);
+        tgt = Math.Clamp(tgt, 0, len - 1);
+        newIdx[cur] = tgt;
+
+        int df = ((tgt - cur) % len + len) % len; // forward steps cur -> tgt
+        int db = len - df;                          // backward steps
+        bool forward = df <= db;
+
+        for (int j = 0; j < len; j++)
+        {
+            if (j == cur)
+                continue;
+            int ns = j;
+            if (forward)
+            {
+                int rel = ((j - cur) % len + len) % len; // 1..len-1
+                if (rel >= 1 && rel <= df)
+                    ns = (j - 1 + len) % len;
+            }
+            else
+            {
+                int relT = ((j - tgt) % len + len) % len; // 0..len-1
+                if (relT >= 0 && relT < db)
+                    ns = (j + 1) % len;
+            }
+            newIdx[j] = ns;
+        }
+        return newIdx;
     }
 
     // ---- Hover "spread apart" --------------------------------------------
@@ -893,7 +956,7 @@ public partial class RadialWindow : Window
     /// <summary>Smoothly slides an icon to a new slot center.</summary>
     private void AnimateTo(FrameworkElement el, Point center)
     {
-        double s = _config.Settings.IconSize;
+        double s = el is RadialIcon ri ? ri.IconSize : _config.Settings.IconSize;
         double left = center.X - s / 2;
         double top = center.Y - s / 2;
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
