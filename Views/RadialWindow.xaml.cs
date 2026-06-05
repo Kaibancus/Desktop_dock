@@ -545,12 +545,40 @@ public partial class RadialWindow : Window
             AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.10);
         }
 
-        // Shimmer highlights that sweep along the elliptical ring orbits — this
-        // is what now conveys the revolution. The inner shimmer rides the bright
-        // B ring, the outer one the A ring, each revolved by its orbit transform.
-        AddShimmer(rB, _innerOrbit, paleB);
+        // --- Ring-revolution cues ------------------------------------------
+        // A continuously rotating axisymmetric ellipse looks identical to a
+        // static one, so the revolution is conveyed by *local* features that
+        // sweep along the ring orbits at the (differential) inner/outer rates:
+        //   (1) bright shimmer arcs  (2) Voyager-style radial spokes
+        //   (3) higher-density particle clumps  (4) a moving brightness edge
+        //   (5) a subtle leading-edge cool/warm Doppler tint on the shimmers.
+        double rBin = MapR(RBin), rBout = MapR(RBout);
+        // (1) Inner B-ring shimmer: a single bright lead arc with a cool/warm
+        // Doppler tint.
+        AddShimmer(rB, _innerOrbit, paleB, phaseDeg: 0, intensity: 1.0, arcSpan: 0.30);
+        // (2) Spokes anchored across the B ring, revolving with the inner orbit.
+        AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 24, widthDeg: 7.0, alpha: 0.30);
+        AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 132, widthDeg: 5.0, alpha: 0.22);
+        AddSpoke(rBin, rBout, _innerOrbit, phaseDeg: 256, widthDeg: 6.0, alpha: 0.26);
+        // (3) Density clumps that ride the bright B ring.
+        AddRingBlob(rB, _innerOrbit, phaseDeg: 60, rx: rB * 0.16, ry: rB * 0.05,
+                    color: Lighten(paleB, 0.30), alpha: 0.22);
+        AddRingBlob(rB, _innerOrbit, phaseDeg: 300, rx: rB * 0.12, ry: rB * 0.045,
+                    color: Lighten(paleB, 0.22), alpha: 0.18);
+
         if (hasOuter)
-            AddShimmer((MapR(RAin) + MapR(RAout)) / 2, _outerOrbit, paleB);
+        {
+            double rAmid = (MapR(RAin) + MapR(RAout)) / 2;
+            double rAin = MapR(RAin), rAout = MapR(RAout);
+            // Outer A-ring shimmer (slower revolution => visible differential rate).
+            AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 0, intensity: 0.8, arcSpan: 0.26);
+            AddShimmer(rAmid, _outerOrbit, paleB, phaseDeg: 190, intensity: 0.40, arcSpan: 0.18);
+            AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 80, widthDeg: 6.0, alpha: 0.20);
+            AddSpoke(rAin, rAout, _outerOrbit, phaseDeg: 210, widthDeg: 5.0, alpha: 0.16);
+            AddRingBlob(rAmid, _outerOrbit, phaseDeg: 150, rx: rAmid * 0.13, ry: rAmid * 0.04,
+                        color: Lighten(tanA, 0.30), alpha: 0.16);
+        }
+
 
         _stackTiltY = 1.0;
         _ringLayer = null; // subsequent draws (icons, planet) stay on PanelCanvas
@@ -615,36 +643,120 @@ public partial class RadialWindow : Window
         (_ringLayer ?? PanelCanvas).Children.Add(glow);
     }
 
-    /// <summary>Adds a soft glow that sits on the ring at angle 0 and is revolved
-    /// about the centre by <paramref name="orbit"/>; an outer ScaleY squashes its
-    /// circular orbit into the tilted ellipse so it tracks the ring plane.</summary>
-    private void AddShimmer(double radius, RotateTransform orbit, Color baseColor)
+    /// <summary>Adds a soft shimmer arc that sits on the ring at <paramref name="phaseDeg"/>
+    /// and is revolved about the centre by <paramref name="orbit"/>; an outer ScaleY
+    /// squashes its circular orbit into the tilted ellipse so it tracks the ring plane.
+    /// A faint cool leading / warm trailing pair gives a subtle Doppler hint.</summary>
+    private void AddShimmer(double radius, RotateTransform orbit, Color baseColor,
+        double phaseDeg = 0, double intensity = 1.0, double arcSpan = 0.30)
     {
         orbit.CenterX = _center.X;
         orbit.CenterY = _center.Y;
 
+        double rx = Math.Max(26, radius * arcSpan);
+        double ry = Math.Max(5, radius * 0.06);
+
+        // Warm trailing half (just behind the crest).
+        AddRevolvedEllipse(radius, orbit, phaseDeg - 6, rx * 0.9, ry,
+            WithAlpha(Lighten(WarmShift(baseColor), 0.45), 0.22 * intensity), null);
+        // Cool leading half (just ahead of the crest).
+        AddRevolvedEllipse(radius, orbit, phaseDeg + 6, rx * 0.9, ry,
+            WithAlpha(Lighten(CoolShift(baseColor), 0.55), 0.25 * intensity), null);
+        // Bright central crest on top.
+        AddRevolvedEllipse(radius, orbit, phaseDeg, rx, ry,
+            WithAlpha(Lighten(baseColor, 0.70), 0.42 * intensity), baseColor);
+    }
+
+    /// <summary>Creates a soft radial-gradient ellipse on the ring at the given phase,
+    /// revolved by <paramref name="orbit"/> and tilted into the ring plane.</summary>
+    private void AddRevolvedEllipse(double radius, RotateTransform orbit, double phaseDeg,
+        double rx, double ry, Color coreColor, Color? fadeColor)
+    {
+        var brush = new RadialGradientBrush
+        {
+            GradientStops =
+            {
+                new GradientStop(coreColor, 0.0),
+                new GradientStop(WithAlpha(fadeColor ?? coreColor, 0.0), 1.0),
+            },
+        };
         var glow = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
-            Fill = new RadialGradientBrush
-            {
-                GradientStops =
-                {
-                    new GradientStop(WithAlpha(Lighten(baseColor, 0.65), 0.55), 0.0),
-                    new GradientStop(WithAlpha(baseColor, 0.0), 1.0),
-                },
-            },
-            Data = new EllipseGeometry(
-                new Point(_center.X + radius, _center.Y),
-                Math.Max(26, radius * 0.30),
-                Math.Max(5, radius * 0.06)),
+            Fill = brush,
+            Data = new EllipseGeometry(new Point(_center.X + radius, _center.Y), rx, ry),
         };
-        var tg = new TransformGroup();
-        tg.Children.Add(orbit);                                       // revolve
-        tg.Children.Add(new ScaleTransform(1, _stackTiltY, _center.X, _center.Y)); // tilt
-        glow.RenderTransform = tg;
+        glow.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(glow);
     }
+
+    /// <summary>Builds the transform that places a ring feature authored at angle 0,
+    /// rotates it to <paramref name="phaseDeg"/>, revolves it by the animated
+    /// <paramref name="orbit"/>, then squashes the orbit into the tilted ellipse.</summary>
+    private TransformGroup RingRevolveTransform(RotateTransform orbit, double phaseDeg)
+    {
+        orbit.CenterX = _center.X;
+        orbit.CenterY = _center.Y;
+        var tg = new TransformGroup();
+        if (phaseDeg != 0)
+            tg.Children.Add(new RotateTransform(phaseDeg, _center.X, _center.Y)); // phase offset
+        tg.Children.Add(orbit);                                                    // revolve
+        tg.Children.Add(new ScaleTransform(1, _stackTiltY, _center.X, _center.Y)); // tilt
+        return tg;
+    }
+
+    /// <summary>Adds a Voyager/Cassini-style radial spoke (a soft dark wedge spanning
+    /// <paramref name="rInner"/>..<paramref name="rOuter"/>) that revolves with the ring,
+    /// giving the otherwise featureless band a trackable rotating mark.</summary>
+    private void AddSpoke(double rInner, double rOuter, RotateTransform orbit,
+        double phaseDeg, double widthDeg, double alpha)
+    {
+        if (rOuter <= rInner)
+            return;
+
+        double half = widthDeg * Math.PI / 360.0;       // half angular width in rad
+        Point P(double r, double a) =>
+            new Point(_center.X + Math.Cos(a) * r, _center.Y + Math.Sin(a) * r);
+
+        // Wedge is slightly wider at the outer edge, like real spokes.
+        var fig = new PathFigure { StartPoint = P(rInner, -half * 0.7), IsClosed = true };
+        fig.Segments.Add(new LineSegment(P(rOuter, -half), true));
+        fig.Segments.Add(new LineSegment(P(rOuter, half), true));
+        fig.Segments.Add(new LineSegment(P(rInner, half * 0.7), true));
+        var geo = new PathGeometry();
+        geo.Figures.Add(fig);
+
+        var spoke = new System.Windows.Shapes.Path
+        {
+            IsHitTestVisible = false,
+            Fill = new SolidColorBrush(WithAlpha(Color.FromRgb(0x14, 0x10, 0x08), alpha)),
+            Data = geo,
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 3.0 },
+        };
+        spoke.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
+        (_ringLayer ?? PanelCanvas).Children.Add(spoke);
+    }
+
+    /// <summary>Adds a tangentially-elongated brighter "density clump" that revolves
+    /// with the ring, reading as a particle concentration sweeping past.</summary>
+    private void AddRingBlob(double radius, RotateTransform orbit, double phaseDeg,
+        double rx, double ry, Color color, double alpha)
+    {
+        AddRevolvedEllipse(radius, orbit, phaseDeg, rx, ry,
+            WithAlpha(color, alpha), color);
+    }
+
+    /// <summary>Shifts a colour slightly toward cool (blue) for the leading edge.</summary>
+    private static Color CoolShift(Color c) => Color.FromRgb(
+        (byte)Math.Clamp(c.R - 14, 0, 255),
+        (byte)Math.Clamp(c.G - 4, 0, 255),
+        (byte)Math.Clamp(c.B + 18, 0, 255));
+
+    /// <summary>Shifts a colour slightly toward warm (amber) for the trailing edge.</summary>
+    private static Color WarmShift(Color c) => Color.FromRgb(
+        (byte)Math.Clamp(c.R + 16, 0, 255),
+        (byte)Math.Clamp(c.G + 4, 0, 255),
+        (byte)Math.Clamp(c.B - 16, 0, 255));
 
     /// <summary>
     /// Draws one named Saturn ring zone as a dense stack of concentric particle
@@ -857,161 +969,218 @@ public partial class RadialWindow : Window
             Effect = discBlur,             // motion blur, scaled to spin speed
         };
 
-        // Concentric latitude belts (circles) from the limb in to the pole.
-        int beltCount = 7;
-        for (int i = 0; i < beltCount; i++)
+        // --- Gas-giant banding ------------------------------------------------
+        // Real Saturn shows alternating light "zones" and darker "belts" whose
+        // boundaries are turbulent and wavy — never clean circles. Each band is
+        // a filled annulus whose inner/outer edges are radius-modulated by a sum
+        // of sines plus deterministic noise, so the borders ripple like wind
+        // shear. Bands are translucent so the globe's spherical shading shows
+        // through. Drawn limb -> pole.
+        const int bandCount = 11;
+        double[] bandEdges = new double[bandCount + 1];
+        for (int i = 0; i <= bandCount; i++)
+            bandEdges[i] = r * (i / (double)bandCount);
+
+        // Wavy radius of edge index at angle theta (gentle, low-amplitude
+        // turbulence so the boundaries only barely ripple).
+        double EdgeRadius(int edge, double theta)
         {
-            double tt = i / (double)(beltCount - 1);     // 0 = limb, 1 = pole
-            double br = r * (1.0 - tt * 0.86);           // shrinking radius
-            double s = 0.5 + 0.5 * Math.Sin(i * 2.0 + 0.6);
+            double baseR = bandEdges[edge];
+            double amp = size * 0.003 + size * 0.0015 * Hash01(edge * 3.3);
+            double w = baseR
+                + amp * Math.Sin(theta * 3 + edge * 1.7)
+                + amp * 0.5 * Math.Sin(theta * 7 - edge * 2.3)
+                + amp * 0.3 * Math.Sin(theta * 13 + edge * 0.9)
+                + amp * 0.25 * (Hash01(edge * 5.1 + Math.Floor(theta * 6)) - 0.5);
+            return Math.Clamp(w, 0, r);
+        }
+
+        const int beltSeg = 110;
+        for (int b = bandCount - 1; b >= 0; b--)        // outer (limb) first
+        {
+            double s = 0.5 + 0.5 * Math.Sin(b * 1.45 + 0.6);   // zone/belt alternation
             Color shade = s < 0.5
                 ? LerpColor(amberDark, amber, s * 2.0)
                 : LerpColor(amber, amberLight, (s - 0.5) * 2.0);
-            byte a = (byte)(70 + 80 * Math.Abs(Math.Sin(i * 1.4)));
-            var belt = new Ellipse
+            byte a = (byte)(70 + 28 * Math.Sin(b * 1.9));
+
+            var fig = new PathFigure { IsClosed = true };
+            for (int k = 0; k <= beltSeg; k++)          // outer edge (b+1)
             {
-                Width = br * 2,
-                Height = br * 2,
-                Stroke = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
-                StrokeThickness = Math.Max(2.0, size / beltCount * 0.62),
+                double th = k / (double)beltSeg * Math.PI * 2;
+                double rr = EdgeRadius(b + 1, th);
+                var p = new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr);
+                if (k == 0) fig.StartPoint = p;
+                else fig.Segments.Add(new LineSegment(p, false));
+            }
+            for (int k = beltSeg; k >= 0; k--)          // inner edge (b), reversed
+            {
+                double th = k / (double)beltSeg * Math.PI * 2;
+                double rr = EdgeRadius(b, th);
+                fig.Segments.Add(new LineSegment(
+                    new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr), false));
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            var band = new System.Windows.Shapes.Path
+            {
+                Fill = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
+                Data = geo,
                 IsHitTestVisible = false,
             };
-            Canvas.SetLeft(belt, r - br);
-            Canvas.SetTop(belt, r - br);
-            disc.Children.Add(belt);
+            disc.Children.Add(band);
         }
 
-        // Off-centre storm ovals so the rotation is clearly visible.
-        (double fr, double ang, double fw, double fh, Color c, byte a)[] storms =
+        // Fine zonal wind streaks: thin arcs following the azimuthal flow with a
+        // small radial wiggle so they read as turbulent jets, not clean lines.
+        const int windStreaks = 30;
+        for (int sN = 0; sN < windStreaks; sN++)
         {
-            (0.52, 0.4, 0.22, 0.13, Lighten(amber, 0.22), 150),
-            (0.40, 2.3, 0.16, 0.10, Darken(amber, 0.22), 140),
-            (0.62, 4.1, 0.13, 0.08, amberLight, 120),
-            (0.30, 5.2, 0.12, 0.08, Darken(amber, 0.16), 130),
-        };
-        for (int si = 0; si < storms.Length; si++)
-        {
-            var st = storms[si];
-            double cx = r + Math.Cos(st.ang) * r * st.fr;
-            double cy = r + Math.Sin(st.ang) * r * st.fr;
-            double w = size * st.fw;
-            double h = size * st.fh;
-            var storm = new Ellipse
+            double rad0 = r * (0.14 + 0.82 * Hash01(sN * 1.7 + 0.3));
+            double a0 = Hash01(sN * 2.9) * Math.PI * 2;
+            double arc = 0.5 + 1.9 * Hash01(sN * 4.1);             // radians spanned
+            bool light = Hash01(sN * 3.7) > 0.5;
+            Color sc = light ? Lighten(amber, 0.30) : Darken(amber, 0.30);
+            byte sa = (byte)(24 + 38 * Hash01(sN * 6.1));
+            double amp = size * (0.004 + 0.011 * Hash01(sN * 5.3));
+
+            var fig = new PathFigure { IsClosed = false };
+            const int ss = 44;
+            for (int k = 0; k <= ss; k++)
             {
-                Width = w,
-                Height = h,
-                Fill = new SolidColorBrush(Color.FromArgb(st.a, st.c.R, st.c.G, st.c.B)),
+                double th = a0 + arc * (k / (double)ss);
+                double rr = rad0 + amp * Math.Sin(th * 9 + sN) + amp * 0.5 * Math.Sin(th * 17 - sN);
+                var p = new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr);
+                if (k == 0) fig.StartPoint = p;
+                else fig.Segments.Add(new LineSegment(p, true));
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            var streak = new System.Windows.Shapes.Path
+            {
+                Stroke = new SolidColorBrush(Color.FromArgb(sa, sc.R, sc.G, sc.B)),
+                StrokeThickness = Math.Max(1.0, size * (0.005 + 0.009 * Hash01(sN * 7.7))),
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Data = geo,
                 IsHitTestVisible = false,
             };
-            Canvas.SetLeft(storm, cx - w / 2);
-            Canvas.SetTop(storm, cy - h / 2);
-
-            // Tiny independent libration about the pole so the storms drift in
-            // phase relative to the overall self-rotation, making the spin look
-            // organic rather than perfectly rigid (option: storm phase drift).
-            double ox = r - cx + w / 2;
-            double oy = r - cy + h / 2;
-            var drift = new RotateTransform(0, ox, oy);
-            storm.RenderTransform = drift;
-            double amp = 2.5 + 1.6 * si;
-            var da = new DoubleAnimation(-amp, amp, TimeSpan.FromSeconds(6.0 + 2.0 * si))
-            {
-                AutoReverse = true,
-                RepeatBehavior = RepeatBehavior.Forever,
-                BeginTime = TimeSpan.FromSeconds(0.7 * si),
-            };
-            drift.BeginAnimation(RotateTransform.AngleProperty, da);
-
-            disc.Children.Add(storm);
+            disc.Children.Add(streak);
         }
 
-        // --- Cloud wisps: a few large, very soft translucent ovals that give an
-        // atmospheric, hazy depth over the latitude belts. Soft edges come from a
-        // radial gradient (not a live BlurEffect) so the perpetually spinning
-        // disc isn't re-rasterised through a blur pipeline every frame.
-        (double fr, double ang, double fw, double fh, double rot, bool light)[] clouds =
-        {
-            (0.46, 1.0, 0.64, 0.34, 18, true),
-            (0.50, 3.4, 0.56, 0.30, -32, false),
-            (0.34, 5.0, 0.48, 0.26, 60, true),
-            (0.58, 2.0, 0.42, 0.22, -10, false),
-            (0.20, 0.2, 0.40, 0.24, 40, false),
-        };
-        foreach (var cl in clouds)
-        {
-            double cx = r + Math.Cos(cl.ang) * r * cl.fr;
-            double cy = r + Math.Sin(cl.ang) * r * cl.fr;
-            double w = size * cl.fw;
-            double h = size * cl.fh;
-            Color cc = cl.light ? amberLight : amberDark;
-            var cloud = new Ellipse
-            {
-                Width = w,
-                Height = h,
-                IsHitTestVisible = false,
-                RenderTransformOrigin = new Point(0.5, 0.5),
-                RenderTransform = new RotateTransform(cl.rot),
-                Fill = new RadialGradientBrush
-                {
-                    GradientStops =
-                    {
-                        new GradientStop(Color.FromArgb((byte)(cl.light ? 46 : 56), cc.R, cc.G, cc.B), 0.0),
-                        new GradientStop(Color.FromArgb((byte)(cl.light ? 22 : 28), cc.R, cc.G, cc.B), 0.55),
-                        new GradientStop(Color.FromArgb(0, cc.R, cc.G, cc.B), 1.0),
-                    },
-                },
-            };
-            Canvas.SetLeft(cloud, cx - w / 2);
-            Canvas.SetTop(cloud, cy - h / 2);
-            disc.Children.Add(cloud);
-        }
-
-        // --- Granular speckle: many tiny deterministic dots scattered across the
-        // disc so the surface reads as mottled and textured rather than glassy.
-        // Positions use Hash01 (stable while spinning); sqrt radius keeps the
-        // scatter uniform across the area instead of clumping at the centre.
-        int grains = (int)Math.Clamp(size * 1.8, 140, 270);
-        for (int g = 0; g < grains; g++)
-        {
-            double h1 = Hash01(g * 1.37 + 0.5);
-            double h2 = Hash01(g * 2.91 + 1.7);
-            double h3 = Hash01(g * 4.13 + 3.2);
-            double rad = r * 0.97 * Math.Sqrt(h1);
-            double ang = h2 * Math.PI * 2;
-            double gx = r + Math.Cos(ang) * rad;
-            double gy = r + Math.Sin(ang) * rad;
-            double gs = 1.8 + h3 * 1.8;             // grain diameter ~2.7px
-            bool bright = h3 > 0.5;
-            byte ga = (byte)(bright ? 32 + 48 * h1 : 38 + 58 * h2);
-            Color gc = bright ? amberLight : amberDark;
-            var grain = new Ellipse
-            {
-                Width = gs,
-                Height = gs,
-                Fill = new SolidColorBrush(Color.FromArgb(ga, gc.R, gc.G, gc.B)),
-                IsHitTestVisible = false,
-            };
-            Canvas.SetLeft(grain, gx - gs / 2);
-            Canvas.SetTop(grain, gy - gs / 2);
-            disc.Children.Add(grain);
-        }
 
         // Saturn's north-polar hexagon at the centre — a hallmark of the
-        // top-down view, and a clear visual anchor for the spin.
-        var hex = new System.Windows.Shapes.Polygon
-        {
-            Stroke = new SolidColorBrush(Color.FromArgb(170, 0xF6, 0xE6, 0xBE)),
-            StrokeThickness = Math.Max(1.0, size * 0.012),
-            Fill = new SolidColorBrush(Color.FromArgb(60, 0x9A, 0x78, 0x44)),
-            IsHitTestVisible = false,
-        };
+        // top-down view, and a clear visual anchor for the spin. The interior
+        // carries the same gas-giant turbulence (wavy bands + wind streaks) as
+        // the globe, clipped to the hexagon outline.
         double hexR = r * 0.16;
+        var hexGeo = new PathGeometry();
+        var hexFig = new PathFigure { IsClosed = true };
         for (int k = 0; k < 6; k++)
         {
             double ang = -Math.PI / 2 + k * Math.PI / 3;
-            hex.Points.Add(new Point(r + Math.Cos(ang) * hexR, r + Math.Sin(ang) * hexR));
+            var p = new Point(r + Math.Cos(ang) * hexR, r + Math.Sin(ang) * hexR);
+            if (k == 0) hexFig.StartPoint = p;
+            else hexFig.Segments.Add(new LineSegment(p, true));
         }
+        hexGeo.Figures.Add(hexFig);
+
+        // Base hexagon: a brighter blue-grey storm so it stands out from the
+        // amber bands without being a dark hole.
+        Color hexBase = Color.FromRgb(0x5C, 0x6B, 0x7E);
+        Color hexLight = Color.FromRgb(0x86, 0x97, 0xAC);
+        Color hexDark = Color.FromRgb(0x3C, 0x47, 0x57);
+        var hex = new System.Windows.Shapes.Path
+        {
+            Stroke = new SolidColorBrush(Color.FromArgb(180, 0x9A, 0xAB, 0xC0)),
+            StrokeThickness = Math.Max(1.0, size * 0.012),
+            Fill = new SolidColorBrush(hexBase),
+            Data = hexGeo,
+            IsHitTestVisible = false,
+        };
         disc.Children.Add(hex);
+
+        // Turbulence inside the hexagon, clipped to its outline.
+        var hexInner = new Canvas { IsHitTestVisible = false, Clip = hexGeo };
+
+        // Wavy concentric bands within the polar storm.
+        double HexEdge(double baseR, double theta, double seed)
+        {
+            double amp = hexR * 0.10;
+            return Math.Clamp(baseR
+                + amp * Math.Sin(theta * 3 + seed * 1.7)
+                + amp * 0.6 * Math.Sin(theta * 6 - seed * 2.1)
+                + amp * 0.4 * (Hash01(seed * 5.1 + Math.Floor(theta * 5)) - 0.5), 0, hexR);
+        }
+        const int hexBands = 4;
+        for (int b = hexBands; b >= 1; b--)
+        {
+            double baseOut = hexR * (b / (double)hexBands);
+            double baseIn = hexR * ((b - 1) / (double)hexBands);
+            double s = 0.5 + 0.5 * Math.Sin(b * 1.7);
+            Color shade = LerpColor(hexDark, hexLight, s);
+            byte a = (byte)(120 + 70 * Math.Sin(b * 1.3));
+            var fig = new PathFigure { IsClosed = true };
+            const int seg = 70;
+            for (int k = 0; k <= seg; k++)
+            {
+                double th = k / (double)seg * Math.PI * 2;
+                double rr = HexEdge(baseOut, th, b + 1);
+                var p = new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr);
+                if (k == 0) fig.StartPoint = p;
+                else fig.Segments.Add(new LineSegment(p, false));
+            }
+            for (int k = seg; k >= 0; k--)
+            {
+                double th = k / (double)seg * Math.PI * 2;
+                double rr = HexEdge(baseIn, th, b);
+                fig.Segments.Add(new LineSegment(
+                    new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr), false));
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            hexInner.Children.Add(new System.Windows.Shapes.Path
+            {
+                Fill = new SolidColorBrush(Color.FromArgb(a, shade.R, shade.G, shade.B)),
+                Data = geo,
+                IsHitTestVisible = false,
+            });
+        }
+
+        // Wind streaks swirling inside the polar storm.
+        for (int sN = 0; sN < 10; sN++)
+        {
+            double rad0 = hexR * (0.18 + 0.78 * Hash01(sN * 1.7 + 9.1));
+            double a0 = Hash01(sN * 2.9 + 3.3) * Math.PI * 2;
+            double arc = 0.6 + 2.2 * Hash01(sN * 4.1 + 1.2);
+            bool light = Hash01(sN * 3.7 + 2.0) > 0.5;
+            Color sc = light ? hexLight : hexDark;
+            byte sa = (byte)(40 + 50 * Hash01(sN * 6.1));
+            double amp = hexR * (0.04 + 0.10 * Hash01(sN * 5.3));
+            var fig = new PathFigure { IsClosed = false };
+            const int ss = 40;
+            for (int k = 0; k <= ss; k++)
+            {
+                double th = a0 + arc * (k / (double)ss);
+                double rr = rad0 + amp * Math.Sin(th * 7 + sN) + amp * 0.5 * Math.Sin(th * 13 - sN);
+                var p = new Point(r + Math.Cos(th) * rr, r + Math.Sin(th) * rr);
+                if (k == 0) fig.StartPoint = p;
+                else fig.Segments.Add(new LineSegment(p, true));
+            }
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            hexInner.Children.Add(new System.Windows.Shapes.Path
+            {
+                Stroke = new SolidColorBrush(Color.FromArgb(sa, sc.R, sc.G, sc.B)),
+                StrokeThickness = Math.Max(1.0, hexR * 0.05),
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Data = geo,
+                IsHitTestVisible = false,
+            });
+        }
+        disc.Children.Add(hexInner);
+
 
         globe.Child = disc;
         root.Children.Add(globe);
@@ -1036,43 +1205,31 @@ public partial class RadialWindow : Window
         };
         root.Children.Add(limb);
 
-        // --- Frosted / matte sheen: a dense veil of very faint deterministic
-        // micro-dots over the whole sphere gives a subtle ground-glass texture
-        // without washing out the bands. Clipped to the globe circle so it never
-        // spills into the square corners.
-        var frost = new Canvas
+        // --- Matte sheen: a single soft, very faint light veil over the sphere
+        // gives a slightly matte (non-glossy) finish without the grainy frosted
+        // micro-dots. Clipped to the globe circle.
+        var matte = new Ellipse
         {
             Width = size,
             Height = size,
             IsHitTestVisible = false,
             Clip = new EllipseGeometry(new Point(r, r), r, r),
-        };
-        int frostDots = 150;
-        for (int f = 0; f < frostDots; f++)
-        {
-            double h1 = Hash01(f * 1.91 + 7.3);
-            double h2 = Hash01(f * 3.37 + 2.9);
-            double h3 = Hash01(f * 5.71 + 4.6);
-            double rad = r * 0.99 * Math.Sqrt(h1);
-            double ang = h2 * Math.PI * 2;
-            double fx = r + Math.Cos(ang) * rad;
-            double fy = r + Math.Sin(ang) * rad;
-            double fs = 0.6 + h3 * 1.3;             // sub-pixel to ~2px
-            bool light = h3 > 0.5;
-            byte fa = (byte)(4 + 9 * h2);           // even fainter sheen
-            byte v = (byte)(light ? 0xF2 : 0x20);
-            var dot = new Ellipse
+            Fill = new RadialGradientBrush
             {
-                Width = fs,
-                Height = fs,
-                Fill = new SolidColorBrush(Color.FromArgb(fa, v, (byte)(light ? 0xE0 : 0x16), (byte)(light ? 0xBE : 0x06))),
-                IsHitTestVisible = false,
-            };
-            Canvas.SetLeft(dot, fx - fs / 2);
-            Canvas.SetTop(dot, fy - fs / 2);
-            frost.Children.Add(dot);
-        }
-        root.Children.Add(frost);
+                GradientOrigin = new Point(0.42, 0.40),
+                Center = new Point(0.42, 0.40),
+                RadiusX = 0.75,
+                RadiusY = 0.75,
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(20, 0xFF, 0xF4, 0xDA), 0.0),
+                    new GradientStop(Color.FromArgb(10, 0xFF, 0xF4, 0xDA), 0.45),
+                    new GradientStop(Color.FromArgb(0, 0xFF, 0xF4, 0xDA), 1.0),
+                },
+            },
+        };
+        root.Children.Add(matte);
+
 
         // Terminator shadow: darken the lower-right to give a spherical feel.
         var shadow = new Ellipse
