@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
-using DesktopPanel.Models;
-using DesktopPanel.Services;
+using Polaris.Models;
+using Polaris.Services;
 
-namespace DesktopPanel.Views;
+namespace Polaris.Views;
 
 public partial class SettingsWindow : Window
 {

@@ -1,17 +1,17 @@
 using System;
 using System.IO;
 using System.Text.Json;
-using DesktopPanel.Models;
+using Polaris.Models;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
-/// Loads and saves <see cref="AppConfig"/> to %AppData%\DesktopPanel\config.json.
+/// Loads and saves <see cref="AppConfig"/> to %AppData%\Polaris\config.json.
 /// </summary>
 public static class ConfigStore
 {
     private static readonly string Dir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DesktopPanel");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Polaris");
 
     private static readonly string FilePath = Path.Combine(Dir, "config.json");
     private static readonly string BackupPath = FilePath + ".bak";

@@ -5,7 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 
-namespace DesktopPanel.Views;
+namespace Polaris.Views;
 
 // Saturn theme: the ring system (disc, particle ring zones, revolution cues,
 // shepherd moons and the starfield). The centre planet lives in

@@ -6,7 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using Drawing = System.Drawing;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// Extracts an application icon as a WPF <see cref="BitmapSource"/>.

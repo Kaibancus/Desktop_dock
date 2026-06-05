@@ -2,7 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Windows.Threading;
 
-namespace DesktopPanel.Interop;
+namespace Polaris.Interop;
 
 /// <summary>
 /// Low-level keyboard hook (WH_KEYBOARD_LL) that detects press and release of a

@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace DesktopPanel.Models;
+namespace Polaris.Models;
 
 /// <summary>
 /// Root configuration object persisted to disk as JSON.

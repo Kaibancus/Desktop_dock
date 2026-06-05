@@ -8,8 +8,8 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <AssemblyName>DesktopPanel</AssemblyName>
-    <RootNamespace>DesktopPanel</RootNamespace>
+    <AssemblyName>Polaris</AssemblyName>
+    <RootNamespace>Polaris</RootNamespace>
     <Version>1.0.0</Version>
     <NoWarn>WFO0003</NoWarn>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>

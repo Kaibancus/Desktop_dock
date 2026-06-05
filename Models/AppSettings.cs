@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace DesktopPanel.Models;
+namespace Polaris.Models;
 
 /// <summary>
 /// User-configurable appearance and behavior settings.

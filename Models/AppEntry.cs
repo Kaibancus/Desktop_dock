@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace DesktopPanel.Models;
+namespace Polaris.Models;
 
 /// <summary>
 /// One launchable application entry shown on the radial panel.

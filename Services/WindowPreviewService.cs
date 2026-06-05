@@ -9,7 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using Drawing = System.Drawing;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>One top-level window belonging to an application.</summary>
 public sealed class WindowPreview

@@ -2,9 +2,9 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using DesktopPanel.Services;
+using Polaris.Services;
 
-namespace DesktopPanel.Views;
+namespace Polaris.Views;
 
 // Non-Saturn theme rendering: the translucent "liquid glass" panel and the
 // minimal centre button used by plain grid themes.

@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// Detects whether the executable behind an <see cref="Models.AppEntry"/> is

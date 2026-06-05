@@ -2,7 +2,7 @@ using System;
 using System.Diagnostics;
 using Microsoft.Win32;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// Manages the "run at Windows startup" registry entry under
@@ -11,7 +11,7 @@ namespace DesktopPanel.Services;
 public static class StartupManager
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string ValueName = "DesktopPanel";
+    private const string ValueName = "Polaris";
 
     public static bool IsEnabled()
     {

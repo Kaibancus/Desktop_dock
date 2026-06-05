@@ -6,7 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 
-namespace DesktopPanel.Views;
+namespace Polaris.Views;
 
 // Saturn theme: the centre planet button (top-down globe with gas-giant
 // banding, the polar hexagon storm, spherical shading and the idle/hover spin).

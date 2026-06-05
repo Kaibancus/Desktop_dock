@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Media;
-using DesktopPanel.Models;
+using Polaris.Models;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// A panel theme bundles together the icon <b>layout</b> and the panel

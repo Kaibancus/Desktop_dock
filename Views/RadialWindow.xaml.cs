@@ -8,10 +8,10 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
-using DesktopPanel.Models;
-using DesktopPanel.Services;
+using Polaris.Models;
+using Polaris.Services;
 
-namespace DesktopPanel.Views;
+namespace Polaris.Views;
 
 /// <summary>
 /// Transparent, top-most radial launcher overlay. Shows app icons on concentric
@@ -1256,7 +1256,7 @@ public partial class RadialWindow : Window
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"无法打开 {entry.Name}:\n{ex.Message}", "DesktopPanel",
+                MessageBox.Show($"无法打开 {entry.Name}:\n{ex.Message}", "Polaris",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             return;
@@ -1288,7 +1288,7 @@ public partial class RadialWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"无法启动 {entry.Name}:\n{ex.Message}", "DesktopPanel",
+            MessageBox.Show($"无法启动 {entry.Name}:\n{ex.Message}", "Polaris",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }

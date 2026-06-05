@@ -2,9 +2,9 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using DesktopPanel.Models;
+using Polaris.Models;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// Builds an <see cref="AppEntry"/> from a dropped file path. Resolves

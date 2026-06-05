@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
 # Stop any running instance so the output file is not locked
-Get-Process DesktopPanel -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process Polaris -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 
 dotnet publish -c Release -r win-x64 `
@@ -13,7 +13,7 @@ dotnet publish -c Release -r win-x64 `
   -p:PublishReadyToRun=true `
   -o publish-fd
 
-$exe = Join-Path $PSScriptRoot 'publish-fd\DesktopPanel.exe'
+$exe = Join-Path $PSScriptRoot 'publish-fd\Polaris.exe'
 if (Test-Path $exe) {
     $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
     Write-Host "Published: $exe ($sizeMB MB)" -ForegroundColor Green

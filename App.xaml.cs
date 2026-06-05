@@ -3,14 +3,14 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
-using DesktopPanel.Interop;
-using DesktopPanel.Models;
-using DesktopPanel.Services;
-using DesktopPanel.Views;
+using Polaris.Interop;
+using Polaris.Models;
+using Polaris.Services;
+using Polaris.Views;
 using Forms = System.Windows.Forms;
 using Drawing = System.Drawing;
 
-namespace DesktopPanel;
+namespace Polaris;
 
 public partial class App : Application
 {
@@ -44,14 +44,14 @@ public partial class App : Application
             typeof(System.Windows.Media.Animation.Timeline),
             new FrameworkPropertyMetadata(120));
 
-        // Single-instance guard: if another DesktopPanel is already running,
+        // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.
-        _singleInstanceMutex = new Mutex(true, @"Global\DesktopPanel_SingleInstance", out bool createdNew);
+        _singleInstanceMutex = new Mutex(true, @"Global\Polaris_SingleInstance", out bool createdNew);
         if (!createdNew)
         {
             Forms.MessageBox.Show(
-                "DesktopPanel 已在运行（查看系统托盘图标）。",
-                "DesktopPanel",
+                "Polaris 已在运行（查看系统托盘图标）。",
+                "Polaris",
                 Forms.MessageBoxButtons.OK,
                 Forms.MessageBoxIcon.Information);
             Shutdown();
@@ -223,7 +223,7 @@ public partial class App : Application
         {
             Icon = LoadAppIcon(),
             Visible = true,
-            Text = "DesktopPanel — 长按呼出键临时显示 / 长按Caps固定显示（Esc关闭）",
+            Text = "Polaris — 长按呼出键临时显示 / 长按Caps固定显示（Esc关闭）",
             ContextMenuStrip = menu,
         };
         _tray.DoubleClick += (_, _) => OpenSettings();
@@ -309,9 +309,9 @@ public partial class App : Application
         try
         {
             Forms.MessageBox.Show(
-                "DesktopPanel 遇到一个错误，但仍在运行。\n" +
+                "Polaris 遇到一个错误，但仍在运行。\n" +
                 "详情已记录到日志：\n" + LogPath + "\n\n" + ex.Message,
-                "DesktopPanel",
+                "Polaris",
                 Forms.MessageBoxButtons.OK,
                 Forms.MessageBoxIcon.Warning);
         }
@@ -323,7 +323,7 @@ public partial class App : Application
 
     private static readonly string LogPath = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "DesktopPanel", "errors.log");
+        "Polaris", "errors.log");
 
     private static void LogException(string source, Exception ex)
     {

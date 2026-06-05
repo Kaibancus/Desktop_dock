@@ -5,9 +5,9 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
-using DesktopPanel.Models;
+using Polaris.Models;
 
-namespace DesktopPanel.Services;
+namespace Polaris.Services;
 
 /// <summary>
 /// Supports adding Windows shell-namespace objects (This PC, Recycle Bin,
