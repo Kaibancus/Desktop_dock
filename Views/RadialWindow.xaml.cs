@@ -505,7 +505,7 @@ public partial class RadialWindow : Window
         double left = _center.X - w / 2.0;
         double top = _center.Y - h / 2.0;
 
-        double opacity = Math.Clamp(_config.Settings.PanelOpacity, 0.0, 1.0);
+        double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
         const double radius = 28;
 
         // Base frosted fill: a convex "lens" gradient — bright at the very top,
@@ -803,7 +803,7 @@ public partial class RadialWindow : Window
         {
             Width = d,
             Height = d * RingTiltY,
-            Opacity = Math.Clamp(_config.Settings.PanelOpacity, 0.0, 1.0),
+            Opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0),
             Fill = new RadialGradientBrush
             {
                 GradientOrigin = new Point(0.5, 0.46),

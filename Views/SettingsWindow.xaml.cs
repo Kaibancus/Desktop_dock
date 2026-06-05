@@ -53,7 +53,7 @@ public partial class SettingsWindow : Window
     private void LoadSettingsIntoUi()
     {
         var s = _config.Settings;
-        OpacitySlider.Value = s.PanelOpacity;
+        OpacitySlider.Value = s.PanelTransparency;
         IconSizeSlider.Value = s.IconSize;
         StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
 
@@ -114,7 +114,7 @@ public partial class SettingsWindow : Window
     private void CommitSettings()
     {
         var s = _config.Settings;
-        s.PanelOpacity = OpacitySlider.Value;
+        s.PanelTransparency = OpacitySlider.Value;
         s.IconSize = IconSizeSlider.Value;
         _persist();
         Changed?.Invoke();
