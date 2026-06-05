@@ -53,7 +53,7 @@ public partial class SettingsWindow : Window
     private void LoadSettingsIntoUi()
     {
         var s = _config.Settings;
-        OpacitySlider.Value = s.PanelTransparency;
+        TransparencySlider.Value = s.PanelTransparency;
         IconSizeSlider.Value = s.IconSize;
         StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
 
@@ -114,7 +114,7 @@ public partial class SettingsWindow : Window
     private void CommitSettings()
     {
         var s = _config.Settings;
-        s.PanelTransparency = OpacitySlider.Value;
+        s.PanelTransparency = TransparencySlider.Value;
         s.IconSize = IconSizeSlider.Value;
         // Remember these values for the current theme so switching back restores them.
         ThemeRegistry.SaveAppearance(s);
@@ -252,7 +252,7 @@ public partial class SettingsWindow : Window
 
             // Reflect the loaded values in the sliders without re-committing.
             _loaded = false;
-            OpacitySlider.Value = s.PanelTransparency;
+            TransparencySlider.Value = s.PanelTransparency;
             IconSizeSlider.Value = s.IconSize;
             _loaded = true;
 

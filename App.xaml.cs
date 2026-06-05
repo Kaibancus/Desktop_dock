@@ -29,6 +29,13 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Global safety net: a tray-resident app must survive an unexpected
+        // exception on the UI thread instead of vanishing silently. Log the
+        // fault, tell the user, and keep running where it is safe to do so.
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
         // Render WPF animations at a high steady frame rate. The default
         // metadata caps interpolation sampling; bumping DesiredFrameRate
         // globally makes short transitions (hover scale, neighbour spread)
@@ -91,7 +98,41 @@ public partial class App : Application
         _hook.Start();
     }
 
-    private void Persist() => ConfigStore.Save(_config);
+    private System.Windows.Threading.DispatcherTimer? _persistTimer;
+
+    /// <summary>
+    /// Coalesces rapid configuration changes (dragging a slider, reordering
+    /// icons) into a single disk write ~300 ms after the last change, instead
+    /// of serializing the whole config on every event. Pending writes are
+    /// flushed on exit via <see cref="FlushPersist"/>.
+    /// </summary>
+    private void Persist()
+    {
+        if (_persistTimer == null)
+        {
+            _persistTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(300),
+            };
+            _persistTimer.Tick += (_, _) =>
+            {
+                _persistTimer!.Stop();
+                ConfigStore.Save(_config);
+            };
+        }
+        _persistTimer.Stop();
+        _persistTimer.Start();
+    }
+
+    /// <summary>Writes any pending debounced config change immediately.</summary>
+    private void FlushPersist()
+    {
+        if (_persistTimer is { IsEnabled: true })
+        {
+            _persistTimer.Stop();
+            ConfigStore.Save(_config);
+        }
+    }
 
     /// <summary>
     /// Dedicated global hotkeys for the pinned (drag-to-add) panel:
@@ -208,6 +249,7 @@ public partial class App : Application
 
     private void ExitApp()
     {
+        FlushPersist();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
@@ -218,11 +260,84 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        FlushPersist();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();
         _escHook?.Dispose();
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
+    }
+
+    // ---- Global exception handling ---------------------------------------
+
+    private void OnDispatcherUnhandledException(object sender,
+        DispatcherUnhandledExceptionEventArgs e)
+    {
+        LogException("UI", e.Exception);
+        // The UI thread can usually keep running after a handled fault; mark it
+        // handled so the whole tray app does not terminate over one bad event.
+        e.Handled = true;
+        ShowFaultNotice(e.Exception);
+    }
+
+    private void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        // Background/non-UI thread fault. The runtime tears down the process when
+        // IsTerminating is true; we can only log here.
+        if (e.ExceptionObject is Exception ex)
+            LogException("Domain", ex);
+    }
+
+    private void OnUnobservedTaskException(object? sender,
+        System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
+    {
+        LogException("Task", e.Exception);
+        // Prevent the unobserved exception from escalating to a process kill.
+        e.SetObserved();
+    }
+
+    private static bool _faultNoticeShown;
+
+    /// <summary>Shows a single, non-fatal fault notice (only once per session so
+    /// a repeating fault cannot spam the user with dialogs).</summary>
+    private static void ShowFaultNotice(Exception ex)
+    {
+        if (_faultNoticeShown)
+            return;
+        _faultNoticeShown = true;
+        try
+        {
+            Forms.MessageBox.Show(
+                "DesktopPanel 遇到一个错误，但仍在运行。\n" +
+                "详情已记录到日志：\n" + LogPath + "\n\n" + ex.Message,
+                "DesktopPanel",
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Warning);
+        }
+        catch
+        {
+            // Never let the notice itself throw.
+        }
+    }
+
+    private static readonly string LogPath = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "DesktopPanel", "errors.log");
+
+    private static void LogException(string source, Exception ex)
+    {
+        try
+        {
+            var dir = System.IO.Path.GetDirectoryName(LogPath);
+            if (!string.IsNullOrEmpty(dir))
+                System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(LogPath,
+                $"[{DateTime.Now:o}] ({source}) {ex}\n\n");
+        }
+        catch
+        {
+            // Logging must never throw.
+        }
     }
 }

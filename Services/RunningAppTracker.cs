@@ -53,14 +53,28 @@ public static class RunningAppTracker
     }
 
     /// <summary>
-    /// Computes, on the calling (ideally background) thread, the set of process
-    /// base-names that currently own a visible main window. Callers can then test
-    /// each entry cheaply with <see cref="IsRunningByName"/> without enumerating
-    /// the process list once per icon on the UI thread.
+    /// Snapshot of the processes that currently own a visible main window:
+    /// full executable paths where the module path is readable, plus the
+    /// base-names of the remaining processes whose path could not be read
+    /// (e.g. elevated or cross-architecture processes).
     /// </summary>
-    public static HashSet<string> SnapshotRunningWindowNames()
+    public sealed class RunningSnapshot
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> Paths { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> NamesWithoutPath { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Computes, on the calling (ideally background) thread, a snapshot of the
+    /// processes that currently own a visible main window. Recording full
+    /// executable paths (rather than base-names only) prevents two different
+    /// programs that share a base name from being mistaken for one another.
+    /// </summary>
+    public static RunningSnapshot SnapshotRunning()
+    {
+        var snapshot = new RunningSnapshot();
         Process[] all;
         try
         {
@@ -68,15 +82,30 @@ public static class RunningAppTracker
         }
         catch
         {
-            return names;
+            return snapshot;
         }
 
         foreach (var p in all)
         {
             try
             {
-                if (p.MainWindowHandle != IntPtr.Zero)
-                    names.Add(p.ProcessName);
+                if (p.MainWindowHandle == IntPtr.Zero)
+                    continue;
+
+                string? modulePath = null;
+                try
+                {
+                    modulePath = p.MainModule?.FileName;
+                }
+                catch
+                {
+                    // Access denied / 32-vs-64 — fall back to a name match.
+                }
+
+                if (!string.IsNullOrEmpty(modulePath))
+                    snapshot.Paths.Add(Path.GetFullPath(modulePath));
+                else
+                    snapshot.NamesWithoutPath.Add(p.ProcessName);
             }
             catch
             {
@@ -87,18 +116,34 @@ public static class RunningAppTracker
                 p.Dispose();
             }
         }
-        return names;
+        return snapshot;
     }
 
-    /// <summary>Tests <paramref name="exePath"/> against a name snapshot.</summary>
-    public static bool IsRunningByName(string exePath, HashSet<string> runningNames)
+    /// <summary>
+    /// Tests <paramref name="exePath"/> against a running snapshot. Matches on
+    /// the full executable path when available, and only falls back to a
+    /// base-name match for processes whose path could not be read — so a
+    /// same-named program at a different path is not reported as running.
+    /// </summary>
+    public static bool IsRunningInSnapshot(string exePath, RunningSnapshot snapshot)
     {
-        if (string.IsNullOrWhiteSpace(exePath) || runningNames.Count == 0)
+        if (string.IsNullOrWhiteSpace(exePath) || snapshot == null)
             return false;
         try
         {
+            string full;
+            try { full = Path.GetFullPath(exePath); }
+            catch { full = exePath; }
+
+            if (snapshot.Paths.Contains(full))
+                return true;
+
+            if (snapshot.NamesWithoutPath.Count == 0)
+                return false;
+
             string name = Path.GetFileNameWithoutExtension(exePath);
-            return !string.IsNullOrEmpty(name) && runningNames.Contains(name);
+            return !string.IsNullOrEmpty(name)
+                && snapshot.NamesWithoutPath.Contains(name);
         }
         catch
         {
