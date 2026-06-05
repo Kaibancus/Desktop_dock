@@ -2366,9 +2366,13 @@ public partial class RadialWindow : Window
         double s = el is RadialIcon ri ? ri.IconSize : _config.Settings.IconSize;
         double left = center.X - s / 2;
         double top = center.Y - s / 2;
-        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var la = new DoubleAnimation(left, TimeSpan.FromMilliseconds(130)) { EasingFunction = ease };
-        var ta = new DoubleAnimation(top, TimeSpan.FromMilliseconds(130)) { EasingFunction = ease };
+        // A longer, gently overshooting glide reads as more "elegant" than a
+        // quick snap. BackEase eases in and out with a soft settle at the end;
+        // the duration (not the frame rate) is what sets the perceived pace.
+        var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.18 };
+        var dur = TimeSpan.FromMilliseconds(340);
+        var la = new DoubleAnimation(left, dur) { EasingFunction = ease };
+        var ta = new DoubleAnimation(top, dur) { EasingFunction = ease };
         el.BeginAnimation(Canvas.LeftProperty, la);
         el.BeginAnimation(Canvas.TopProperty, ta);
     }
