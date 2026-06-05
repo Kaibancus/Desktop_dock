@@ -28,4 +28,13 @@ public sealed class AppEntry
     [JsonIgnore]
     public string EffectiveIconSource =>
         string.IsNullOrWhiteSpace(IconSource) ? Path : IconSource;
+
+    /// <summary>
+    /// True when <see cref="Path"/> is a shell-namespace token (This PC,
+    /// Recycle Bin, etc.) rather than a file-system path.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsShellItem =>
+        Path.StartsWith("::{", System.StringComparison.Ordinal) ||
+        Path.StartsWith("shell:", System.StringComparison.OrdinalIgnoreCase);
 }

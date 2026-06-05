@@ -20,6 +20,10 @@ public static class IconExtractor
         if (string.IsNullOrWhiteSpace(path))
             return null;
 
+        // Virtual shell objects (This PC, Recycle Bin…) have no file path.
+        if (ShellNamespace.IsShellToken(path))
+            return ShellNamespace.GetIcon(path);
+
         Drawing.Icon? icon = null;
         try
         {

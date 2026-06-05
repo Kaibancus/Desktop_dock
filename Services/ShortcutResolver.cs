@@ -49,6 +49,31 @@ public static class ShortcutResolver
         link.GetPath(sb, sb.Capacity, ref data, SLGP_RAWPATH);
         string target = sb.ToString();
 
+        // A shortcut to a virtual shell object (This PC, Recycle Bin, Control
+        // Panel…) has no file-system target — GetPath returns empty — but it
+        // still carries an absolute PIDL we can turn into a "shell:::{CLSID}"
+        // token.
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            link.GetIDList(out IntPtr pidl);
+            if (pidl != IntPtr.Zero)
+            {
+                try
+                {
+                    var shellEntry = ShellNamespace.FromAbsolutePidl(pidl);
+                    if (shellEntry != null)
+                    {
+                        shellEntry.Name = Path.GetFileNameWithoutExtension(lnkPath);
+                        return shellEntry;
+                    }
+                }
+                finally
+                {
+                    ShellNamespace.FreePidl(pidl);
+                }
+            }
+        }
+
         sb.Clear();
         link.GetArguments(sb, sb.Capacity);
         string args = sb.ToString();

@@ -1800,7 +1800,7 @@ public partial class RadialWindow : Window
 
     private void OnDragOverPanel(object sender, DragEventArgs e)
     {
-        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+        e.Effects = (e.Data.GetDataPresent(DataFormats.FileDrop) || ShellNamespace.HasShellItems(e.Data))
             ? DragDropEffects.Copy
             : DragDropEffects.None;
         e.Handled = true;
@@ -1808,26 +1808,35 @@ public partial class RadialWindow : Window
 
     private void OnDropPanel(object sender, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent(DataFormats.FileDrop))
+        var entries = new List<AppEntry>();
+
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            foreach (var f in (string[])e.Data.GetData(DataFormats.FileDrop))
+            {
+                var entry = ShortcutResolver.CreateEntry(f);
+                if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+                    entries.Add(entry);
+            }
+        }
+        if (ShellNamespace.HasShellItems(e.Data))
+            entries.AddRange(ShellNamespace.CreateEntries(e.Data));
+
+        if (entries.Count == 0)
             return;
 
-        var files = (string[])e.Data.GetData(DataFormats.FileDrop);
         bool added = false;
         bool rejected = false;
         int cap = _theme.MaxIcons;
-        foreach (var f in files)
+        foreach (var entry in entries)
         {
-            var entry = ShortcutResolver.CreateEntry(f);
-            if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+            if (_config.Apps.Count >= cap)
             {
-                if (_config.Apps.Count >= cap)
-                {
-                    rejected = true;
-                    continue;
-                }
-                _config.Apps.Add(entry);
-                added = true;
+                rejected = true;
+                continue;
             }
+            _config.Apps.Add(entry);
+            added = true;
         }
 
         if (added)
@@ -2429,6 +2438,21 @@ public partial class RadialWindow : Window
     private void Launch(AppEntry entry)
     {
         HidePanel();
+
+        // Shell-namespace objects (This PC, Recycle Bin…) open through explorer.
+        if (entry.IsShellItem)
+        {
+            try
+            {
+                ShellNamespace.Launch(entry.Path);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"无法打开 {entry.Name}:\n{ex.Message}", "DesktopPanel",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            return;
+        }
 
         // If the program is already running, bring its existing window to the
         // foreground instead of starting a second instance.

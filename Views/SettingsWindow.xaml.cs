@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -123,7 +124,7 @@ public partial class SettingsWindow : Window
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
-        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+        e.Effects = (e.Data.GetDataPresent(DataFormats.FileDrop) || ShellNamespace.HasShellItems(e.Data))
             ? DragDropEffects.Copy
             : DragDropEffects.None;
         e.Handled = true;
@@ -131,24 +132,29 @@ public partial class SettingsWindow : Window
 
     private void OnDropFiles(object sender, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent(DataFormats.FileDrop))
-            return;
+        var entries = new List<AppEntry>();
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            foreach (var f in (string[])e.Data.GetData(DataFormats.FileDrop))
+            {
+                var entry = ShortcutResolver.CreateEntry(f);
+                if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+                    entries.Add(entry);
+            }
+        }
+        if (ShellNamespace.HasShellItems(e.Data))
+            entries.AddRange(ShellNamespace.CreateEntries(e.Data));
 
-        var files = (string[])e.Data.GetData(DataFormats.FileDrop);
         int cap = ThemeRegistry.Get(_config.Settings.Theme).MaxIcons;
         bool rejected = false;
-        foreach (var f in files)
+        foreach (var entry in entries)
         {
-            var entry = ShortcutResolver.CreateEntry(f);
-            if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+            if (Apps.Count >= cap)
             {
-                if (Apps.Count >= cap)
-                {
-                    rejected = true;
-                    continue;
-                }
-                Apps.Add(entry);
+                rejected = true;
+                continue;
             }
+            Apps.Add(entry);
         }
         CommitApps();
         if (rejected)
