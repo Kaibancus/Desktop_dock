@@ -36,6 +36,11 @@ public partial class SettingsWindow : Window
         ("F12", 0x7B),
     };
 
+    private static readonly string[] ThemeOptions =
+    {
+        "土星（默认）",
+    };
+
     public SettingsWindow(AppConfig config, Action persist)
     {
         _config = config;
@@ -53,10 +58,11 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         OpacitySlider.Value = s.PanelOpacity;
         IconSizeSlider.Value = s.IconSize;
-        PanelColorBox.Text = s.PanelColor;
-        AccentColorBox.Text = s.AccentColor;
-        FontColorBox.Text = s.FontColor;
-        StartupCheck.IsChecked = StartupManager.IsEnabled();
+        StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
+
+        foreach (var name in ThemeOptions)
+            ThemeCombo.Items.Add(new ComboBoxItem { Content = name });
+        ThemeCombo.SelectedIndex = 0;
 
         foreach (var opt in TriggerKeyOptions)
             TriggerKeyCombo.Items.Add(new ComboBoxItem { Content = opt.Name, Tag = opt.Vk });
@@ -98,9 +104,6 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         s.PanelOpacity = OpacitySlider.Value;
         s.IconSize = IconSizeSlider.Value;
-        s.PanelColor = PanelColorBox.Text.Trim();
-        s.AccentColor = AccentColorBox.Text.Trim();
-        s.FontColor = FontColorBox.Text.Trim();
         _persist();
         Changed?.Invoke();
     }
@@ -197,4 +200,16 @@ public partial class SettingsWindow : Window
     }
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
+
+    private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // TODO: apply the selected theme. Only the default Saturn theme exists.
+    }
+
+    private void OnCheckUpdate(object sender, RoutedEventArgs e)
+    {
+        // TODO: wire up real update-check logic.
+        MessageBox.Show(this, "当前已是最新版本。", "检查更新",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 }

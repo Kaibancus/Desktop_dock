@@ -71,7 +71,7 @@
         <Canvas IsHitTestVisible="False">
             <Border x:Name="LabelChrome"
                     Opacity="0"
-                    Background="#801A1A1A"
+                    Background="#261A1A1A"
                     CornerRadius="7"
                     Padding="8,3"
                     Panel.ZIndex="50">

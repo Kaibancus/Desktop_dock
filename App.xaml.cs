@@ -53,6 +53,15 @@ public partial class App : Application
 
         _config = ConfigStore.Load();
 
+        // One-time migration: default "run at startup" to on for configs saved
+        // before this became the default. Subsequent user changes are honored.
+        if (!_config.Settings.StartupDefaultApplied)
+        {
+            _config.Settings.RunAtStartup = true;
+            _config.Settings.StartupDefaultApplied = true;
+            ConfigStore.Save(_config);
+        }
+
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 

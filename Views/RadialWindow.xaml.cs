@@ -44,7 +44,7 @@ public partial class RadialWindow : Window
     // seen in perspective (1.0 = top-down circle, smaller = more edge-on). The
     // planet body stays a circle (a sphere looks round from any angle); only
     // the flat ring plane and the icon orbits are foreshortened into ellipses.
-    private const double RingTiltY = 0.98;
+    private const double RingTiltY = 0.97;
 
     // Orbit-angle transforms. They no longer rotate the (now elliptical) ring
     // layers — spinning a concentric ellipse would make it tumble — instead
@@ -263,7 +263,7 @@ public partial class RadialWindow : Window
         // first: clearing snaps Opacity back to its base value (0, set in
         // ShowFaded), which would make the fade run 0->0 and the panel vanish.
         double from = Opacity;
-        var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(24));
+        var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(240));
         BeginAnimation(OpacityProperty, fade);
     }
 
@@ -434,12 +434,14 @@ public partial class RadialWindow : Window
         // RingStep) ride on the thin F ringlet.
 
         // Near-black disc background, foreshortened into an ellipse so it sits
-        // in the same tilted plane as the rings. Slightly translucent so the
-        // desktop shows through faintly.
+        // in the same tilted plane as the rings. The user-configurable
+        // "panel opacity" setting drives this disc's overall translucency so
+        // the desktop shows through more or less behind the Saturn system.
         var hit = new Ellipse
         {
             Width = d,
             Height = d * RingTiltY,
+            Opacity = Math.Clamp(_config.Settings.PanelOpacity, 0.0, 1.0),
             Fill = new RadialGradientBrush
             {
                 GradientOrigin = new Point(0.5, 0.46),
@@ -448,9 +450,9 @@ public partial class RadialWindow : Window
                 RadiusY = 0.5,
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0xF0, 0x05, 0x06, 0x0C), 0.0),
-                    new GradientStop(Color.FromArgb(0xEC, 0x02, 0x03, 0x07), 0.72),
-                    new GradientStop(Color.FromArgb(0xDA, 0, 0, 0), 1.0),
+                    new GradientStop(Color.FromArgb(0xFF, 0x05, 0x06, 0x0C), 0.0),
+                    new GradientStop(Color.FromArgb(0xFF, 0x02, 0x03, 0x07), 0.72),
+                    new GradientStop(Color.FromArgb(0xFF, 0, 0, 0), 1.0),
                 },
             },
         };
@@ -811,9 +813,9 @@ public partial class RadialWindow : Window
             Opacity = 0.55,
         };
 
-        Color amber = Color.FromRgb(0xD8, 0xB4, 0x76);
-        Color amberDark = Color.FromRgb(0x6E, 0x52, 0x2E);
-        Color amberLight = Color.FromRgb(0xF6, 0xE6, 0xBE);
+        Color amber = Color.FromRgb(0xE2, 0xBE, 0x82);
+        Color amberDark = Color.FromRgb(0x7A, 0x5C, 0x36);
+        Color amberLight = Color.FromRgb(0xFC, 0xEF, 0xCC);
 
         // Circular planet body with a clip so the bands stay inside the globe.
         var globe = new Border
@@ -923,6 +925,77 @@ public partial class RadialWindow : Window
             disc.Children.Add(storm);
         }
 
+        // --- Cloud wisps: a few large, very soft translucent ovals that give an
+        // atmospheric, hazy depth over the latitude belts. Soft edges come from a
+        // radial gradient (not a live BlurEffect) so the perpetually spinning
+        // disc isn't re-rasterised through a blur pipeline every frame.
+        (double fr, double ang, double fw, double fh, double rot, bool light)[] clouds =
+        {
+            (0.46, 1.0, 0.64, 0.34, 18, true),
+            (0.50, 3.4, 0.56, 0.30, -32, false),
+            (0.34, 5.0, 0.48, 0.26, 60, true),
+            (0.58, 2.0, 0.42, 0.22, -10, false),
+            (0.20, 0.2, 0.40, 0.24, 40, false),
+        };
+        foreach (var cl in clouds)
+        {
+            double cx = r + Math.Cos(cl.ang) * r * cl.fr;
+            double cy = r + Math.Sin(cl.ang) * r * cl.fr;
+            double w = size * cl.fw;
+            double h = size * cl.fh;
+            Color cc = cl.light ? amberLight : amberDark;
+            var cloud = new Ellipse
+            {
+                Width = w,
+                Height = h,
+                IsHitTestVisible = false,
+                RenderTransformOrigin = new Point(0.5, 0.5),
+                RenderTransform = new RotateTransform(cl.rot),
+                Fill = new RadialGradientBrush
+                {
+                    GradientStops =
+                    {
+                        new GradientStop(Color.FromArgb((byte)(cl.light ? 46 : 56), cc.R, cc.G, cc.B), 0.0),
+                        new GradientStop(Color.FromArgb((byte)(cl.light ? 22 : 28), cc.R, cc.G, cc.B), 0.55),
+                        new GradientStop(Color.FromArgb(0, cc.R, cc.G, cc.B), 1.0),
+                    },
+                },
+            };
+            Canvas.SetLeft(cloud, cx - w / 2);
+            Canvas.SetTop(cloud, cy - h / 2);
+            disc.Children.Add(cloud);
+        }
+
+        // --- Granular speckle: many tiny deterministic dots scattered across the
+        // disc so the surface reads as mottled and textured rather than glassy.
+        // Positions use Hash01 (stable while spinning); sqrt radius keeps the
+        // scatter uniform across the area instead of clumping at the centre.
+        int grains = (int)Math.Clamp(size * 1.8, 140, 270);
+        for (int g = 0; g < grains; g++)
+        {
+            double h1 = Hash01(g * 1.37 + 0.5);
+            double h2 = Hash01(g * 2.91 + 1.7);
+            double h3 = Hash01(g * 4.13 + 3.2);
+            double rad = r * 0.97 * Math.Sqrt(h1);
+            double ang = h2 * Math.PI * 2;
+            double gx = r + Math.Cos(ang) * rad;
+            double gy = r + Math.Sin(ang) * rad;
+            double gs = 1.8 + h3 * 1.8;             // grain diameter ~2.7px
+            bool bright = h3 > 0.5;
+            byte ga = (byte)(bright ? 32 + 48 * h1 : 38 + 58 * h2);
+            Color gc = bright ? amberLight : amberDark;
+            var grain = new Ellipse
+            {
+                Width = gs,
+                Height = gs,
+                Fill = new SolidColorBrush(Color.FromArgb(ga, gc.R, gc.G, gc.B)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(grain, gx - gs / 2);
+            Canvas.SetTop(grain, gy - gs / 2);
+            disc.Children.Add(grain);
+        }
+
         // Saturn's north-polar hexagon at the centre — a hallmark of the
         // top-down view, and a clear visual anchor for the spin.
         var hex = new System.Windows.Shapes.Polygon
@@ -942,6 +1015,64 @@ public partial class RadialWindow : Window
 
         globe.Child = disc;
         root.Children.Add(globe);
+
+        // Limb darkening: a soft ring of shadow hugging the very edge so the
+        // sphere reads as rounded and three-dimensional rather than a flat disc.
+        var limb = new Ellipse
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            Fill = new RadialGradientBrush
+            {
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.0),
+                    new GradientStop(Color.FromArgb(0, 0, 0, 0), 0.52),
+                    new GradientStop(Color.FromArgb(120, 0x16, 0x0D, 0x04), 0.84),
+                    new GradientStop(Color.FromArgb(225, 0x0C, 0x07, 0x02), 1.0),
+                },
+            },
+        };
+        root.Children.Add(limb);
+
+        // --- Frosted / matte sheen: a dense veil of very faint deterministic
+        // micro-dots over the whole sphere gives a subtle ground-glass texture
+        // without washing out the bands. Clipped to the globe circle so it never
+        // spills into the square corners.
+        var frost = new Canvas
+        {
+            Width = size,
+            Height = size,
+            IsHitTestVisible = false,
+            Clip = new EllipseGeometry(new Point(r, r), r, r),
+        };
+        int frostDots = 150;
+        for (int f = 0; f < frostDots; f++)
+        {
+            double h1 = Hash01(f * 1.91 + 7.3);
+            double h2 = Hash01(f * 3.37 + 2.9);
+            double h3 = Hash01(f * 5.71 + 4.6);
+            double rad = r * 0.99 * Math.Sqrt(h1);
+            double ang = h2 * Math.PI * 2;
+            double fx = r + Math.Cos(ang) * rad;
+            double fy = r + Math.Sin(ang) * rad;
+            double fs = 0.6 + h3 * 1.3;             // sub-pixel to ~2px
+            bool light = h3 > 0.5;
+            byte fa = (byte)(4 + 9 * h2);           // even fainter sheen
+            byte v = (byte)(light ? 0xF2 : 0x20);
+            var dot = new Ellipse
+            {
+                Width = fs,
+                Height = fs,
+                Fill = new SolidColorBrush(Color.FromArgb(fa, v, (byte)(light ? 0xE0 : 0x16), (byte)(light ? 0xBE : 0x06))),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(dot, fx - fs / 2);
+            Canvas.SetTop(dot, fy - fs / 2);
+            frost.Children.Add(dot);
+        }
+        root.Children.Add(frost);
 
         // Terminator shadow: darken the lower-right to give a spherical feel.
         var shadow = new Ellipse
@@ -989,14 +1120,15 @@ public partial class RadialWindow : Window
         };
         root.Children.Add(highlight);
 
-        // Crisp rim around the globe.
+        // Thin dark rim that blends into the limb darkening (a bright rim here
+        // would otherwise read as a glowing ring just outside the dark edge).
         var rim = new Ellipse
         {
             Width = size,
             Height = size,
             IsHitTestVisible = false,
-            Stroke = new SolidColorBrush(Color.FromArgb(120, 0xFF, 0xF0, 0xCE)),
-            StrokeThickness = 1.2,
+            Stroke = new SolidColorBrush(Color.FromArgb(90, 0x12, 0x0A, 0x03)),
+            StrokeThickness = 1.0,
         };
         root.Children.Add(rim);
 
