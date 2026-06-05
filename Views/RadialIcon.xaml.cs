@@ -46,6 +46,10 @@ public partial class RadialIcon : UserControl
         DisplayName = entry.Name;
         InitializeComponent();
 
+        // The hover glow is a solid colour block, blurred and cached; tint it
+        // with this icon's accent/glow colour.
+        HoverGlow.Background = new SolidColorBrush(GlowColor);
+
         // Centre the (zero-layout) name label below the icon.
         LabelChrome.Width = LabelWidth;
         Canvas.SetLeft(LabelChrome, (iconSize - LabelWidth) / 2.0);
@@ -120,8 +124,8 @@ public partial class RadialIcon : UserControl
     {
         Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, Anim));
         Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, Anim));
-        Glow.BeginAnimation(System.Windows.Media.Effects.DropShadowEffect.BlurRadiusProperty,
-            new DoubleAnimation(24, Anim));
+        // Fade in the pre-blurred glow (Opacity is composited; no effect recompute).
+        HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0.65, Anim));
         LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(1, Anim));
         HoverStarted?.Invoke(this);
 
@@ -136,8 +140,7 @@ public partial class RadialIcon : UserControl
     {
         Scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, Anim));
         Scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, Anim));
-        Glow.BeginAnimation(System.Windows.Media.Effects.DropShadowEffect.BlurRadiusProperty,
-            new DoubleAnimation(0, Anim));
+        HoverGlow.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
         LabelChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(0, Anim));
         HoverEnded?.Invoke(this);
 

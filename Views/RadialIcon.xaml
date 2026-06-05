@@ -11,15 +11,27 @@
     </UserControl.RenderTransform>
 
     <Grid>
+        <!-- Pre-blurred coloured glow shown on hover. Its blur is rasterised once
+             (BitmapCache); hover only animates Opacity, so there is no per-frame
+             bitmap-effect recompute and the parent zoom stays GPU-composited. -->
+        <Border x:Name="HoverGlow"
+                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CornerRadius="12"
+                Opacity="0"
+                IsHitTestVisible="False">
+            <Border.Effect>
+                <BlurEffect Radius="22"/>
+            </Border.Effect>
+            <Border.CacheMode>
+                <BitmapCache/>
+            </Border.CacheMode>
+        </Border>
         <Border Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CornerRadius="12"
                 Background="#08FFFFFF"
                 Padding="8">
-            <Border.Effect>
-                <DropShadowEffect x:Name="Glow" Color="{Binding GlowColor, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                  BlurRadius="0" ShadowDepth="0" Opacity="0.9"/>
-            </Border.Effect>
             <Image Stretch="Uniform"
                    RenderOptions.BitmapScalingMode="HighQuality"
                    RenderOptions.EdgeMode="Aliased"

@@ -127,7 +127,7 @@ public partial class RadialWindow : Window
         _persist = persist;
         InitializeComponent();
 
-        SizeToPrimaryScreen();
+        SizeToActiveContent();
         Loaded += (_, _) => Rebuild();
         SizeChanged += (_, _) => { if (!_suppressRebuild) Rebuild(); };
 
@@ -171,27 +171,71 @@ public partial class RadialWindow : Window
         });
     }
 
-    private void SizeToPrimaryScreen()
+    private void SizeToActiveContent()
     {
-        Left = 0;
-        Top = 0;
-        Width = SystemParameters.PrimaryScreenWidth;
-        Height = SystemParameters.PrimaryScreenHeight;
+        // Instead of spanning the whole screen, size the overlay to a generously
+        // padded box around the active theme's content and centre it. A smaller
+        // AllowsTransparency (layered) window means far less per-frame CPU-side
+        // composition, which lifts the real animation frame rate. The large
+        // margin keeps hover zoom, drop shadows, the settings gear and the
+        // drag-to-delete ring comfortably inside the window.
+        double icon = _config.Settings.IconSize;
+        bool saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+
+        double halfW, halfH;
+        if (saturn)
+        {
+            // Ring disc radius + an outer icon, plus room for the 1.7x hover zoom.
+            double discR = InnerRadius + RingStep + icon * OuterIconScale;
+            double reach = discR + icon * OuterIconScale;
+            halfW = reach;
+            halfH = reach;
+        }
+        else
+        {
+            // Liquid-glass 4x3 grid panel extents (mirrors DrawGlassPanel).
+            double cellW = icon * 2.15;
+            double cellH = icon * 2.35;
+            double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
+            double gridH = (LiquidGlassTheme.Rows - 1) * cellH;
+            double panelHalfW = (gridW + icon + icon * 1.15 * 2) / 2.0;
+            double panelHalfH = (gridH + icon + icon * 1.15 * 2) / 2.0;
+            // The settings gear sits above the grid; keep it inside.
+            double gearUp = 2 * (icon * 2.1) + icon * 0.7 + icon * 0.6;
+            halfW = panelHalfW + icon * 1.7;
+            halfH = Math.Max(panelHalfH, gearUp) + icon * 1.7;
+        }
+
+        // Generous fixed margin on top of the computed reach (ample headroom),
+        // then clamp to the screen so we never exceed it.
+        const double Margin = 180.0;
+        double sw = SystemParameters.PrimaryScreenWidth;
+        double sh = SystemParameters.PrimaryScreenHeight;
+        double w = Math.Min((halfW + Margin) * 2.0, sw);
+        double h = Math.Min((halfH + Margin) * 2.0, sh);
+
+        Width = w;
+        Height = h;
+        Left = (sw - w) / 2.0;
+        Top = (sh - h) / 2.0;
         UpdateCenter();
     }
 
     /// <summary>
-    /// Uses the actual rendered size of the canvas so the ring stays centered
-    /// even when DPI scaling makes the window's real size differ from Width/Height.
+    /// Centre of the overlay in canvas coordinates. The borderless window's
+    /// client area equals its logical Width/Height (both in DIPs), and the
+    /// PanelCanvas fills it, so the window centre is the layout centre. Using
+    /// Width/Height (rather than ActualWidth, which lags a frame after a resize)
+    /// keeps the layout correctly centred the instant the window is resized.
     /// </summary>
     private void UpdateCenter()
     {
-        double w = PanelCanvas.ActualWidth > 0 ? PanelCanvas.ActualWidth
+        double w = (!double.IsNaN(Width) && Width > 0) ? Width
                  : RootGrid.ActualWidth > 0 ? RootGrid.ActualWidth
-                 : Width;
-        double h = PanelCanvas.ActualHeight > 0 ? PanelCanvas.ActualHeight
+                 : ActualWidth;
+        double h = (!double.IsNaN(Height) && Height > 0) ? Height
                  : RootGrid.ActualHeight > 0 ? RootGrid.ActualHeight
-                 : Height;
+                 : ActualHeight;
         _center = new Point(w / 2.0, h / 2.0);
     }
 
@@ -226,7 +270,7 @@ public partial class RadialWindow : Window
         if (_realized) return;
         _realized = true;
         _suppressRebuild = true;
-        SizeToPrimaryScreen();
+        SizeToActiveContent();
         Opacity = 0;
         Show();                         // one-time; the window then stays shown
         _suppressRebuild = false;
@@ -245,7 +289,7 @@ public partial class RadialWindow : Window
         if (pinned)
             IsPinned = true;
 
-        SizeToPrimaryScreen();
+        SizeToActiveContent();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
         AnimateRingsExpand();           // grow the rings out from the centre
@@ -552,6 +596,8 @@ public partial class RadialWindow : Window
                 Color = Color.FromRgb(0x0A, 0x10, 0x1C),
             },
             IsHitTestVisible = false,
+            // Rasterise the drop shadow once; it never changes while shown.
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         Canvas.SetLeft(glass, left);
         Canvas.SetTop(glass, top);
@@ -600,6 +646,8 @@ public partial class RadialWindow : Window
             // Heavy blur dissolves the rectangle's straight side/bottom edges so the
             // highlight reads as a soft dome of light rather than a hard-edged band.
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = Math.Max(20, h * 0.06) },
+            // Cache the heavy blur so it is computed once, not every frame.
+            CacheMode = new System.Windows.Media.BitmapCache(),
             Background = new RadialGradientBrush
             {
                 GradientOrigin = new Point(0.5, 0.18),
@@ -631,6 +679,8 @@ public partial class RadialWindow : Window
             IsHitTestVisible = false,
             ClipToBounds = true,
             Clip = new RectangleGeometry(new Rect(0, 0, w, h), radius, radius),
+            // Cache the clipped, blurred glare streak (static while shown).
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         var glareCanvas = new Canvas { Width = w, Height = h };
         var glare = new System.Windows.Shapes.Rectangle
