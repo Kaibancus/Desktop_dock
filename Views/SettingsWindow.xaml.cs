@@ -135,13 +135,30 @@ public partial class SettingsWindow : Window
             return;
 
         var files = (string[])e.Data.GetData(DataFormats.FileDrop);
+        int cap = ThemeRegistry.Get(_config.Settings.Theme).MaxIcons;
+        bool rejected = false;
         foreach (var f in files)
         {
             var entry = ShortcutResolver.CreateEntry(f);
             if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+            {
+                if (Apps.Count >= cap)
+                {
+                    rejected = true;
+                    continue;
+                }
                 Apps.Add(entry);
+            }
         }
         CommitApps();
+        if (rejected)
+        {
+            MessageBox.Show(
+                $"当前主题最多只能放置 {cap} 个图标，部分图标未添加。",
+                "已达图标上限",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
     }
 
     private void OnRemove(object sender, RoutedEventArgs e)

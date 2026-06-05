@@ -8,7 +8,7 @@ namespace DesktopPanel.Models;
 public sealed class AppSettings
 {
     /// <summary>Panel background opacity, 0.0 - 1.0.</summary>
-    public double PanelOpacity { get; set; } = 0.85;
+    public double PanelOpacity { get; set; } = 0.90;
 
     /// <summary>Panel background color (hex, e.g. "#1E1E1E").</summary>
     public string PanelColor { get; set; } = "#1E1E1E";

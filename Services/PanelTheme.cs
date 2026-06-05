@@ -27,6 +27,19 @@ public abstract class PanelTheme
     /// revolution cues and uses the concentric-ring icon layout.</summary>
     public virtual bool IsSaturn => false;
 
+    /// <summary>True if the theme supports the generic free grid drag-reorder
+    /// (with neighbour "push aside" animation). Saturn uses its own ring-based
+    /// reorder via the host instead.</summary>
+    public virtual bool SupportsGridReorder => false;
+
+    /// <summary>True if the host should draw a rounded rectangular "liquid glass"
+    /// panel behind the icons.</summary>
+    public virtual bool ShowGlassPanel => false;
+
+    /// <summary>Maximum number of icons this theme can display. Adding beyond
+    /// this is rejected. Saturn (and most themes) impose no limit.</summary>
+    public virtual int MaxIcons => int.MaxValue;
+
     /// <summary>Brush painted behind everything (the overlay window background).
     /// Transparent lets the desktop show through (Saturn theme); an opaque brush
     /// gives a solid backdrop (test theme).</summary>
@@ -62,12 +75,60 @@ public sealed class SaturnRingTheme : PanelTheme
     }
 }
 
+/// <summary>The "液态玻璃" theme: a translucent rounded-rectangle frosted-glass
+/// panel with the icons laid out in a 4-column by 3-row grid. Supports free
+/// drag-reorder with the neighbour "push aside" animation. The glass panel's
+/// translucency is driven by the user's panel-opacity setting.</summary>
+public sealed class LiquidGlassTheme : PanelTheme
+{
+    public const int Columns = 4;
+    public const int Rows = 3;
+
+    /// <summary>Maximum icons this theme can display (a full 4×3 grid).</summary>
+    public const int Capacity = Columns * Rows;
+
+    public override string Id => "liquidglass";
+    public override string DisplayName => "玻璃";
+    public override bool SupportsGridReorder => true;
+    public override bool ShowGlassPanel => true;
+    public override int MaxIcons => Capacity;
+    public override Brush WindowBackground => Brushes.Transparent;
+
+    public override IReadOnlyList<Point> ComputeSlots(
+        int count, Point center, AppSettings settings, out double outerReach)
+    {
+        var list = new List<Point>(Math.Max(0, count));
+        double icon = settings.IconSize;
+        double cellW = icon * 2.15;
+        double cellH = icon * 2.35;   // extra height leaves room for the label
+
+        double gridW = (Columns - 1) * cellW;
+        double gridH = (Rows - 1) * cellH;
+        double x0 = center.X - gridW / 2.0;
+        double y0 = center.Y - gridH / 2.0;
+
+        // Hard cap at the 4×3 grid; extra icons are never placed (the host
+        // refuses to add beyond Capacity, so this is just a safety clamp).
+        int max = Math.Min(count, Capacity);
+        for (int i = 0; i < max; i++)
+        {
+            int row = i / Columns;
+            int col = i % Columns;
+            list.Add(new Point(x0 + col * cellW, y0 + row * cellH));
+        }
+
+        outerReach = Math.Max(gridW, gridH) / 2.0 + icon;
+        return list;
+    }
+}
+
 /// <summary>Catalog of available themes.</summary>
 public static class ThemeRegistry
 {
     public static IReadOnlyList<PanelTheme> All { get; } = new PanelTheme[]
     {
         new SaturnRingTheme(),
+        new LiquidGlassTheme(),
     };
 
     /// <summary>Resolves a theme by id, falling back to the Saturn theme.</summary>

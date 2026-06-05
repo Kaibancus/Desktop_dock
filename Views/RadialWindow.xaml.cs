@@ -29,6 +29,10 @@ public partial class RadialWindow : Window
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.18;
 
+    // Liquid-glass (grid) icons are drawn larger than the base icon size so they
+    // fill the roomy grid cells more comfortably.
+    private const double GlassIconScale = 1.32;
+
     // Saturn's self-rotation period (seconds per turn) used for the centre
     // planet's idle spin and as the reference for the ring revolution speeds.
     private const double PlanetSpinSeconds = 60.0;
@@ -72,6 +76,10 @@ public partial class RadialWindow : Window
 
     // Periodically refreshes each icon's running indicator while the panel is shown.
     private readonly System.Windows.Threading.DispatcherTimer _runningTimer;
+
+    // Always-on background timer that pre-captures each running window's thumbnail
+    // so a "last view before minimize" frame is available for hover previews.
+    private readonly System.Windows.Threading.DispatcherTimer _previewWarmTimer;
 
     // Set while showing the window so the SizeChanged fired by Show() does not
     // trigger a premature (wrong-centre) Rebuild that would flash the ring.
@@ -128,6 +136,39 @@ public partial class RadialWindow : Window
             Interval = TimeSpan.FromSeconds(1.5),
         };
         _runningTimer.Tick += (_, _) => RefreshRunningStates();
+
+        // Warm the thumbnail cache in the background (even while the panel is
+        // hidden) so we always hold a recent frame to show if a window gets
+        // minimized before the user hovers its icon.
+        _previewWarmTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(2.5),
+        };
+        _previewWarmTimer.Tick += (_, _) => WarmPreviewCache();
+        _previewWarmTimer.Start();
+    }
+
+    private void WarmPreviewCache()
+    {
+        // Snapshot the app paths on the UI thread, then capture off-thread.
+        var paths = new List<string>(_config.Apps.Count);
+        foreach (var a in _config.Apps)
+            if (!string.IsNullOrWhiteSpace(a.Path))
+                paths.Add(a.Path);
+        if (paths.Count == 0)
+            return;
+
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                WindowPreviewService.WarmCache(paths, RadialIcon.PreviewThumbWidth);
+            }
+            catch
+            {
+                // Best effort — a transient capture failure must never crash.
+            }
+        });
     }
 
     private void SizeToPrimaryScreen()
@@ -260,6 +301,10 @@ public partial class RadialWindow : Window
         CancelDrag();
         _runningTimer.Stop();
 
+        // Dismiss any open window-preview popups so they don't linger on screen.
+        foreach (var ic in _iconElements)
+            ic.ClosePreview();
+
         // Fade out instead of hiding; at Opacity 0 the window is click-through.
         // Capture the current (animated) opacity BEFORE replacing the animation
         // so we start the fade from what's on screen. Do NOT clear the animation
@@ -366,6 +411,8 @@ public partial class RadialWindow : Window
         {
             _innerOrbitLayer = null;
             _outerOrbitLayer = null;
+            if (_theme.ShowGlassPanel)
+                DrawGlassPanel();
         }
 
         int r0 = _theme.IsSaturn ? EffectiveRing0Count(_config.Apps.Count) : int.MaxValue;
@@ -374,7 +421,9 @@ public partial class RadialWindow : Window
             var entry = _config.Apps[i];
             double size = (_theme.IsSaturn && i >= r0)
                 ? _config.Settings.IconSize * OuterIconScale
-                : _config.Settings.IconSize;
+                : _theme.ShowGlassPanel
+                    ? _config.Settings.IconSize * GlassIconScale
+                    : _config.Settings.IconSize;
             var icon = CreateIcon(entry, size);
             PlaceCentered(icon, _slotPositions[i]);
             PanelCanvas.Children.Add(icon);
@@ -386,7 +435,7 @@ public partial class RadialWindow : Window
             DrawCenterButton();
             StartOrbits();
         }
-        else
+        else if (!_theme.ShowGlassPanel)
         {
             DrawSimpleCenterButton();
         }
@@ -435,7 +484,239 @@ public partial class RadialWindow : Window
         PanelCanvas.Children.Add(btn);
     }
 
-    /// <summary>Updates each icon's flowing-blue running indicator.</summary>
+    /// <summary>
+    /// Draws the "液态玻璃" backdrop: a translucent, frosted rounded-rectangle
+    /// panel sized to enclose the 4×3 icon grid. Its overall opacity follows the
+    /// user's panel-opacity setting so it can be dialled from the settings.
+    /// </summary>
+    private void DrawGlassPanel()
+    {
+        double icon = _config.Settings.IconSize;
+        double cellW = icon * 2.15;
+        double cellH = icon * 2.35;
+        double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
+        double gridH = (LiquidGlassTheme.Rows - 1) * cellH;
+
+        // Pad out from the grid extents (icons are centred on the slot points).
+        double padX = icon * 1.15;
+        double padY = icon * 1.15;
+        double w = gridW + icon + padX * 2;
+        double h = gridH + icon + padY * 2;
+        double left = _center.X - w / 2.0;
+        double top = _center.Y - h / 2.0;
+
+        double opacity = Math.Clamp(_config.Settings.PanelOpacity, 0.0, 1.0);
+        const double radius = 28;
+
+        // Base frosted fill: a convex "lens" gradient — bright at the very top,
+        // dipping through the middle, then lifting again near the bottom — which
+        // reads as a rounded, three-dimensional slab of glass rather than a flat
+        // sheet. The element's Opacity is the user-adjustable translucency.
+        var glass = new Border
+        {
+            Width = w,
+            Height = h,
+            CornerRadius = new CornerRadius(radius),
+            Opacity = opacity,
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(0, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0x82, 0xF2, 0xF8, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x5A, 0xDD, 0xEA, 0xFB), 0.18),
+                    new GradientStop(Color.FromArgb(0x36, 0xB7, 0xC9, 0xE4), 0.52),
+                    new GradientStop(Color.FromArgb(0x4A, 0xC4, 0xD6, 0xEE), 0.84),
+                    new GradientStop(Color.FromArgb(0x6E, 0xE3, 0xEF, 0xFF), 1.0),
+                },
+            },
+            BorderBrush = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(1, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF), 0.5),
+                    new GradientStop(Color.FromArgb(0x88, 0xFF, 0xFF, 0xFF), 1.0),
+                },
+            },
+            BorderThickness = new Thickness(1.4),
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 40,
+                ShadowDepth = 6,
+                Direction = 270,
+                Opacity = 0.5,
+                Color = Color.FromRgb(0x0A, 0x10, 0x1C),
+            },
+            IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(glass, left);
+        Canvas.SetTop(glass, top);
+        Panel.SetZIndex(glass, -12);
+        PanelCanvas.Children.Add(glass);
+
+        // Inner bevel: a slightly inset rounded border whose edge is bright on the
+        // top-left and shaded on the bottom-right, simulating light raking across
+        // a raised glass edge. This is what gives the panel real depth.
+        double bevelInset = 3;
+        var bevel = new Border
+        {
+            Width = w - bevelInset * 2,
+            Height = h - bevelInset * 2,
+            CornerRadius = new CornerRadius(radius - bevelInset),
+            Opacity = opacity,
+            IsHitTestVisible = false,
+            BorderThickness = new Thickness(1.6),
+            BorderBrush = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(1, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF), 0.45),
+                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.55),
+                    new GradientStop(Color.FromArgb(0x55, 0x20, 0x30, 0x48), 1.0),
+                },
+            },
+        };
+        Canvas.SetLeft(bevel, left + bevelInset);
+        Canvas.SetTop(bevel, top + bevelInset);
+        Panel.SetZIndex(bevel, -8);
+        PanelCanvas.Children.Add(bevel);
+
+        // Top specular cap: a bright curved highlight hugging the upper third,
+        // the classic "light source reflected off the dome of the glass" sheen.
+        var topCap = new Border
+        {
+            Width = w * 0.82,
+            Height = h * 0.5,
+            CornerRadius = new CornerRadius(w * 0.41),
+            Opacity = opacity,
+            IsHitTestVisible = false,
+            // Heavy blur dissolves the rectangle's straight side/bottom edges so the
+            // highlight reads as a soft dome of light rather than a hard-edged band.
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = Math.Max(20, h * 0.06) },
+            Background = new RadialGradientBrush
+            {
+                GradientOrigin = new Point(0.5, 0.18),
+                Center = new Point(0.5, 0.18),
+                RadiusX = 0.62,
+                RadiusY = 0.95,
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0x5A, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF), 0.5),
+                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
+                },
+            },
+        };
+        Canvas.SetLeft(topCap, left + w * 0.09);
+        Canvas.SetTop(topCap, top + bevelInset);
+        Panel.SetZIndex(topCap, -7);
+        PanelCanvas.Children.Add(topCap);
+
+        // Diagonal glare streak: a tilted bright bar sweeping across the upper-left,
+        // clipped to the rounded panel — the trademark "reflection swipe" that
+        // sells the glossy, reflective glass look.
+        var glareClip = new Border
+        {
+            Width = w,
+            Height = h,
+            CornerRadius = new CornerRadius(radius),
+            Opacity = opacity,
+            IsHitTestVisible = false,
+            ClipToBounds = true,
+            Clip = new RectangleGeometry(new Rect(0, 0, w, h), radius, radius),
+        };
+        var glareCanvas = new Canvas { Width = w, Height = h };
+        var glare = new System.Windows.Shapes.Rectangle
+        {
+            Width = w * 1.7,
+            Height = h * 0.18,
+            RadiusX = h * 0.09,
+            RadiusY = h * 0.09,
+            // Blur the streak so its long upper/lower edges feather away instead of
+            // showing a crisp boundary against the glass.
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = Math.Max(16, h * 0.045) },
+            Fill = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(1, 0),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF), 0.5),
+                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
+                },
+            },
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = new RotateTransform(-22),
+        };
+        Canvas.SetLeft(glare, -w * 0.35);
+        Canvas.SetTop(glare, h * 0.08);
+        glareCanvas.Children.Add(glare);
+        glareClip.Child = glareCanvas;
+        Canvas.SetLeft(glareClip, left);
+        Canvas.SetTop(glareClip, top);
+        Panel.SetZIndex(glareClip, -6);
+        PanelCanvas.Children.Add(glareClip);
+
+        // Bottom inner shadow: a soft dark gradient pooling at the base, anchoring
+        // the slab and reinforcing the sense of curved thickness.
+        var baseShade = new Border
+        {
+            Width = w,
+            Height = h * 0.34,
+            CornerRadius = new CornerRadius(0, 0, radius, radius),
+            Opacity = opacity,
+            IsHitTestVisible = false,
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0),
+                EndPoint = new Point(0, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0x00, 0x10, 0x1A, 0x2C), 0.0),
+                    new GradientStop(Color.FromArgb(0x3A, 0x10, 0x1A, 0x2C), 1.0),
+                },
+            },
+        };
+        Canvas.SetLeft(baseShade, left);
+        Canvas.SetTop(baseShade, top + h * 0.66);
+        Panel.SetZIndex(baseShade, -7);
+        PanelCanvas.Children.Add(baseShade);
+
+        // A small settings gear in the panel's top-right corner.
+        double gs = Math.Max(26, icon * 0.5);
+        var gear = new Border
+        {
+            Width = gs,
+            Height = gs,
+            CornerRadius = new CornerRadius(gs / 2),
+            Background = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Child = new TextBlock
+            {
+                Text = "⚙",
+                FontSize = gs * 0.55,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+        gear.MouseLeftButtonUp += (_, e) => { e.Handled = true; RequestOpenSettings?.Invoke(); };
+        Canvas.SetLeft(gear, left + w - gs - 12);
+        Canvas.SetTop(gear, top + 12);
+        Panel.SetZIndex(gear, 2000);
+        PanelCanvas.Children.Add(gear);
+    }
+
     private void RefreshRunningStates()
     {
         // Enumerate processes on a background thread so the (relatively slow)
@@ -492,6 +773,7 @@ public partial class RadialWindow : Window
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;
+        icon.WindowActivated += HidePanel;
         return icon;
     }
 
@@ -1531,11 +1813,18 @@ public partial class RadialWindow : Window
 
         var files = (string[])e.Data.GetData(DataFormats.FileDrop);
         bool added = false;
+        bool rejected = false;
+        int cap = _theme.MaxIcons;
         foreach (var f in files)
         {
             var entry = ShortcutResolver.CreateEntry(f);
             if (entry != null && !string.IsNullOrWhiteSpace(entry.Path))
             {
+                if (_config.Apps.Count >= cap)
+                {
+                    rejected = true;
+                    continue;
+                }
                 _config.Apps.Add(entry);
                 added = true;
             }
@@ -1545,6 +1834,14 @@ public partial class RadialWindow : Window
         {
             _persist();
             Rebuild();
+        }
+        if (rejected)
+        {
+            System.Windows.MessageBox.Show(
+                $"当前主题最多只能放置 {cap} 个图标，部分图标未添加。",
+                "已达图标上限",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
         }
         e.Handled = true;
     }
@@ -1601,13 +1898,119 @@ public partial class RadialWindow : Window
                 ReflowAround(ring, pos);
             }
         }
-        else if (_dragTargetRing != -1)
+        else if (_theme.SupportsGridReorder && dist <= DeleteRadius)
+        {
+            // Free-grid reorder: find the slot the cursor is over and make room
+            // by shifting the other icons into the insertion arrangement.
+            int src = _iconElements.IndexOf(_pressedIcon);
+            int tgt = ComputeGridTarget(p, src);
+            if (tgt != _dragTargetPos)
+            {
+                _dragTargetPos = tgt;
+                ReflowGrid(src, tgt);
+            }
+        }
+        else if (_dragTargetRing != -1 || _dragTargetPos != -1)
         {
             // Dragged into the delete zone — snap the others back to their slots.
             _dragTargetRing = -1;
             _dragTargetPos = -1;
             RestoreSlots();
         }
+    }
+
+    // ---- Free grid reorder (liquid-glass theme) --------------------------
+
+    /// <summary>
+    /// Returns the insertion slot index (0..n-1) the dragged icon
+    /// <paramref name="src"/> is currently over, chosen as the nearest grid slot
+    /// to the cursor.
+    /// </summary>
+    private int ComputeGridTarget(Point p, int src)
+    {
+        int n = _slotPositions.Count;
+        if (n == 0)
+            return 0;
+
+        int best = 0;
+        double bestD = double.MaxValue;
+        for (int i = 0; i < n; i++)
+        {
+            double d = (p - _slotPositions[i]).LengthSquared;
+            if (d < bestD)
+            {
+                bestD = d;
+                best = i;
+            }
+        }
+        return Math.Clamp(best, 0, n - 1);
+    }
+
+    /// <summary>
+    /// Produces the "make room" arrangement when the dragged entry
+    /// <paramref name="src"/> is inserted at slot <paramref name="tgt"/>: returns,
+    /// for each entry index, the slot it should occupy.
+    /// </summary>
+    private int[] GridArrangement(int src, int tgt)
+    {
+        int n = _config.Apps.Count;
+        var order = new List<int>(n);
+        for (int i = 0; i < n; i++)
+            order.Add(i);
+
+        if (src >= 0 && src < n)
+        {
+            order.Remove(src);
+            int insertAt = Math.Clamp(tgt, 0, order.Count);
+            order.Insert(insertAt, src);
+        }
+
+        int[] slotOfEntry = new int[n];
+        for (int slot = 0; slot < order.Count; slot++)
+            slotOfEntry[order[slot]] = slot;
+        return slotOfEntry;
+    }
+
+    /// <summary>Animates every non-dragged icon to its slot in the prospective
+    /// grid arrangement, producing the neighbour "push aside" effect.</summary>
+    private void ReflowGrid(int src, int tgt)
+    {
+        int[] slotOfEntry = GridArrangement(src, tgt);
+        for (int i = 0; i < _iconElements.Count; i++)
+        {
+            if (_iconElements[i] == _pressedIcon)
+                continue;
+            int slot = slotOfEntry[i];
+            if (slot >= 0 && slot < _slotPositions.Count)
+                AnimateTo(_iconElements[i], _slotPositions[slot]);
+        }
+    }
+
+    /// <summary>Commits a free-grid reorder: reorders the app entries so entry
+    /// i maps to slot i on the next rebuild, then persists and rebuilds.</summary>
+    private void CommitGridArrangement(AppEntry entry, int targetPos, Point dropPoint)
+    {
+        int src = _config.Apps.IndexOf(entry);
+        if (src < 0)
+        {
+            Rebuild();
+            return;
+        }
+
+        int tgt = targetPos >= 0 ? targetPos : ComputeGridTarget(dropPoint, src);
+        int[] slotOfEntry = GridArrangement(src, tgt);
+        int n = _config.Apps.Count;
+
+        var ordered = new AppEntry[n];
+        for (int i = 0; i < n; i++)
+            ordered[slotOfEntry[i]] = _config.Apps[i];
+
+        _config.Apps.Clear();
+        foreach (var a in ordered)
+            _config.Apps.Add(a);
+
+        _persist();
+        Rebuild();
     }
 
     /// <summary>
@@ -1948,9 +2351,13 @@ public partial class RadialWindow : Window
         {
             CommitArrangement(icon.Entry, ring, pos, p);
         }
+        else if (_theme.SupportsGridReorder)
+        {
+            CommitGridArrangement(icon.Entry, pos, p);
+        }
         else
         {
-            // Grid test theme: no reorder — snap the dragged icon back.
+            // No reorder support — snap the dragged icon back.
             Rebuild();
         }
     }
