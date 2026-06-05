@@ -40,6 +40,13 @@ public abstract class PanelTheme
     /// this is rejected. Saturn (and most themes) impose no limit.</summary>
     public virtual int MaxIcons => int.MaxValue;
 
+    /// <summary>Default panel transparency (0.0 opaque – 1.0 invisible) applied
+    /// when the user first switches to this theme (before any customisation).</summary>
+    public virtual double DefaultTransparency => 0.10;
+
+    /// <summary>Default icon diameter (device-independent px) for this theme.</summary>
+    public virtual double DefaultIconSize => 56;
+
     /// <summary>Brush painted behind everything (the overlay window background).
     /// Transparent lets the desktop show through (Saturn theme); an opaque brush
     /// gives a solid backdrop (test theme).</summary>
@@ -65,6 +72,8 @@ public sealed class SaturnRingTheme : PanelTheme
     public override string DisplayName => "土星环";
     public override bool IsSaturn => true;
     public override Brush WindowBackground => Brushes.Transparent;
+    public override double DefaultTransparency => 0.10;
+    public override double DefaultIconSize => 56;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)
@@ -93,6 +102,8 @@ public sealed class LiquidGlassTheme : PanelTheme
     public override bool ShowGlassPanel => true;
     public override int MaxIcons => Capacity;
     public override Brush WindowBackground => Brushes.Transparent;
+    public override double DefaultTransparency => 0.90;
+    public override double DefaultIconSize => 64;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)
@@ -138,5 +149,34 @@ public static class ThemeRegistry
             if (string.Equals(t.Id, id, StringComparison.OrdinalIgnoreCase))
                 return t;
         return All[0];
+    }
+
+    /// <summary>Loads the active panel transparency / icon size for the current
+    /// theme: the value the user previously saved for that theme, or—if none—the
+    /// theme's built-in defaults. Call after changing <see cref="AppSettings.Theme"/>.</summary>
+    public static void LoadAppearance(AppSettings s)
+    {
+        var theme = Get(s.Theme);
+        if (s.ThemeAppearances.TryGetValue(theme.Id, out var a))
+        {
+            s.PanelTransparency = a.Transparency;
+            s.IconSize = a.IconSize;
+        }
+        else
+        {
+            s.PanelTransparency = theme.DefaultTransparency;
+            s.IconSize = theme.DefaultIconSize;
+        }
+    }
+
+    /// <summary>Persists the active transparency / icon size as the customised
+    /// appearance for the current theme, so switching back restores it.</summary>
+    public static void SaveAppearance(AppSettings s)
+    {
+        s.ThemeAppearances[Get(s.Theme).Id] = new ThemeAppearance
+        {
+            Transparency = s.PanelTransparency,
+            IconSize = s.IconSize,
+        };
     }
 }

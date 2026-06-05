@@ -65,6 +65,12 @@ public partial class App : Application
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 
+        // Seed the active transparency / icon size from the current theme's
+        // remembered values (or its defaults), so each theme opens with its own
+        // look. Persist so the per-theme entry is captured on first run.
+        ThemeRegistry.LoadAppearance(_config.Settings);
+        ConfigStore.Save(_config);
+
         _panel = new RadialWindow(_config, Persist);
         _panel.RequestOpenSettings += OpenSettings;
         _panel.Realize();   // realise once (stays shown, fully transparent) to avoid show/hide flicker

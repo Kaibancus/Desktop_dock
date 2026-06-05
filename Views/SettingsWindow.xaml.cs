@@ -116,6 +116,8 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         s.PanelTransparency = OpacitySlider.Value;
         s.IconSize = IconSizeSlider.Value;
+        // Remember these values for the current theme so switching back restores them.
+        ThemeRegistry.SaveAppearance(s);
         _persist();
         Changed?.Invoke();
     }
@@ -241,7 +243,19 @@ public partial class SettingsWindow : Window
             return;
         if (ThemeCombo.SelectedItem is ComboBoxItem item && item.Tag is string id)
         {
-            _config.Settings.Theme = id;
+            var s = _config.Settings;
+            // Remember the outgoing theme's appearance, switch, then load the
+            // incoming theme's saved values (or its built-in defaults).
+            ThemeRegistry.SaveAppearance(s);
+            s.Theme = id;
+            ThemeRegistry.LoadAppearance(s);
+
+            // Reflect the loaded values in the sliders without re-committing.
+            _loaded = false;
+            OpacitySlider.Value = s.PanelTransparency;
+            IconSizeSlider.Value = s.IconSize;
+            _loaded = true;
+
             _persist();
             Changed?.Invoke();
         }

@@ -7,8 +7,10 @@ namespace DesktopPanel.Models;
 /// </summary>
 public sealed class AppSettings
 {
-    /// <summary>Panel background transparency, 0.0 (opaque) - 1.0 (invisible).</summary>
-    public double PanelTransparency { get; set; } = 0.90;
+    /// <summary>Panel background transparency, 0.0 (opaque) - 1.0 (invisible).
+    /// This is the <i>active</i> value for the current theme; each theme keeps
+    /// its own remembered value in <see cref="ThemeAppearances"/>.</summary>
+    public double PanelTransparency { get; set; } = 0.10;
 
     /// <summary>Panel background color (hex, e.g. "#1E1E1E").</summary>
     public string PanelColor { get; set; } = "#1E1E1E";
@@ -51,4 +53,19 @@ public sealed class AppSettings
     /// Virtual-key code of the hold-to-show trigger key. Default 0xA5 (Right Alt).
     /// </summary>
     public int TriggerKey { get; set; } = 0xA5;
+
+    /// <summary>Per-theme remembered appearance (transparency + icon size),
+    /// keyed by theme id. Lets each theme restore its own look when re-selected;
+    /// missing entries fall back to the theme's built-in defaults.</summary>
+    public Dictionary<string, ThemeAppearance> ThemeAppearances { get; set; } = new();
+}
+
+/// <summary>Remembered per-theme appearance values.</summary>
+public sealed class ThemeAppearance
+{
+    /// <summary>Panel background transparency, 0.0 (opaque) - 1.0 (invisible).</summary>
+    public double Transparency { get; set; }
+
+    /// <summary>Icon diameter in device-independent pixels.</summary>
+    public double IconSize { get; set; }
 }
