@@ -417,7 +417,7 @@ public partial class RadialWindow
         double currentSpinSeconds = PlanetSpinSeconds;
         int spinGen = 0;
 
-        void StartSpin(double secondsPerTurn)
+        void StartSpin(double secondsPerTurn, double rampTime = 0.9)
         {
             int gen = ++spinGen;
             double cur = discRotate.Angle % 360;
@@ -453,7 +453,7 @@ public partial class RadialWindow
                 // time = average velocity x time. A custom easing makes the
                 // disc's angular velocity vary linearly from vNow to vTarget so
                 // the handoff into the steady spin has matching speed (no jerk).
-                const double T = 0.9;
+                double T = rampTime;
                 double dist = (vNow + vTarget) / 2.0 * T;
                 var ramp = new DoubleAnimation(cur, cur + dist, TimeSpan.FromSeconds(T))
                 {
@@ -471,8 +471,11 @@ public partial class RadialWindow
         }
 
         StartSpin(PlanetSpinSeconds);            // gentle idle self-rotation
-        root.MouseEnter += (_, _) => StartSpin(3.0);
-        root.MouseLeave += (_, _) => StartSpin(PlanetSpinSeconds);
+        // Hover: snap up to speed quickly (short ramp) so the planet visibly
+        // accelerates the instant the cursor lands on it. Leaving uses the long
+        // gentle ramp to coast back down.
+        root.MouseEnter += (_, _) => StartSpin(3.0, rampTime: 0.18);
+        root.MouseLeave += (_, _) => StartSpin(PlanetSpinSeconds, rampTime: 0.9);
 
         root.MouseLeftButtonUp += (_, e) =>
         {
