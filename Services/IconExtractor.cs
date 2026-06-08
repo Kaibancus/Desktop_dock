@@ -116,13 +116,98 @@ public static class IconExtractor
                     return null;
 
                 using var tmp = Drawing.Icon.FromHandle(hicon);
-                return (Drawing.Icon)tmp.Clone();
+                using var raw = (Drawing.Icon)tmp.Clone();
+                // The jumbo image list pads icons that have no native 256px frame
+                // into the TOP-LEFT corner of a 256x256 transparent canvas, leaving
+                // the rest blank. With the UI's Uniform stretch that makes the real
+                // glyph appear as a tiny icon in the top-left. Crop to the actual
+                // content so the UI scales the real glyph to fill its slot. Returns
+                // the full frame unchanged when it is already (nearly) full.
+                return CropIconToContent(raw) ?? (Drawing.Icon)raw.Clone();
             }
             finally
             {
                 if (hicon != IntPtr.Zero)
                     DestroyIcon(hicon);
                 Marshal.ReleaseComObject(list);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Crops an icon to the bounding box of its non-transparent pixels. Returns
+    /// null (caller keeps the original) when the icon is fully transparent or its
+    /// content already fills most of the frame (so true 256px icons are left as-is).
+    /// </summary>
+    private static Drawing.Icon? CropIconToContent(Drawing.Icon icon)
+    {
+        try
+        {
+            using var bmp = icon.ToBitmap();
+            int w = bmp.Width, h = bmp.Height;
+            if (w <= 0 || h <= 0)
+                return null;
+
+            var rect = new Drawing.Rectangle(0, 0, w, h);
+            var data = bmp.LockBits(rect, Drawing.Imaging.ImageLockMode.ReadOnly,
+                Drawing.Imaging.PixelFormat.Format32bppArgb);
+            int stride = data.Stride;
+            byte[] buf = new byte[stride * h];
+            Marshal.Copy(data.Scan0, buf, 0, buf.Length);
+            bmp.UnlockBits(data);
+
+            int minX = w, minY = h, maxX = -1, maxY = -1;
+            for (int y = 0; y < h; y++)
+            {
+                int rowBase = y * stride;
+                for (int x = 0; x < w; x++)
+                {
+                    byte a = buf[rowBase + x * 4 + 3];   // BGRA -> alpha at +3
+                    if (a > 8)
+                    {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+
+            if (maxX < minX || maxY < minY)
+                return null;                          // fully transparent
+
+            int cw = maxX - minX + 1;
+            int ch = maxY - minY + 1;
+            // Already (nearly) fills the frame -> a genuine full-size icon.
+            if (cw >= w * 0.85 && ch >= h * 0.85)
+                return null;
+
+            // Crop to a square around the content so the aspect ratio is kept and
+            // the glyph stays centred when the UI scales it.
+            int side = Math.Max(cw, ch);
+            int cx = minX + cw / 2;
+            int cy = minY + ch / 2;
+            int sx = Math.Clamp(cx - side / 2, 0, Math.Max(0, w - side));
+            int sy = Math.Clamp(cy - side / 2, 0, Math.Max(0, h - side));
+            side = Math.Min(side, Math.Min(w - sx, h - sy));
+            if (side <= 0)
+                return null;
+
+            using var crop = bmp.Clone(new Drawing.Rectangle(sx, sy, side, side),
+                Drawing.Imaging.PixelFormat.Format32bppArgb);
+            IntPtr hcrop = crop.GetHicon();
+            try
+            {
+                using var t = Drawing.Icon.FromHandle(hcrop);
+                return (Drawing.Icon)t.Clone();
+            }
+            finally
+            {
+                DestroyIcon(hcrop);
             }
         }
         catch

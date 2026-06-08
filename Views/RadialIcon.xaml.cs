@@ -268,7 +268,7 @@ public partial class RadialIcon : UserControl
             },
             Child = new ScrollViewer
             {
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 MaxWidth = 920,
                 Content = strip,
