@@ -435,6 +435,9 @@ public partial class RadialWindow
                 {
                     RepeatBehavior = RepeatBehavior.Forever,
                 };
+                // Perpetual idle spin: cap at the real refresh; oversampling a
+                // multi-second rotation buys no smoothness, only wasted cycles.
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(loop, App.AmbientFrameRate);
                 discRotate.BeginAnimation(RotateTransform.AngleProperty, loop);
             }
 

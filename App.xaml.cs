@@ -16,6 +16,11 @@ public partial class App : Application
 {
     private Mutex? _singleInstanceMutex;
 
+    /// <summary>The display's real (un-oversampled) refresh rate in Hz, used to
+    /// cap slow always-on loop animations so they don't waste cycles being
+    /// oversampled like short interactive transitions. Defaults to 60.</summary>
+    public static int AmbientFrameRate { get; private set; } = 60;
+
     private AppConfig _config = new();
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
@@ -52,6 +57,7 @@ public partial class App : Application
         System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
             typeof(System.Windows.Media.Animation.Timeline),
             new FrameworkPropertyMetadata(refreshHz));
+        AmbientFrameRate = hz;   // un-oversampled present rate for slow loops
 
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.

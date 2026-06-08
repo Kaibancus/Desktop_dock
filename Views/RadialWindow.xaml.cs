@@ -62,6 +62,17 @@ public partial class RadialWindow : Window
     // fill the roomy grid cells more comfortably.
     private const double GlassIconScale = 1.32;
 
+    // The glass dock (panel + grid icons) is lifted up by this amount so the
+    // running-taskbar row below it has room: a magnified row tile grows upward
+    // but no longer reaches the dock's bottom edge.
+    private double GlassDockLift => EffectiveIconSize * 0.7;
+
+    /// <summary>Centre used to lay out the glass dock (panel + grid icons),
+    /// shifted up from the window centre by <see cref="GlassDockLift"/>. The
+    /// taskbar row keeps using <see cref="_center"/> so the lift opens a gap
+    /// between the dock and the row.</summary>
+    private Point GlassDockCenter => new(_center.X, _center.Y - GlassDockLift);
+
     // Saturn's self-rotation period (seconds per turn) used for the centre
     // planet's idle spin and as the reference for the ring revolution speeds.
     private const double PlanetSpinSeconds = 60.0;
@@ -109,6 +120,12 @@ public partial class RadialWindow : Window
     // Always-on background timer that pre-captures each running window's thumbnail
     // so a "last view before minimize" frame is available for hover previews.
     private readonly System.Windows.Threading.DispatcherTimer _previewWarmTimer;
+
+    // Clock labels in the glass dock's top row (rebuilt with the panel). Updated
+    // by a 1 s timer while the panel is shown.
+    private TextBlock? _glassClockTime;
+    private TextBlock? _glassClockDate;
+    private readonly System.Windows.Threading.DispatcherTimer _clockTimer;
 
     // Set while showing the window so the SizeChanged fired by Show() does not
     // trigger a premature (wrong-centre) Rebuild that would flash the ring.
@@ -175,6 +192,27 @@ public partial class RadialWindow : Window
         };
         _previewWarmTimer.Tick += (_, _) => WarmPreviewCache();
         _previewWarmTimer.Start();
+
+        // Ticks once a second to keep the glass dock clock current while shown.
+        _clockTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        _clockTimer.Tick += (_, _) => UpdateGlassClock();
+    }
+
+    /// <summary>Updates the glass dock's clock labels to the current local time.</summary>
+    private void UpdateGlassClock()
+    {
+        if (_glassClockTime == null && _glassClockDate == null)
+            return;
+        var now = DateTime.Now;
+        if (_glassClockTime != null)
+            _glassClockTime.Text = now.ToString("yyyy年M月d日 ddd  H:mm",
+                System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
+        if (_glassClockDate != null)
+            _glassClockDate.Text = now.ToString("M月d日 ddd",
+                System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
     }
 
     private void WarmPreviewCache()
@@ -191,7 +229,7 @@ public partial class RadialWindow : Window
         {
             try
             {
-                WindowPreviewService.WarmCache(apps, RadialIcon.PreviewThumbWidth);
+                WindowPreviewService.WarmCache(apps, WindowPreviewPopup.PreviewThumbWidth);
             }
             catch
             {
@@ -313,6 +351,11 @@ public partial class RadialWindow : Window
         _suppressRebuild = false;
         Rebuild();
         _runningTimer.Stop();           // nothing to poll while hidden
+        // Collapse the content while dismissed so WPF stops rendering (and thus
+        // ticking) every continuous animation — orbits, running sweeps, twinkle
+        // — that would otherwise burn GPU/CPU behind the invisible (Opacity 0)
+        // layered window. ShowFaded makes it Visible again before each Rebuild.
+        PanelCanvas.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -326,6 +369,7 @@ public partial class RadialWindow : Window
         if (pinned)
             IsPinned = true;
 
+        PanelCanvas.Visibility = Visibility.Visible;   // resume rendering/animation
         SizeToActiveContent();
         _suppressRebuild = false;
         Rebuild();                      // pick up any config changes
@@ -333,6 +377,8 @@ public partial class RadialWindow : Window
         Topmost = true;
         Activate();
         _runningTimer.Start();
+        UpdateGlassClock();
+        _clockTimer.Start();
 
         BeginAnimation(OpacityProperty, null);
         Opacity = 0;
@@ -381,6 +427,7 @@ public partial class RadialWindow : Window
         IsPinned = false;
         CancelDrag();
         _runningTimer.Stop();
+        _clockTimer.Stop();
 
         // Dismiss any open window-preview popups so they don't linger on screen.
         foreach (var ic in _iconElements)
@@ -393,6 +440,12 @@ public partial class RadialWindow : Window
         // ShowFaded), which would make the fade run 0->0 and the panel vanish.
         double from = Opacity;
         var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(240));
+        fade.Completed += (_, _) =>
+        {
+            // Only collapse if still hidden (a fast re-show may have intervened).
+            if (!_shown)
+                PanelCanvas.Visibility = Visibility.Collapsed;
+        };
         BeginAnimation(OpacityProperty, fade);
     }
 
@@ -447,6 +500,14 @@ public partial class RadialWindow : Window
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
         _hoverIcon = null;
+        // PanelCanvas was just cleared, so the taskbar tiles are gone from the
+        // tree; drop our tracking so RefreshTaskbarApps rebuilds them.
+        _taskbarIcons.Clear();
+        _taskbarTiles.Clear();
+        _taskbarSignature = null;
+        // Clock labels lived in the cleared canvas too.
+        _glassClockTime = null;
+        _glassClockDate = null;
 
         // --- Layout (theme-driven) -------------------------------------------
         if (_theme.IsSaturn)
@@ -459,8 +520,11 @@ public partial class RadialWindow : Window
             // Lay the grid out using the resolution-scaled icon size so the
             // panel grows on large displays. The theme only reads IconSize.
             var scaled = new AppSettings { IconSize = EffectiveIconSize };
+            // Only the glass dock is lifted (it has a taskbar row beneath it);
+            // plain grid themes stay centred.
+            Point gridCenter = _theme.ShowGlassPanel ? GlassDockCenter : _center;
             _slotPositions.AddRange(_theme.ComputeSlots(
-                _config.Apps.Count, _center, scaled, out _outerRadius));
+                _config.Apps.Count, gridCenter, scaled, out _outerRadius));
         }
 
         // --- Background / animation (Saturn only) ----------------------------
@@ -583,6 +647,9 @@ public partial class RadialWindow : Window
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
+        // Slow perpetual revolution: cap at the display's real refresh (the
+        // global 2x oversampling only benefits short fast transitions).
+        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(anim, App.AmbientFrameRate);
         rt.BeginAnimation(RotateTransform.AngleProperty, anim);
     }
 

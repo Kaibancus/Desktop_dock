@@ -94,7 +94,12 @@ public static class WindowPreviewService
     private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags,
         StringBuilder lpExeName, ref uint lpdwSize);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetApplicationUserModelId(IntPtr hProcess,
+        ref uint applicationUserModelIdLength, StringBuilder? applicationUserModelId);
+
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const int ERROR_INSUFFICIENT_BUFFER = 122;
 
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
@@ -333,11 +338,16 @@ public static class WindowPreviewService
             if (string.IsNullOrWhiteSpace(title))
                 return true;
 
-            string? path = GetProcessPath(pid);
+            string? path = GetProcessInfo(pid, out string? procAumid);
             if (string.IsNullOrWhiteSpace(path))
                 return true;
 
-            string? aumid = GetWindowAumid(hWnd);
+            // Prefer the process's packaged identity (reliable for Win32-hosted
+            // packaged apps like new Teams/Outlook, whose windows do not expose
+            // an AUMID via the window property store), then the window AUMID.
+            string? aumid = procAumid;
+            if (string.IsNullOrWhiteSpace(aumid))
+                aumid = GetWindowAumid(hWnd);
             if (string.IsNullOrWhiteSpace(aumid))
                 aumid = null;
             // Distinct by packaged identity when present, else by exe path, so a
@@ -353,17 +363,32 @@ public static class WindowPreviewService
         return result;
     }
 
-    /// <summary>Full executable path of a process id, or null if inaccessible.</summary>
-    private static string? GetProcessPath(uint pid)
+    /// <summary>Full executable path and packaged AUMID (null when unpackaged)
+    /// of a process id; path is null if the process is inaccessible.</summary>
+    private static string? GetProcessInfo(uint pid, out string? aumid)
     {
+        aumid = null;
         IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         if (h == IntPtr.Zero)
             return null;
         try
         {
+            string? path = null;
             var sb = new StringBuilder(1024);
             uint size = (uint)sb.Capacity;
-            return QueryFullProcessImageNameW(h, 0, sb, ref size) ? sb.ToString() : null;
+            if (QueryFullProcessImageNameW(h, 0, sb, ref size))
+                path = sb.ToString();
+
+            uint len = 0;
+            int rc = GetApplicationUserModelId(h, ref len, null);
+            if (rc == ERROR_INSUFFICIENT_BUFFER && len > 0)
+            {
+                var aumidBuf = new StringBuilder((int)len);
+                if (GetApplicationUserModelId(h, ref len, aumidBuf) == 0)
+                    aumid = aumidBuf.ToString();
+            }
+
+            return path;
         }
         catch
         {

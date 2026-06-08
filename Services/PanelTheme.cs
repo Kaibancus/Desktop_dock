@@ -106,13 +106,14 @@ public sealed class LiquidGlassTheme : PanelTheme
         count > Columns * DefaultRows ? MaxRows : DefaultRows;
 
     public override string Id => "liquidglass";
-    public override string DisplayName => "玻璃";
+    public override string DisplayName => "液态玻璃";
     public override bool SupportsGridReorder => true;
     public override bool ShowGlassPanel => true;
     public override int MaxIcons => Capacity;
     public override Brush WindowBackground => Brushes.Transparent;
-    public override double DefaultTransparency => 0.50;
-    public override double DefaultIconSize => 64;
+    public override double DefaultTransparency => 0.20;
+    // 40% of the settings icon-size slider range [40, 96]: 40 + 0.40 * 56 = 62.4.
+    public override double DefaultIconSize => 62.4;
 
     public override IReadOnlyList<Point> ComputeSlots(
         int count, Point center, AppSettings settings, out double outerReach)

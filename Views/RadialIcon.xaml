@@ -11,22 +11,6 @@
     </UserControl.RenderTransform>
 
     <Grid>
-        <!-- Pre-blurred coloured glow shown on hover. Its blur is rasterised once
-             (BitmapCache); hover only animates Opacity, so there is no per-frame
-             bitmap-effect recompute and the parent zoom stays GPU-composited. -->
-        <Border x:Name="HoverGlow"
-                Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                CornerRadius="12"
-                Opacity="0"
-                IsHitTestVisible="False">
-            <Border.Effect>
-                <BlurEffect Radius="22"/>
-            </Border.Effect>
-            <Border.CacheMode>
-                <BitmapCache/>
-            </Border.CacheMode>
-        </Border>
         <Border Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
                 CornerRadius="12"
@@ -37,6 +21,79 @@
                    RenderOptions.EdgeMode="Aliased"
                    Source="{Binding IconImage, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
         </Border>
+
+        <!-- Water-droplet lens shown on hover. Sits ON TOP of the icon and reads
+             as a bead of water magnifying it (the parent 1.7x zoom does the
+             magnifying): a faint domed refraction tint, a wet rim catching light
+             on the top-left, a soft specular shine and a small focused caustic at
+             the lower-right. Only Opacity is animated (the blurs are rasterised
+             via BitmapCache) so it stays GPU-composited. -->
+        <Grid x:Name="HoverGlow"
+              Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+              Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+              Opacity="0"
+              IsHitTestVisible="False">
+            <Grid.CacheMode>
+                <BitmapCache/>
+            </Grid.CacheMode>
+            <!-- Domed refraction tint: bright near the top where the droplet
+                 surface faces the light, fading to clear, with a faint cool
+                 shade pooling at the base. -->
+            <Border CornerRadius="13">
+                <Border.Background>
+                    <RadialGradientBrush GradientOrigin="0.36,0.28" Center="0.36,0.28"
+                                         RadiusX="0.95" RadiusY="0.95">
+                        <GradientStop Color="#52FFFFFF" Offset="0.0"/>
+                        <GradientStop Color="#1EFFFFFF" Offset="0.4"/>
+                        <GradientStop Color="#00FFFFFF" Offset="0.72"/>
+                        <GradientStop Color="#1A8FB6E8" Offset="1.0"/>
+                    </RadialGradientBrush>
+                </Border.Background>
+            </Border>
+            <!-- Wet rim: a bright hairline around the bead, strongest top-left. -->
+            <Border CornerRadius="13" BorderThickness="1.4">
+                <Border.BorderBrush>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#E8FFFFFF" Offset="0.0"/>
+                        <GradientStop Color="#30FFFFFF" Offset="0.45"/>
+                        <GradientStop Color="#10FFFFFF" Offset="0.6"/>
+                        <GradientStop Color="#80D8ECFF" Offset="1.0"/>
+                    </LinearGradientBrush>
+                </Border.BorderBrush>
+            </Border>
+            <!-- Specular shine: the bright soft dot on the droplet's shoulder. -->
+            <Ellipse x:Name="DropletShine"
+                     Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                     Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                     HorizontalAlignment="Left" VerticalAlignment="Top">
+                <Ellipse.Fill>
+                    <RadialGradientBrush GradientOrigin="0.32,0.24" Center="0.32,0.24"
+                                         RadiusX="0.26" RadiusY="0.2">
+                        <GradientStop Color="#E0FFFFFF" Offset="0.0"/>
+                        <GradientStop Color="#50FFFFFF" Offset="0.5"/>
+                        <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+                <Ellipse.Effect>
+                    <BlurEffect Radius="3"/>
+                </Ellipse.Effect>
+            </Ellipse>
+            <!-- Focused caustic: a faint bright pool at the lower-right where
+                 light refracts through the bead. -->
+            <Ellipse Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                     Height="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}">
+                <Ellipse.Fill>
+                    <RadialGradientBrush GradientOrigin="0.72,0.78" Center="0.72,0.78"
+                                         RadiusX="0.3" RadiusY="0.26">
+                        <GradientStop Color="#3CFFFFFF" Offset="0.0"/>
+                        <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+                <Ellipse.Effect>
+                    <BlurEffect Radius="5"/>
+                </Ellipse.Effect>
+            </Ellipse>
+        </Grid>
 
         <!-- Running indicator: a square border washed with a flowing blue light.
              A bright spot in the gradient sweeps around the edge (driven by a
@@ -55,6 +112,11 @@
             <Border.Effect>
                 <BlurEffect Radius="10"/>
             </Border.Effect>
+            <!-- Rasterise the blurred ring once so the breathing Opacity pulse is
+                 a pure GPU composite (no per-frame blur recompute). -->
+            <Border.CacheMode>
+                <BitmapCache/>
+            </Border.CacheMode>
         </Border>
         <Border x:Name="RunningBorder"
                 Width="{Binding IconSize, RelativeSource={RelativeSource AncestorType=UserControl}}"
