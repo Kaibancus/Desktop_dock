@@ -248,7 +248,12 @@ public partial class RadialWindow
         };
         Canvas.SetLeft(glow, _center.X - rMid);
         Canvas.SetTop(glow, _center.Y - rMid * _stackTiltY);
-        (_ringLayer ?? PanelCanvas).Children.Add(glow);
+        // Deliberately NOT added to the rotating _ringLayer: this halo is an
+        // axis-symmetric ellipse centred on the panel, so revolving it looks
+        // identical frame-to-frame yet forces WPF to re-rasterise a large blur
+        // kernel every frame (the dominant per-frame cost, and it grows with the
+        // theme-enlarge factor). On the static canvas the blur is computed once.
+        PanelCanvas.Children.Add(glow);
     }
 
     /// <summary>Adds a soft shimmer arc that sits on the ring at <paramref name="phaseDeg"/>
@@ -386,7 +391,6 @@ public partial class RadialWindow
                 },
             },
             Data = new EllipseGeometry(center, dia * 1.9, dia * 1.9),
-            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 1.6 },
         };
         halo.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
         (_ringLayer ?? PanelCanvas).Children.Add(halo);
