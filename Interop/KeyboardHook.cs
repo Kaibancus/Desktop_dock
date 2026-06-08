@@ -23,6 +23,8 @@ public sealed class KeyboardHook : IDisposable
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int WM_SYSKEYUP = 0x0105;
     private const int VK_CONTROL = 0x11;
+    private const int VK_LCONTROL = 0xA2;
+    private const int VK_RCONTROL = 0xA3;
 
     private readonly int _triggerVk;
     private readonly bool _suppress;
@@ -31,6 +33,12 @@ public sealed class KeyboardHook : IDisposable
     private readonly Dispatcher _dispatcher;
     private IntPtr _hookId = IntPtr.Zero;
     private bool _isDown;
+
+    // Ctrl state tracked from the events this hook itself receives. The hook
+    // sees every keystroke (including injected ones) in order, so this stays
+    // accurate even when an injected Ctrl-down arrives microseconds before the
+    // trigger key and GetAsyncKeyState has not caught up yet.
+    private bool _ctrlDown;
 
     /// <param name="triggerVirtualKey">Virtual-key code, e.g. 0x78 for F9.</param>
     /// <param name="suppressKey">When true the trigger key is swallowed so it does
@@ -91,13 +99,25 @@ public sealed class KeyboardHook : IDisposable
             int msg = (int)wParam;
             int vk = Marshal.ReadInt32(lParam); // KBDLLHOOKSTRUCT.vkCode is first field
 
+            // Track Ctrl up/down from the hook's own event stream so an injected
+            // Ctrl-down (trackpad gesture) is registered the instant it passes
+            // through, in correct order relative to the trigger key.
+            if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL)
+            {
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                    _ctrlDown = true;
+                else if (msg == WM_KEYUP || msg == WM_SYSKEYUP)
+                    _ctrlDown = false;
+            }
+
             if (vk == _triggerVk)
             {
                 // For a Ctrl+key chord, only react while a Ctrl key is held.
-                // GetAsyncKeyState reads the real-time key state, which stays
-                // accurate even when the chord is injected (e.g. a trackpad
-                // gesture remapped to Ctrl+4) rather than physically typed.
+                // Prefer the hook-tracked state (order-accurate for injected
+                // chords); fall back to GetAsyncKeyState in case the Ctrl-down
+                // happened before this hook was installed.
                 bool ctrlOk = !_requireCtrl ||
+                    _ctrlDown ||
                     (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 
                 if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
