@@ -409,19 +409,64 @@ public partial class RadialWindow
         root.Children.Add(rim);
 
         // --- Rotation: spin the polar disc about its centre. Always turning
-        // slowly; hovering speeds it up. The animation is restarted from the
-        // current angle so speed changes are seamless. --------------------
+        // slowly; hovering speeds it up. Rather than snapping straight to the
+        // new constant rate (a jarring instantaneous velocity jump), the disc
+        // eases from its current angular velocity to the target one over a
+        // short ramp, then settles into the steady perpetual spin. -----------
+        double currentSpinSeconds = PlanetSpinSeconds;
+        int spinGen = 0;
+
         void StartSpin(double secondsPerTurn)
         {
+            int gen = ++spinGen;
             double cur = discRotate.Angle % 360;
             discRotate.BeginAnimation(RotateTransform.AngleProperty, null);
             discRotate.Angle = cur;
-            var anim = new DoubleAnimation(cur, cur + 360,
-                TimeSpan.FromSeconds(secondsPerTurn))
+
+            // Begins the never-ending constant-rate spin from the current angle.
+            void Steady()
             {
-                RepeatBehavior = RepeatBehavior.Forever,
-            };
-            discRotate.BeginAnimation(RotateTransform.AngleProperty, anim);
+                double a = discRotate.Angle % 360;
+                discRotate.BeginAnimation(RotateTransform.AngleProperty, null);
+                discRotate.Angle = a;
+                var loop = new DoubleAnimation(a, a + 360,
+                    TimeSpan.FromSeconds(secondsPerTurn))
+                {
+                    RepeatBehavior = RepeatBehavior.Forever,
+                };
+                discRotate.BeginAnimation(RotateTransform.AngleProperty, loop);
+            }
+
+            double vNow = 360.0 / currentSpinSeconds;     // deg/s before the change
+            double vTarget = 360.0 / secondsPerTurn;      // deg/s after the change
+            currentSpinSeconds = secondsPerTurn;
+
+            // No meaningful speed change (e.g. the initial start): go steady now.
+            if (Math.Abs(vNow - vTarget) < 0.01)
+            {
+                Steady();
+            }
+            else
+            {
+                // Ramp distance for a linear velocity change over the transition
+                // time = average velocity x time. A custom easing makes the
+                // disc's angular velocity vary linearly from vNow to vTarget so
+                // the handoff into the steady spin has matching speed (no jerk).
+                const double T = 0.9;
+                double dist = (vNow + vTarget) / 2.0 * T;
+                var ramp = new DoubleAnimation(cur, cur + dist, TimeSpan.FromSeconds(T))
+                {
+                    EasingFunction = new VelocityRampEase { StartVel = vNow, EndVel = vTarget },
+                    FillBehavior = FillBehavior.Stop,
+                };
+                ramp.Completed += (_, _) =>
+                {
+                    if (gen == spinGen)   // not superseded by a newer StartSpin
+                        Steady();
+                };
+                discRotate.Angle = cur + dist;            // hold final angle when ramp stops
+                discRotate.BeginAnimation(RotateTransform.AngleProperty, ramp);
+            }
 
             // Faster spin -> stronger motion blur. Below a small threshold the
             // blur is dropped entirely (Effect = null) so the perpetually
@@ -499,5 +544,31 @@ public partial class RadialWindow
         Canvas.SetLeft(root, _center.X - size / 2);
         Canvas.SetTop(root, _center.Y - size / 2);
         PanelCanvas.Children.Add(root);
+    }
+
+    /// <summary>
+    /// Easing whose normalised progress makes the animated value's rate of
+    /// change vary linearly from <see cref="StartVel"/> to <see cref="EndVel"/>.
+    /// Used to ramp the planet's spin between two constant angular velocities so
+    /// the disc accelerates/decelerates smoothly and the speed matches at the
+    /// handoff into the steady spin (no velocity discontinuity / jerk).
+    /// </summary>
+    private sealed class VelocityRampEase : EasingFunctionBase
+    {
+        public double StartVel { get; set; }
+        public double EndVel { get; set; }
+
+        protected override double EaseInCore(double t)
+        {
+            double a = StartVel, b = EndVel;
+            double s = a + b;
+            if (s <= 0)
+                return t;
+            // p(t) = (2a·t + (b-a)·t²) / (a+b): p(0)=0, p(1)=1, and dp/dt has
+            // ratio b:a between the endpoints, i.e. a linear velocity ramp.
+            return (2 * a * t + (b - a) * t * t) / s;
+        }
+
+        protected override Freezable CreateInstanceCore() => new VelocityRampEase();
     }
 }
