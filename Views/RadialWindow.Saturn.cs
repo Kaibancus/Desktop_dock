@@ -221,8 +221,8 @@ public partial class RadialWindow
                     RepeatBehavior = RepeatBehavior.Forever,
                     BeginTime = TimeSpan.FromSeconds(2.0 * Hash01(i * 6.2)),
                 };
-                // Slow perpetual twinkle: cap at the real refresh to save cycles.
-                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(tw, App.AmbientFrameRate);
+                // Perpetual twinkle: tick at the oversampled rate for smooth fades.
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(tw, App.AnimationFrameRate);
                 star.BeginAnimation(OpacityProperty, tw);
             }
         }

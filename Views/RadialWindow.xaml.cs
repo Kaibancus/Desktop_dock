@@ -382,7 +382,7 @@ public partial class RadialWindow : Window
 
         BeginAnimation(OpacityProperty, null);
         Opacity = 0;
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(210));
+        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150));
         BeginAnimation(OpacityProperty, fade);
     }
 
@@ -405,7 +405,7 @@ public partial class RadialWindow : Window
 
         var begin = TimeSpan.FromSeconds(delaySeconds);
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var grow = new DoubleAnimation(0.55, 1.0, TimeSpan.FromMilliseconds(380))
+        var grow = new DoubleAnimation(0.55, 1.0, TimeSpan.FromMilliseconds(280))
         {
             BeginTime = begin,
             EasingFunction = ease,
@@ -413,7 +413,7 @@ public partial class RadialWindow : Window
         sc.BeginAnimation(ScaleTransform.ScaleXProperty, grow);
         sc.BeginAnimation(ScaleTransform.ScaleYProperty, grow.Clone());
 
-        var fadeIn = new DoubleAnimation(0, 0.78, TimeSpan.FromMilliseconds(380))
+        var fadeIn = new DoubleAnimation(0, 0.78, TimeSpan.FromMilliseconds(280))
         {
             BeginTime = begin,
             EasingFunction = ease,
@@ -439,7 +439,7 @@ public partial class RadialWindow : Window
         // first: clearing snaps Opacity back to its base value (0, set in
         // ShowFaded), which would make the fade run 0->0 and the panel vanish.
         double from = Opacity;
-        var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(240));
+        var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(170));
         fade.Completed += (_, _) =>
         {
             // Only collapse if still hidden (a fast re-show may have intervened).
@@ -647,9 +647,9 @@ public partial class RadialWindow : Window
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        // Slow perpetual revolution: cap at the display's real refresh (the
-        // global 2x oversampling only benefits short fast transitions).
-        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(anim, App.AmbientFrameRate);
+        // Slow perpetual revolution: tick at the oversampled rate so the orbit
+        // stays smooth and does not beat against the 59.94 Hz present.
+        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(anim, App.AnimationFrameRate);
         rt.BeginAnimation(RotateTransform.AngleProperty, anim);
     }
 

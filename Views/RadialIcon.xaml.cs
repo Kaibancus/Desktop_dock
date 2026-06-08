@@ -94,13 +94,13 @@ public partial class RadialIcon : UserControl
             RunningGlowBorder.Visibility = Visibility.Visible;
             // Sweep the bright spot continuously around the border. A linear
             // 0..360 rotation on the brush is GPU-composited, so it stays smooth.
-            // Cap at the display's real refresh: a 4.2 s rotation gains nothing
-            // from the global 2x oversampling, so the cap just saves cycles.
+            // Tick at the oversampled rate so the slow rotation does not beat
+            // against the panel's 59.94 Hz present (which reads as judder).
             var sweep = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(4.2)))
             {
                 RepeatBehavior = RepeatBehavior.Forever,
             };
-            Timeline.SetDesiredFrameRate(sweep, App.AmbientFrameRate);
+            Timeline.SetDesiredFrameRate(sweep, App.AnimationFrameRate);
             RunningSweep.BeginAnimation(RotateTransform.AngleProperty, sweep);
             // Gentle breathing glow on the static blurred border (Opacity is a
             // cheap, composited property — no per-frame bitmap-effect recompute).
@@ -109,7 +109,7 @@ public partial class RadialIcon : UserControl
                 AutoReverse = true,
                 RepeatBehavior = RepeatBehavior.Forever,
             };
-            Timeline.SetDesiredFrameRate(pulse, App.AmbientFrameRate);
+            Timeline.SetDesiredFrameRate(pulse, App.AnimationFrameRate);
             RunningGlowBorder.BeginAnimation(OpacityProperty, pulse);
         }
         else

@@ -21,6 +21,11 @@ public partial class App : Application
     /// oversampled like short interactive transitions. Defaults to 60.</summary>
     public static int AmbientFrameRate { get; private set; } = 60;
 
+    /// <summary>The oversampled animation tick rate (2x the real refresh on 60 Hz
+    /// panels, native on high-refresh). Continuous loops as well as short
+    /// transitions tick at this rate so motion stays smooth and low-latency.</summary>
+    public static int AnimationFrameRate { get; private set; } = 120;
+
     private AppConfig _config = new();
     private KeyboardHook? _hook;
     private KeyboardHook? _pinnedHook;
@@ -58,6 +63,7 @@ public partial class App : Application
             typeof(System.Windows.Media.Animation.Timeline),
             new FrameworkPropertyMetadata(refreshHz));
         AmbientFrameRate = hz;   // un-oversampled present rate for slow loops
+        AnimationFrameRate = refreshHz;  // oversampled tick rate for smooth motion
 
         // Single-instance guard: if another Polaris is already running,
         // notify the user and exit immediately.

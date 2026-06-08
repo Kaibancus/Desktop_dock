@@ -426,21 +426,20 @@ public partial class RadialWindow
         root.Children.Add(sweep);
 
         // Always-on running animation (every taskbar app is, by definition, running).
-        // Cap these slow loops at the display's real refresh: oversampling a 4.2 s
-        // rotation / 2.2 s pulse buys no smoothness, so the cap just saves cycles
-        // and leaves headroom for the interactive hover/zoom to stay fluid.
+        // Tick at the oversampled rate so the slow rotation / pulse stay smooth
+        // and don't beat against the 59.94 Hz present (which reads as judder).
         var sweepAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(4.2)))
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        Timeline.SetDesiredFrameRate(sweepAnim, App.AmbientFrameRate);
+        Timeline.SetDesiredFrameRate(sweepAnim, App.AnimationFrameRate);
         sweepTransform.BeginAnimation(RotateTransform.AngleProperty, sweepAnim);
         var glowAnim = new DoubleAnimation(0.35, 0.8, new Duration(TimeSpan.FromSeconds(2.2)))
         {
             AutoReverse = true,
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        Timeline.SetDesiredFrameRate(glowAnim, App.AmbientFrameRate);
+        Timeline.SetDesiredFrameRate(glowAnim, App.AnimationFrameRate);
         glow.BeginAnimation(OpacityProperty, glowAnim);
 
         IntPtr win = app.Window;
