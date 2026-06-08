@@ -14,7 +14,7 @@ public partial class RadialWindow
 {
     private void DrawBackingDisc()
     {
-        double icon = _config.Settings.IconSize;
+        double icon = EffectiveIconSize;
         double outerIcon = icon * OuterIconScale;
         double r = _outerRadius + outerIcon;
         double d = r * 2;
@@ -67,8 +67,9 @@ public partial class RadialWindow
         double rB = InnerRadius;                 // bright B ring -> inner icons
         double rF = InnerRadius + RingStep;      // thin F ringlet -> outer icons
 
-        // Planet body radius (must match DrawCenterButton: IconSize * 2.5 / 2).
-        double planetR = icon * 2.5 / 2.0;
+        // Planet body radius (must match DrawCenterButton: fixed base, scaled
+        // by resolution only — independent of the user's icon-size setting).
+        double planetR = PlanetDiameter / 2.0;
 
         // --- Real Saturn ring radii (in units of Saturn's equatorial radius) -
         // From NASA/Cassini data; the planet surface is at 1.0.
@@ -133,13 +134,13 @@ public partial class RadialWindow
             // (G/E are radially compressed to sit close to F inside the disc.) --
             double gIn = rF + outerIcon * 0.34;            // tighter Roche-to-G gap
             DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.18, 0.25, icon * 0.5); // G ring (narrow)
-            double eIn = gIn + icon * 0.18;
+            double eIn = gIn + outerIcon * 0.18;
             double eOut = r - icon * 0.04;
-            DrawRingZone(eIn, eOut, icyG, 0.147, 0.034, icon);                  // E ring (broad halo)
+            DrawRingZone(eIn, eOut, icyG, 0.147, 0.012, icon, crispRim: false);     // E ring (broad halo, fades out)
 
             // Soft outer bloom: a blurred icy halo over the faint G/E rings so
             // they glow and fade out rather than ending abruptly.
-            AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.10);
+            AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.06);
         }
 
         // --- Ring-revolution cues ------------------------------------------
@@ -408,7 +409,7 @@ public partial class RadialWindow
     /// and a subtle per-radius brightness flicker for a granular look.
     /// </summary>
     private void DrawRingZone(double rInner, double rOuter, Color color,
-        double aInner, double aOuter, double iconSize)
+        double aInner, double aOuter, double iconSize, bool crispRim = true)
     {
         if (rOuter <= rInner || rOuter <= 1)
             return;
@@ -429,11 +430,11 @@ public partial class RadialWindow
             // fine sinusoids plus deterministic noise add an icy-particle speckle
             // so the rings no longer look like flat concentric strokes.
             double grain =
-                  0.60
-                + 0.22 * Math.Sin(rr * 0.018 + 1.3)   // broad brightness envelope
-                + 0.12 * Math.Sin(rr * 0.071)         // medium undulation
-                + 0.10 * Math.Sin(rr * 0.193 + 0.7)   // fine ripple
-                + 0.12 * (Hash01(rr) - 0.5);          // high-frequency speckle
+                  0.64
+                + 0.17 * Math.Sin(rr * 0.018 + 1.3)   // broad brightness envelope
+                + 0.09 * Math.Sin(rr * 0.071)         // medium undulation
+                + 0.07 * Math.Sin(rr * 0.193 + 0.7)   // fine ripple
+                + 0.11 * (Hash01(rr) - 0.5);          // high-frequency speckle
             grain = Math.Clamp(grain, 0.32, 1.12);
             double alpha = Math.Clamp((aInner + (aOuter - aInner) * t) * grain, 0, 1);
             double shadeT = Math.Clamp(0.5 + 0.5 * Math.Sin(rr * 0.5)
@@ -451,16 +452,21 @@ public partial class RadialWindow
             StackCentered(ring, rr);
         }
 
-        // Crisp bright edge on the outer rim of the zone.
-        var rim = new Ellipse
+        // Crisp bright edge on the outer rim of the zone. Skipped for the broad
+        // outermost halo so it dissolves softly into the disc instead of ending
+        // on a hard ring.
+        if (crispRim)
         {
-            Width = rOuter * 2,
-            Height = rOuter * 2,
-            Stroke = new SolidColorBrush(WithAlpha(Lighten(color, 0.25), aOuter * 0.5)),
-            StrokeThickness = 1.0,
-            IsHitTestVisible = false,
-        };
-        StackCentered(rim, rOuter);
+            var rim = new Ellipse
+            {
+                Width = rOuter * 2,
+                Height = rOuter * 2,
+                Stroke = new SolidColorBrush(WithAlpha(Lighten(color, 0.25), aOuter * 0.5)),
+                StrokeThickness = 1.0,
+                IsHitTestVisible = false,
+            };
+            StackCentered(rim, rOuter);
+        }
 
         // Sparse bright/dark speckle scattered through the zone to break up the
         // perfect concentric stroke pattern (icy-particle grain). Positions are

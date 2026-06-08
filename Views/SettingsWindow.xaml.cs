@@ -55,6 +55,7 @@ public partial class SettingsWindow : Window
         var s = _config.Settings;
         TransparencySlider.Value = s.PanelTransparency;
         IconSizeSlider.Value = s.IconSize;
+        UpdateSliderLabels();
         StartupCheck.IsChecked = StartupManager.IsEnabled() || s.RunAtStartup;
 
         foreach (var theme in ThemeRegistry.All)
@@ -208,8 +209,23 @@ public partial class SettingsWindow : Window
 
     private void OnSettingChanged(object sender, RoutedEventArgs e)
     {
+        UpdateSliderLabels();
         if (_loaded)
             CommitSettings();
+    }
+
+    /// <summary>Appends the live percentage to the transparency / icon-size
+    /// slider labels. Transparency is shown directly as a percentage; icon size
+    /// as a percentage of its adjustable range.</summary>
+    private void UpdateSliderLabels()
+    {
+        int transPct = (int)Math.Round(TransparencySlider.Value * 100.0);
+        double iRange = IconSizeSlider.Maximum - IconSizeSlider.Minimum;
+        int iconPct = iRange > 0
+            ? (int)Math.Round((IconSizeSlider.Value - IconSizeSlider.Minimum) / iRange * 100.0)
+            : 0;
+        TransparencyLabel.Text = $"面板透明度 {transPct}%";
+        IconSizeLabel.Text = $"图标大小 {iconPct}%";
     }
 
     private void OnStartupChanged(object sender, RoutedEventArgs e)
@@ -254,6 +270,7 @@ public partial class SettingsWindow : Window
             _loaded = false;
             TransparencySlider.Value = s.PanelTransparency;
             IconSizeSlider.Value = s.IconSize;
+            UpdateSliderLabels();
             _loaded = true;
 
             _persist();

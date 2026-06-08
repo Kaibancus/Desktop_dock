@@ -14,7 +14,7 @@ public partial class RadialWindow
 {
     private void DrawCenterButton()
     {
-        double size = _config.Settings.IconSize * 2.5;
+        double size = PlanetDiameter;
         double r = size / 2;
 
         // Saturn planet at the centre. Click opens settings; hovering slowly

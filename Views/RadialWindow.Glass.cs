@@ -14,46 +14,55 @@ public partial class RadialWindow
     /// circular settings button placed above the grid.</summary>
     private void DrawSimpleCenterButton()
     {
-        double s = Math.Max(34, _config.Settings.IconSize * 0.7);
+        double s = Math.Max(40, EffectiveIconSize * 0.82);
         var btn = new Border
         {
             Width = s,
             Height = s,
             CornerRadius = new CornerRadius(s / 2),
-            Background = new SolidColorBrush(Color.FromArgb(0x22, 0x20, 0x20, 0x20)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0x60, 0x60, 0x60)),
-            BorderThickness = new Thickness(1),
+            Background = new SolidColorBrush(Color.FromArgb(0xCC, 0x2A, 0x6C, 0xF0)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1.6),
             Cursor = System.Windows.Input.Cursors.Hand,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 12,
+                ShadowDepth = 2,
+                Direction = 270,
+                Opacity = 0.55,
+                Color = Color.FromRgb(0x0A, 0x10, 0x1C),
+            },
             Child = new TextBlock
             {
                 Text = "⚙",
-                FontSize = s * 0.5,
-                Foreground = new SolidColorBrush(Color.FromArgb(0xCC, 0x33, 0x33, 0x33)),
+                FontSize = s * 0.54,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
             },
         };
         btn.MouseLeftButtonUp += (_, e) => { e.Handled = true; RequestOpenSettings?.Invoke(); };
 
-        double gridTop = _center.Y - 2 * (_config.Settings.IconSize * 2.1);
+        double gridTop = _center.Y - 2 * (EffectiveIconSize * 2.1);
         Canvas.SetLeft(btn, _center.X - s / 2);
-        Canvas.SetTop(btn, gridTop - s - _config.Settings.IconSize * 0.6);
+        Canvas.SetTop(btn, gridTop - s - EffectiveIconSize * 0.6);
         Panel.SetZIndex(btn, 2000);
         PanelCanvas.Children.Add(btn);
     }
 
     /// <summary>
     /// Draws the "液态玻璃" backdrop: a translucent, frosted rounded-rectangle
-    /// panel sized to enclose the 4×3 icon grid. Its overall opacity follows the
-    /// user's panel-transparency setting.
+    /// panel sized to enclose the 5-column icon grid (5×4 by default, growing to
+    /// 5×5). Its overall opacity follows the user's panel-transparency setting.
     /// </summary>
     private void DrawGlassPanel()
     {
-        double icon = _config.Settings.IconSize;
+        double icon = EffectiveIconSize;
         double cellW = icon * 2.15;
         double cellH = icon * 2.35;
+        int rows = LiquidGlassTheme.RowsFor(_config.Apps.Count);
         double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
-        double gridH = (LiquidGlassTheme.Rows - 1) * cellH;
+        double gridH = (rows - 1) * cellH;
 
         double padX = icon * 1.15;
         double padY = icon * 1.15;

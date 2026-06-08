@@ -21,10 +21,33 @@ namespace Polaris.Views;
 public partial class RadialWindow : Window
 {
     private const double DragThreshold = 6.0;
-    private const double InnerRadius = 140.0;
-    private const double RingStep = 88.0;
+    private const double BaseInnerRadius = 140.0;
+    private const double BaseRingStep = 88.0;
     private const int Ring0Cap = 12;
     private const int Ring1Cap = 24;
+
+    // Reference screen height (DIPs) the layout was tuned for. On taller
+    // displays everything is scaled up proportionally so the panel does not
+    // look tiny on large/high-resolution monitors. Never scaled below 1.0.
+    private const double ReferenceScreenHeight = 1080.0;
+
+    // Global resolution scale factor, recomputed from the primary screen size
+    // each time the overlay is sized. 1.0 on a 1080p (DIP) display.
+    private double _uiScale = 1.0;
+
+    // Ring radii scaled by the current resolution factor.
+    private double InnerRadius => BaseInnerRadius * _uiScale;
+    private double RingStep => BaseRingStep * _uiScale;
+
+    // User-chosen icon diameter scaled by the resolution factor, so icons (and
+    // the grid/ring geometry derived from them) grow on larger displays.
+    private double EffectiveIconSize => _config.Settings.IconSize * _uiScale;
+
+    // Saturn's centre planet uses a fixed base diameter (independent of the
+    // user's icon-size setting) so adjusting icon size never resizes the planet;
+    // it still scales with screen resolution like everything else.
+    private const double PlanetIconBase = 56.0;
+    private double PlanetDiameter => PlanetIconBase * _uiScale * 2.5;
 
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.18;
@@ -179,7 +202,13 @@ public partial class RadialWindow : Window
         // composition, which lifts the real animation frame rate. The large
         // margin keeps hover zoom, drop shadows, the settings gear and the
         // drag-to-delete ring comfortably inside the window.
-        double icon = _config.Settings.IconSize;
+        double sw = SystemParameters.PrimaryScreenWidth;
+        double sh = SystemParameters.PrimaryScreenHeight;
+        // Scale the whole panel up on taller displays (never below 1.0) so it
+        // does not look tiny on large monitors.
+        _uiScale = Math.Clamp(sh / ReferenceScreenHeight, 1.0, 2.0);
+
+        double icon = EffectiveIconSize;
         bool saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
 
         double halfW, halfH;
@@ -193,11 +222,12 @@ public partial class RadialWindow : Window
         }
         else
         {
-            // Liquid-glass 4x3 grid panel extents (mirrors DrawGlassPanel).
+            // Liquid-glass grid panel extents (mirrors DrawGlassPanel); size to
+            // the largest possible 5×5 grid so the window fits when expanded.
             double cellW = icon * 2.15;
             double cellH = icon * 2.35;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
-            double gridH = (LiquidGlassTheme.Rows - 1) * cellH;
+            double gridH = (LiquidGlassTheme.MaxRows - 1) * cellH;
             double panelHalfW = (gridW + icon + icon * 1.15 * 2) / 2.0;
             double panelHalfH = (gridH + icon + icon * 1.15 * 2) / 2.0;
             // The settings gear sits above the grid; keep it inside.
@@ -208,11 +238,9 @@ public partial class RadialWindow : Window
 
         // Generous fixed margin on top of the computed reach (ample headroom),
         // then clamp to the screen so we never exceed it.
-        const double Margin = 180.0;
-        double sw = SystemParameters.PrimaryScreenWidth;
-        double sh = SystemParameters.PrimaryScreenHeight;
-        double w = Math.Min((halfW + Margin) * 2.0, sw);
-        double h = Math.Min((halfH + Margin) * 2.0, sh);
+        double margin = 180.0 * _uiScale;
+        double w = Math.Min((halfW + margin) * 2.0, sw);
+        double h = Math.Min((halfH + margin) * 2.0, sh);
 
         Width = w;
         Height = h;
@@ -419,8 +447,11 @@ public partial class RadialWindow : Window
         else
         {
             _slotPositions.Clear();
+            // Lay the grid out using the resolution-scaled icon size so the
+            // panel grows on large displays. The theme only reads IconSize.
+            var scaled = new AppSettings { IconSize = EffectiveIconSize };
             _slotPositions.AddRange(_theme.ComputeSlots(
-                _config.Apps.Count, _center, _config.Settings, out _outerRadius));
+                _config.Apps.Count, _center, scaled, out _outerRadius));
         }
 
         // --- Background / animation (Saturn only) ----------------------------
@@ -465,10 +496,10 @@ public partial class RadialWindow : Window
         {
             var entry = _config.Apps[i];
             double size = (_theme.IsSaturn && i >= r0)
-                ? _config.Settings.IconSize * OuterIconScale
+                ? EffectiveIconSize * OuterIconScale
                 : _theme.ShowGlassPanel
-                    ? _config.Settings.IconSize * GlassIconScale
-                    : _config.Settings.IconSize;
+                    ? EffectiveIconSize * GlassIconScale
+                    : EffectiveIconSize;
             var icon = CreateIcon(entry, size);
             PlaceCentered(icon, _slotPositions[i]);
             PanelCanvas.Children.Add(icon);
