@@ -199,7 +199,22 @@ public static class IconExtractor
 
             using var crop = bmp.Clone(new Drawing.Rectangle(sx, sy, side, side),
                 Drawing.Imaging.PixelFormat.Format32bppArgb);
-            IntPtr hcrop = crop.GetHicon();
+
+            // Scale the cropped content back UP to the original frame size (256)
+            // with high quality. This keeps the returned icon a LARGE bitmap, so
+            // the UI always *downscales* it (cheap) — exactly as it did before the
+            // crop. Returning the small cropped bitmap directly would force the
+            // Image's HighQuality scaling mode to *upscale* a tiny source, which
+            // is re-evaluated on the render thread during the hover-scale
+            // animation and noticeably drops the Saturn animation frame rate.
+            using var upscaled = new Drawing.Bitmap(w, h, Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Drawing.Graphics.FromImage(upscaled))
+            {
+                g.InterpolationMode = Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(crop, new Drawing.Rectangle(0, 0, w, h));
+            }
+            IntPtr hcrop = upscaled.GetHicon();
             try
             {
                 using var t = Drawing.Icon.FromHandle(hcrop);

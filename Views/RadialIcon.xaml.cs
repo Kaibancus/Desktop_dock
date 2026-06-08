@@ -256,10 +256,10 @@ public partial class RadialIcon : UserControl
 
         // Lay tiles out in a wrapping grid so ALL windows are visible (a single
         // horizontal row would overflow the popup width and, with the scrollbar
-        // hidden, silently clip the extra tiles). Cap the row width at up to 5
+        // hidden, silently clip the extra tiles). Cap the row width at up to 6
         // columns; further windows wrap onto additional rows.
         const double TileWidth = PreviewThumbWidth + 24; // 220 content + padding + margin
-        int columns = Math.Min(windows.Count, 5);
+        int columns = Math.Min(windows.Count, 6);
         var strip = new System.Windows.Controls.WrapPanel
         {
             Orientation = Orientation.Horizontal,
