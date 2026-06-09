@@ -16,6 +16,16 @@ Polaris 是一款常驻系统托盘的应用程序坞。您可以把应用程序
 - **全局触发键**：默认使用右 Alt（虚拟键 `0xA5`）作为「按住显示」的触发键，可在设置中修改。
 
 
+
+
+https://github.com/user-attachments/assets/f18cdadc-0f6f-4f12-b3ef-ae256569738d
+
+
+
+
+https://github.com/user-attachments/assets/f27e35c1-91f8-4f12-a7c0-fd7eaa45e28a
+
+
 ## 环境要求
 
 - Windows 10 / 11
