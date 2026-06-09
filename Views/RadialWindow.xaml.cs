@@ -284,7 +284,7 @@ public partial class RadialWindow : Window
         else
         {
             // Liquid-glass grid panel extents (mirrors DrawGlassPanel); size to
-            // the largest possible 5×5 grid so the window fits when expanded.
+            // the largest possible 6×5 grid so the window fits when expanded.
             double cellW = icon * 2.15;
             double cellH = icon * 2.35;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
@@ -599,7 +599,16 @@ public partial class RadialWindow : Window
             _innerOrbitLayer = null;
             _outerOrbitLayer = null;
             if (_theme.ShowGlassPanel)
+            {
+                // Re-add the frosted backdrop captured at summon time. Rebuild
+                // clears the canvas (e.g. after a drag-reorder), which would
+                // otherwise drop the blur and reveal the sharp desktop. Reuse the
+                // cached snapshot — a fresh capture here would grab the visible
+                // panel. No-op on the initial summon (ShowFaded captures right
+                // after this Rebuild).
+                RestoreDesktopBlur();
                 DrawGlassPanel();
+            }
         }
 
         int r0 = _theme.IsSaturn ? EffectiveRing0Count(_config.Apps.Count) : int.MaxValue;
@@ -1414,15 +1423,22 @@ public partial class RadialWindow : Window
         }
 
         // If the program is already running, bring its existing window to the
-        // foreground instead of starting a second instance.
-        try
+        // foreground instead of starting a second instance. File Explorer is an
+        // exception: explorer.exe is also the desktop shell process, so its
+        // MainWindowHandle is usually the desktop/taskbar rather than a file
+        // window — activating that does nothing visible. Always launch instead,
+        // which opens a fresh Explorer window.
+        if (!IsFileExplorer(entry.Path, entry.Arguments))
         {
-            if (RunningAppTracker.ActivateExisting(entry.Path))
-                return;
-        }
-        catch
-        {
-            // Fall through to a normal launch if activation fails.
+            try
+            {
+                if (RunningAppTracker.ActivateExisting(entry.Path))
+                    return;
+            }
+            catch
+            {
+                // Fall through to a normal launch if activation fails.
+            }
         }
 
         try
@@ -1441,6 +1457,25 @@ public partial class RadialWindow : Window
         {
             MessageBox.Show($"无法启动 {entry.Name}:\n{ex.Message}", "Polaris",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>True when the entry is the genuine Windows File Explorer
+    /// (explorer.exe with no shell:AppsFolder launcher argument). explorer.exe is
+    /// also the desktop shell, so we never try to "activate its existing window"
+    /// — we always launch a fresh Explorer window instead.</summary>
+    private static bool IsFileExplorer(string path, string? arguments)
+    {
+        try
+        {
+            if (!string.Equals(System.IO.Path.GetFileName(path), "explorer.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            return WindowPreviewService.TryGetLauncherAumid(path, arguments) == null;
+        }
+        catch
+        {
+            return false;
         }
     }
 

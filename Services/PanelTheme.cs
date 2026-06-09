@@ -85,25 +85,28 @@ public sealed class SaturnRingTheme : PanelTheme
 }
 
 /// <summary>The "液态玻璃" theme: a translucent rounded-rectangle frosted-glass
-/// panel with the icons laid out in a 5-column grid. The grid defaults to 4
-/// rows (5×4) and expands to a 5th row (5×5) only once the icons overflow the
-/// default 20 slots. Supports free drag-reorder with the neighbour "push aside"
+/// panel with the icons laid out in a 6-column grid. The grid defaults to 3
+/// rows (6×3) and grows one row at a time (6×4, 6×5) as the icons overflow.
+/// Supports free drag-reorder with the neighbour "push aside"
 /// animation. The glass panel's translucency is driven by the user's
 /// panel-opacity setting.</summary>
 public sealed class LiquidGlassTheme : PanelTheme
 {
-    public const int Columns = 5;
-    public const int DefaultRows = 4;
+    public const int Columns = 6;
+    public const int DefaultRows = 3;
     public const int MaxRows = 5;
 
-    /// <summary>Maximum icons this theme can display (a full 5×5 grid).</summary>
+    /// <summary>Maximum icons this theme can display (a full 6×5 grid).</summary>
     public const int Capacity = Columns * MaxRows;
 
     /// <summary>Number of grid rows to display for <paramref name="count"/> icons:
-    /// the default 5×4 grid, expanding to a 5×5 grid only once the icons overflow
-    /// the default 20 slots.</summary>
-    public static int RowsFor(int count) =>
-        count > Columns * DefaultRows ? MaxRows : DefaultRows;
+    /// the default 6×3 grid, growing one row at a time (6×4, 6×5) as the icons
+    /// overflow, capped at <see cref="MaxRows"/>.</summary>
+    public static int RowsFor(int count)
+    {
+        int rows = (count + Columns - 1) / Columns;
+        return Math.Clamp(rows, DefaultRows, MaxRows);
+    }
 
     public override string Id => "liquidglass";
     public override string DisplayName => "液态玻璃";
@@ -129,7 +132,7 @@ public sealed class LiquidGlassTheme : PanelTheme
         double x0 = center.X - gridW / 2.0;
         double y0 = center.Y - gridH / 2.0;
 
-        // Hard cap at the 5×5 grid; extra icons are never placed (the host
+        // Hard cap at the 6×5 grid; extra icons are never placed (the host
         // refuses to add beyond Capacity, so this is just a safety clamp).
         int max = Math.Min(count, Capacity);
         for (int i = 0; i < max; i++)

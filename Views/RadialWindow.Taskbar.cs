@@ -231,16 +231,28 @@ public partial class RadialWindow
         double rowVPad = tile * 0.42;
         double rowY = dockBottom + rowVPad + tile / 2.0;
 
-        int m = apps.Count;
+        // Cap the row at 6 tiles. When more apps are running, show the first 5
+        // and a trailing "+N" tile standing in for the rest.
+        const int maxTiles = 6;
+        List<TaskbarApp> display = apps;
+        int overflow = 0;
+        if (apps.Count > maxTiles)
+        {
+            display = apps.GetRange(0, maxTiles - 1);
+            overflow = apps.Count - (maxTiles - 1);
+        }
+        int m = display.Count + (overflow > 0 ? 1 : 0);
 
         // Skip the rebuild when neither the app set nor the geometry changed.
         var sb = new System.Text.StringBuilder();
         sb.Append("row|").Append(rowY.ToString("0.0")).Append('|').Append(tile.ToString("0.0"))
           .Append('|').Append(_center.X.ToString("0.0")).Append('#');
-        foreach (var a in apps)
+        foreach (var a in display)
             sb.Append(a.Aumid ?? a.Path).Append(';');
+        if (overflow > 0)
+            sb.Append("+").Append(overflow);
         string signature = sb.ToString();
-        if (signature == _taskbarSignature && _taskbarTiles.Count == apps.Count)
+        if (signature == _taskbarSignature && _taskbarTiles.Count == m)
             return;
 
         ClearTaskbarIcons();
@@ -253,7 +265,7 @@ public partial class RadialWindow
 
         // Prune the taskbar icon cache to the apps we are about to draw.
         var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in apps)
+        foreach (var a in display)
             live.Add(a.Path);
         var stale = new List<string>();
         foreach (var key in _taskbarIconCache.Keys)
@@ -270,14 +282,81 @@ public partial class RadialWindow
             double x = x0 + k * cellW;
             double y = rowY;
 
-            int index = k;
-            var el = BuildTaskbarTile(apps[k], tile, index);
+            bool isOverflowTile = overflow > 0 && k == m - 1;
+            var el = isOverflowTile
+                ? BuildOverflowTile(overflow, tile)
+                : BuildTaskbarTile(display[k], tile, k);
             Canvas.SetLeft(el, x - tile / 2);
             Canvas.SetTop(el, y - tile / 2);
             PanelCanvas.Children.Add(el);
             _taskbarIcons.Add(el);
             _taskbarTiles.Add(new TaskbarTile { Element = el, BaseCenter = new Point(x, y) });
         }
+    }
+
+    /// <summary>Builds the trailing "+N" tile shown when more than the row's
+    /// six-tile cap are running. Mirrors the glass tiles' plate and hover zoom
+    /// but carries no icon, running animation or preview popup.</summary>
+    private FrameworkElement BuildOverflowTile(int extra, double size)
+    {
+        bool glass = _theme.ShowGlassPanel;
+        var idleBg = glass
+            ? new SolidColorBrush(Color.FromArgb(0x08, 0xFF, 0xFF, 0xFF))
+            : new SolidColorBrush(Color.FromArgb(0x33, 0x10, 0x12, 0x18));
+        var hoverBg = glass
+            ? new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF))
+            : new SolidColorBrush(Color.FromArgb(0x66, 0x2A, 0x2E, 0x3A));
+        double radius = glass ? 12 : size * 0.22;
+
+        var label = new TextBlock
+        {
+            Text = "+" + extra,
+            FontSize = size * 0.34,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromArgb(0xE6, 0xFF, 0xFF, 0xFF)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var plate = new Border
+        {
+            CornerRadius = new CornerRadius(radius),
+            Background = idleBg,
+            Child = label,
+        };
+
+        var root = new Grid
+        {
+            Width = size,
+            Height = size,
+            Background = Brushes.Transparent,
+            ToolTip = $"另有 {extra} 个正在运行",
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = new ScaleTransform(1, 1),
+        };
+        root.Children.Add(plate);
+
+        var scale = (ScaleTransform)root.RenderTransform;
+        var dur = new Duration(TimeSpan.FromMilliseconds(110));
+        int index = _taskbarTiles.Count;
+        root.MouseEnter += (_, _) =>
+        {
+            plate.Background = hoverBg;
+            Panel.SetZIndex(root, 100);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.7, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.7, dur));
+            MagnifyTaskbar(index);
+        };
+        root.MouseLeave += (_, _) =>
+        {
+            plate.Background = idleBg;
+            Panel.SetZIndex(root, 0);
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
+            ResetTaskbarMagnify();
+        };
+
+        return root;
     }
 
     /// <summary>Dock-style magnification: slide tiles away from the hovered one

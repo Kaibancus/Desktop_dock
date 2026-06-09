@@ -1,6 +1,7 @@
 # Polaris
 
-Polaris 是一款常驻系统托盘的 Windows 径向应用启动器（Radial Launcher）。按住触发键即可在屏幕中心弹出一个面板，快速启动你常用的应用、文件夹与系统位置，松开触发键即收起。它基于 .NET 9 + WPF 构建，强调流畅的动画与高度可定制的外观。
+桌面太过杂乱不美观？桌面快捷方式挡住你的动态壁纸？Windows任务栏不好看？
+Polaris 是一款常驻系统托盘的应用程序坞。您可以把应用程序的快捷方式添加进程序坞中，按住触发键（默认右Alt）即可在屏幕中心弹出程序坞，快速启动你常用的应用、文件夹与系统位置，松开触发键即收起，也可以通过windows触摸板设置三指点击绑定Ctrl+4，即可使用触控板三指点击呼出程序坞。它基于 .NET 9 + WPF 构建，目前有“土星环”和“液态玻璃”两个主题可供选择。
 
 ## 功能特性
 
@@ -41,49 +42,14 @@ dotnet build -c Release
 ## 使用方法
 
 1. 启动 Polaris 后，它会驻留在系统托盘。
-2. **按住触发键**（默认右 Alt），在鼠标位置弹出环形面板。
-3. 通过将快捷方式图标拖拽进/出面板来添加/删除启动项。
+2. **按住触发键**（默认右 Alt），在鼠标位置弹出程序坞面板。
+3. 通过将快捷方式图标拖拽进/出面板来添加/删除启动项，也可通过设置界面添加快捷方式。
 4. 点击图标启动对应应用 / 文件夹 / 系统位置。
 5. **松开触发键**收起面板。
 6. 右键点击托盘图标可打开**设置**窗口，在此添加 / 删除启动项、切换主题、调整外观与触发键、配置开机自启等。
+7. 在Windows触控板设置中将三指点击录制为Ctrl+4，即可通过三指点击触控板弹出程序坞，再次三指点击关闭程序坞。
 
 ## 配置
 
 应用配置以 JSON 形式持久化保存。设置项涵盖：启动项列表、当前主题、面板透明度 / 颜色 / 强调色 / 字体色、图标尺寸、单环最大图标数、内环图标数、触发键、开机自启等。每个主题的透明度与图标尺寸会被单独记忆，切换主题时自动恢复。
 
-## 项目结构
-
-```
-Polaris/
-├─ App.xaml(.cs)            # 应用入口、托盘、全局热键与异常处理
-├─ Polaris.csproj           # 项目文件（net9.0-windows, WPF + WinForms）
-├─ app.manifest             # 应用清单
-├─ publish-fd.ps1           # 框架依赖发布脚本
-├─ Assets/                  # 图标等资源
-├─ Interop/
-│  └─ KeyboardHook.cs       # 全局键盘钩子（触发键）
-├─ Models/
-│  ├─ AppConfig.cs          # 根配置对象
-│  ├─ AppEntry.cs           # 单个启动项模型
-│  └─ AppSettings.cs        # 外观与行为设置
-├─ Services/
-│  ├─ ConfigStore.cs        # 配置读写
-│  ├─ IconExtractor.cs      # 图标提取
-│  ├─ PanelTheme.cs         # 主题定义与注册表
-│  ├─ RunningAppTracker.cs  # 运行中应用追踪
-│  ├─ ShellNamespace.cs     # Shell 命名空间项解析
-│  ├─ ShortcutResolver.cs   # 快捷方式(.lnk)解析
-│  ├─ StartupManager.cs     # 开机自启管理
-│  └─ WindowPreviewService.cs # 窗口预览
-└─ Views/
-   ├─ RadialWindow.xaml(.cs)    # 径向面板主窗口
-   ├─ RadialWindow.Saturn.cs    # 土星环主题绘制
-   ├─ RadialWindow.Glass.cs     # 玻璃主题绘制
-   ├─ RadialWindow.Planet.cs    # 行星 / 圆环绘制
-   ├─ RadialIcon.xaml(.cs)      # 单个图标控件
-   └─ SettingsWindow.xaml(.cs)  # 设置窗口
-```
-
-## 许可证
-
-本项目暂未声明许可证。

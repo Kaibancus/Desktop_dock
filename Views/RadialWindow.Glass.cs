@@ -56,8 +56,8 @@ public partial class RadialWindow
 
     /// <summary>
     /// Draws the "液态玻璃" backdrop: a translucent, frosted rounded-rectangle
-    /// panel sized to enclose the 5-column icon grid (5×4 by default, growing to
-    /// 5×5). Its overall opacity follows the user's panel-transparency setting.
+    /// panel sized to enclose the 6-column icon grid (6×3 by default, growing to
+    /// 6×5). Its overall opacity follows the user's panel-transparency setting.
     /// </summary>
     private void DrawGlassPanel()
     {
@@ -148,20 +148,14 @@ public partial class RadialWindow
         UpdateGlassClock();
     }
 
-    /// <summary>Draws an Apple-style "Liquid Glass" slab: a clear, lightly
-    /// tinted translucent body with a bright luminous edge rim (the signature
-    /// refractive lens edge), a soft top specular dome, a faint diagonal glare
-    /// and a gentle base shade for depth. Shared by the main grid panel and the
-    /// taskbar-row backdrop so they look identical. When <paramref name="track"/>
-    /// is supplied, every created element is also added to it so the caller can
-    /// remove the slab later.</summary>
+    /// <summary>Draws an Apple-style "Liquid Glass" slab (translucent body, edge
+    /// rim, specular dome, glare and base shade). When <paramref name="track"/> is
+    /// supplied, every created element is added to it so the caller can remove the
+    /// slab later.</summary>
     internal void DrawGlassSlab(double left, double top, double w, double h, double radius, double opacity,
         System.Collections.Generic.List<FrameworkElement>? track = null)
     {
-        // Body: a clear, lightly cool-tinted sheet of glass. Much more
-        // transparent than a frosted panel so the content behind reads through,
-        // with only a whisper of top-to-bottom lighting. A soft, wide drop
-        // shadow lets the slab float like Apple's Liquid Glass.
+        // Body: clear, lightly cool-tinted glass sheet with a soft floating shadow.
         var glass = new Border
         {
             Width = w,
@@ -196,8 +190,7 @@ public partial class RadialWindow
         PanelCanvas.Children.Add(glass);
         track?.Add(glass);
 
-        // Base shade: a soft dark pool at the bottom to give the clear body
-        // volume without making it look milky.
+        // Base shade: soft dark pool at the bottom for volume.
         var baseShade = new Border
         {
             Width = w,
@@ -222,8 +215,7 @@ public partial class RadialWindow
         PanelCanvas.Children.Add(baseShade);
         track?.Add(baseShade);
 
-        // Top specular dome: a soft bright highlight hugging the upper edge,
-        // heavily blurred so it reads as light pooling on the curved glass.
+        // Top specular dome: blurred bright highlight along the upper edge.
         var topCap = new Border
         {
             Width = w * 0.86,
@@ -253,8 +245,7 @@ public partial class RadialWindow
         PanelCanvas.Children.Add(topCap);
         track?.Add(topCap);
 
-        // Diagonal glare streak: a faint tilted bright bar clipped to the panel,
-        // the subtle moving-light quality of a glossy glass surface.
+        // Diagonal glare streak: a faint tilted bright bar clipped to the panel.
         var glareClip = new Border
         {
             Width = w,
@@ -298,10 +289,8 @@ public partial class RadialWindow
         PanelCanvas.Children.Add(glareClip);
         track?.Add(glareClip);
 
-        // Luminous edge rim — the hallmark of Liquid Glass. A bright, crisp
-        // hairline that catches light all the way around the slab, brightest at
-        // the top-left where the virtual light source sits, fading along the
-        // bottom-right. Sits ON TOP of every other layer so the edge reads sharp.
+        // Luminous edge rim: bright hairline catching light around the slab,
+        // brightest top-left. On top of every other layer so the edge stays crisp.
         var rim = new Border
         {
             Width = w,
@@ -329,8 +318,7 @@ public partial class RadialWindow
         PanelCanvas.Children.Add(rim);
         track?.Add(rim);
 
-        // Inner refraction glow: a soft bright ring just inside the rim that
-        // mimics the way Liquid Glass magnifies and brightens light at its edge.
+        // Inner refraction glow: soft bright ring just inside the rim.
         var innerGlow = new Border
         {
             Width = w - 2,
@@ -363,9 +351,7 @@ public partial class RadialWindow
     /// <summary>
     /// Engraves a thin horizontal seam across the single glass panel at
     /// <paramref name="seamY"/>, dividing the dock from the taskbar strip without
-    /// breaking the glass. The groove is two hairlines — a dark recess with a
-    /// bright highlight just below it — fading out toward the rounded ends so it
-    /// never touches the slab's side rims.
+    /// breaking the glass (a dark recess hairline plus a bright highlight below).
     /// </summary>
     private void DrawGlassSeam(double left, double seamY, double w, double opacity)
     {
@@ -425,6 +411,10 @@ public partial class RadialWindow
     // ---- Desktop background blur (liquid-glass summon) -------------------
 
     private System.Windows.Controls.Image? _desktopBlur;
+    // The frosted backdrop captured at summon time, kept so a mid-panel Rebuild
+    // (e.g. after a drag-reorder) can re-add the layer without re-capturing the
+    // screen — a fresh capture would grab the now-visible panel itself.
+    private BitmapSource? _desktopBlurSource;
 
     /// <summary>
     /// Captures the desktop currently behind the (still-transparent, Opacity 0)
@@ -447,6 +437,20 @@ public partial class RadialWindow
         if (shot == null)
             return;
 
+        _desktopBlurSource = shot;
+        AddDesktopBlurLayer(shot);
+    }
+
+    /// <summary>Re-adds the cached frosted backdrop after a Rebuild cleared the
+    /// canvas, without re-capturing (which would grab the visible panel).</summary>
+    private void RestoreDesktopBlur()
+    {
+        if (_desktopBlurSource != null)
+            AddDesktopBlurLayer(_desktopBlurSource);
+    }
+
+    private void AddDesktopBlurLayer(BitmapSource shot)
+    {
         double w = Width > 0 ? Width : ActualWidth;
         double h = Height > 0 ? Height : ActualHeight;
 
@@ -475,6 +479,7 @@ public partial class RadialWindow
             PanelCanvas.Children.Remove(_desktopBlur);
             _desktopBlur = null;
         }
+        _desktopBlurSource = null;
     }
 
     /// <summary>
@@ -535,7 +540,7 @@ public partial class RadialWindow
             // a frame late). Three box-blur passes approximate a Gaussian; the
             // radius is in capture (half-res) pixels and scales with capture size
             // so the on-screen blur strength is resolution-independent.
-            int blurRadius = Math.Max(2, (int)Math.Round(dw * 0.012));
+            int blurRadius = Math.Max(2, (int)Math.Round(dw * 0.009));
             BoxBlurBitmap(small, blurRadius, 3);
 
             IntPtr hBmp = small.GetHbitmap();

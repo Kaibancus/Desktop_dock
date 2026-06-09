@@ -41,64 +41,71 @@ public static class ShortcutResolver
     private static AppEntry FromShortcut(string lnkPath)
     {
         var link = (IShellLinkW)new ShellLink();
-        var file = (IPersistFile)link;
-        file.Load(lnkPath, 0);
-
-        var sb = new StringBuilder(260);
-        var data = new WIN32_FIND_DATAW();
-        link.GetPath(sb, sb.Capacity, ref data, SLGP_RAWPATH);
-        string target = sb.ToString();
-
-        // A shortcut to a virtual shell object (This PC, Recycle Bin, Control
-        // Panel…) has no file-system target — GetPath returns empty — but it
-        // still carries an absolute PIDL we can turn into a "shell:::{CLSID}"
-        // token.
-        if (string.IsNullOrWhiteSpace(target))
+        try
         {
-            link.GetIDList(out IntPtr pidl);
-            if (pidl != IntPtr.Zero)
+            var file = (IPersistFile)link;
+            file.Load(lnkPath, 0);
+
+            var sb = new StringBuilder(260);
+            var data = new WIN32_FIND_DATAW();
+            link.GetPath(sb, sb.Capacity, ref data, SLGP_RAWPATH);
+            string target = sb.ToString();
+
+            // A shortcut to a virtual shell object (This PC, Recycle Bin, Control
+            // Panel…) has no file-system target — GetPath returns empty — but it
+            // still carries an absolute PIDL we can turn into a "shell:::{CLSID}"
+            // token.
+            if (string.IsNullOrWhiteSpace(target))
             {
-                try
+                link.GetIDList(out IntPtr pidl);
+                if (pidl != IntPtr.Zero)
                 {
-                    var shellEntry = ShellNamespace.FromAbsolutePidl(pidl);
-                    if (shellEntry != null)
+                    try
                     {
-                        shellEntry.Name = Path.GetFileNameWithoutExtension(lnkPath);
-                        return shellEntry;
+                        var shellEntry = ShellNamespace.FromAbsolutePidl(pidl);
+                        if (shellEntry != null)
+                        {
+                            shellEntry.Name = Path.GetFileNameWithoutExtension(lnkPath);
+                            return shellEntry;
+                        }
+                    }
+                    finally
+                    {
+                        ShellNamespace.FreePidl(pidl);
                     }
                 }
-                finally
-                {
-                    ShellNamespace.FreePidl(pidl);
-                }
             }
+
+            sb.Clear();
+            link.GetArguments(sb, sb.Capacity);
+            string args = sb.ToString();
+
+            sb.Clear();
+            link.GetWorkingDirectory(sb, sb.Capacity);
+            string workDir = sb.ToString();
+
+            sb.Clear();
+            link.GetIconLocation(sb, sb.Capacity, out _);
+            string iconLoc = sb.ToString();
+
+            string name = Path.GetFileNameWithoutExtension(lnkPath);
+            string iconSource = string.IsNullOrWhiteSpace(iconLoc) ? target : iconLoc;
+
+            return new AppEntry
+            {
+                Name = name,
+                Path = target,
+                Arguments = args,
+                WorkingDirectory = string.IsNullOrWhiteSpace(workDir)
+                    ? (Path.GetDirectoryName(target) ?? string.Empty)
+                    : workDir,
+                IconSource = iconSource,
+            };
         }
-
-        sb.Clear();
-        link.GetArguments(sb, sb.Capacity);
-        string args = sb.ToString();
-
-        sb.Clear();
-        link.GetWorkingDirectory(sb, sb.Capacity);
-        string workDir = sb.ToString();
-
-        sb.Clear();
-        link.GetIconLocation(sb, sb.Capacity, out _);
-        string iconLoc = sb.ToString();
-
-        string name = Path.GetFileNameWithoutExtension(lnkPath);
-        string iconSource = string.IsNullOrWhiteSpace(iconLoc) ? target : iconLoc;
-
-        return new AppEntry
+        finally
         {
-            Name = name,
-            Path = target,
-            Arguments = args,
-            WorkingDirectory = string.IsNullOrWhiteSpace(workDir)
-                ? (Path.GetDirectoryName(target) ?? string.Empty)
-                : workDir,
-            IconSource = iconSource,
-        };
+            Marshal.ReleaseComObject(link);
+        }
     }
 
     private const uint SLGP_RAWPATH = 0x4;

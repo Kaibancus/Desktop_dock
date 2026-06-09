@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Polaris.Services;
@@ -22,6 +23,19 @@ public static class UpdateService
     private const string Repo = "Polaris";
     private const string LatestReleaseApi =
         "https://api.github.com/repos/" + Owner + "/" + Repo + "/releases/latest";
+
+    // One shared client (avoids socket exhaustion); per-request timeouts are
+    // applied with a CancellationToken since the instance Timeout is global.
+    private static readonly HttpClient Http = CreateClient();
+
+    private static HttpClient CreateClient()
+    {
+        var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        // GitHub's API rejects requests without a User-Agent.
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("Polaris-Updater");
+        http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        return http;
+    }
 
     public sealed class ReleaseInfo
     {
@@ -49,17 +63,12 @@ public static class UpdateService
     /// </summary>
     public static async Task<ReleaseInfo?> GetLatestReleaseAsync()
     {
-        using var http = new HttpClient();
-        http.Timeout = TimeSpan.FromSeconds(20);
-        // GitHub's API rejects requests without a User-Agent.
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("Polaris-Updater");
-        http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
-
-        using var resp = await http.GetAsync(LatestReleaseApi).ConfigureAwait(false);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var resp = await Http.GetAsync(LatestReleaseApi, cts.Token).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
             return null;
 
-        string json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+        string json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -152,63 +161,72 @@ public static class UpdateService
             return false;
 
         string workDir = Path.Combine(Path.GetTempPath(), "Polaris_update_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(workDir);
-
-        string zipPath = Path.Combine(workDir, "update.zip");
-        using (var http = new HttpClient())
+        try
         {
-            http.Timeout = TimeSpan.FromMinutes(5);
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("Polaris-Updater");
-            using var resp = await http.GetAsync(release.ZipAssetUrl).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode)
-                return false;
-            await using var fs = File.Create(zipPath);
-            await resp.Content.CopyToAsync(fs).ConfigureAwait(false);
-        }
+            Directory.CreateDirectory(workDir);
 
-        string extractDir = Path.Combine(workDir, "extracted");
-        Directory.CreateDirectory(extractDir);
-        ZipFile.ExtractToDirectory(zipPath, extractDir, overwriteFiles: true);
-
-        // Find the new Polaris.exe inside the extracted contents.
-        string? newExe = null;
-        foreach (var f in Directory.EnumerateFiles(extractDir, "*.exe", SearchOption.AllDirectories))
-        {
-            if (Path.GetFileName(f).Equals("Polaris.exe", StringComparison.OrdinalIgnoreCase))
+            string zipPath = Path.Combine(workDir, "update.zip");
+            using (var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5)))
+            using (var resp = await Http.GetAsync(release.ZipAssetUrl, cts.Token).ConfigureAwait(false))
             {
-                newExe = f;
-                break;
+                if (!resp.IsSuccessStatusCode)
+                    return false;
+                await using var fs = File.Create(zipPath);
+                await resp.Content.CopyToAsync(fs, cts.Token).ConfigureAwait(false);
             }
+
+            string extractDir = Path.Combine(workDir, "extracted");
+            Directory.CreateDirectory(extractDir);
+            ZipFile.ExtractToDirectory(zipPath, extractDir, overwriteFiles: true);
+
+            // Find the new Polaris.exe inside the extracted contents.
+            string? newExe = null;
+            foreach (var f in Directory.EnumerateFiles(extractDir, "*.exe", SearchOption.AllDirectories))
+            {
+                if (Path.GetFileName(f).Equals("Polaris.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    newExe = f;
+                    break;
+                }
+            }
+            if (newExe == null)
+                return false;
+
+            // Helper batch: wait for THIS process to exit, replace the exe, relaunch.
+            // Windows filenames cannot contain '"', so the quoted paths below cannot
+            // be broken out of — no command injection is possible.
+            string batPath = Path.Combine(workDir, "apply_update.bat");
+            int pid = Environment.ProcessId;
+            string bat =
+                "@echo off\r\n" +
+                "setlocal\r\n" +
+                ":waitloop\r\n" +
+                "tasklist /fi \"PID eq " + pid + "\" 2>nul | find \"" + pid + "\" >nul\r\n" +
+                "if not errorlevel 1 (\r\n" +
+                "  timeout /t 1 /nobreak >nul\r\n" +
+                "  goto waitloop\r\n" +
+                ")\r\n" +
+                "copy /y \"" + newExe + "\" \"" + currentExe + "\" >nul\r\n" +
+                "start \"\" \"" + currentExe + "\"\r\n" +
+                "rmdir /s /q \"" + workDir + "\"\r\n";
+            File.WriteAllText(batPath, bat);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/c \"" + batPath + "\"",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+            Process.Start(psi);
+            return true;
         }
-        if (newExe == null)
-            return false;
-
-        // Helper batch: wait for THIS process to exit, replace the exe, relaunch.
-        string batPath = Path.Combine(workDir, "apply_update.bat");
-        int pid = Environment.ProcessId;
-        string bat =
-            "@echo off\r\n" +
-            "setlocal\r\n" +
-            ":waitloop\r\n" +
-            "tasklist /fi \"PID eq " + pid + "\" 2>nul | find \"" + pid + "\" >nul\r\n" +
-            "if not errorlevel 1 (\r\n" +
-            "  timeout /t 1 /nobreak >nul\r\n" +
-            "  goto waitloop\r\n" +
-            ")\r\n" +
-            "copy /y \"" + newExe + "\" \"" + currentExe + "\" >nul\r\n" +
-            "start \"\" \"" + currentExe + "\"\r\n" +
-            "rmdir /s /q \"" + workDir + "\"\r\n";
-        File.WriteAllText(batPath, bat);
-
-        var psi = new ProcessStartInfo
+        catch
         {
-            FileName = "cmd.exe",
-            Arguments = "/c \"" + batPath + "\"",
-            CreateNoWindow = true,
-            UseShellExecute = false,
-            WindowStyle = ProcessWindowStyle.Hidden,
-        };
-        Process.Start(psi);
-        return true;
+            // Best-effort cleanup; the helper script (if launched) owns workDir.
+            try { Directory.Delete(workDir, recursive: true); } catch { }
+            throw;
+        }
     }
 }
