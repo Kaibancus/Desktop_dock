@@ -1,0 +1,11 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Polaris (北极星) app logo — monochrome sparkle / north star -->
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0d0d12"/>
+
+  <g fill="#ffffff">
+    <!-- Main four-point star with concave (sparkle) edges, slightly taller -->
+    <path d="M128 20 Q128 128 228 128 Q128 128 128 236 Q128 128 28 128 Q128 128 128 20 Z"/>
+    <!-- Small companion star, upper-right -->
+    <path d="M196 46 Q196 68 220 68 Q196 68 196 92 Q196 68 172 68 Q196 68 196 46 Z"/>
+  </g>
+</svg>
