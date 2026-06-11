@@ -29,7 +29,11 @@
 ## 环境要求
 
 - Windows 10 / 11
-- [.NET 9 SDK](https://dotnet.microsoft.com/)（目标框架 `net9.0-windows`，使用 WPF + Windows Forms）
+- **运行发布版**：[.NET 9 桌面运行时](https://dotnet.microsoft.com/download/dotnet/9.0)（从 Releases 下载的框架依赖单文件版需要它）
+  ```powershell
+  winget install Microsoft.DotNet.DesktopRuntime.9
+  ```
+- **从源码构建**：[.NET 9 SDK](https://dotnet.microsoft.com/)（目标框架 `net9.0-windows`，使用 WPF + Windows Forms）
 
 ## 构建与运行
 
@@ -43,10 +47,12 @@ dotnet build -c Release
 
 ### 发布（框架依赖单文件）
 
-仓库内提供了发布脚本：
+仓库内提供了发布脚本，产物为框架依赖单文件版（体积小，需目标电脑安装 .NET 9 桌面运行时）：
 
 ```powershell
+# 仅构建并打包为 zip（输出到 publish-fd/）
 ./publish-fd.ps1
+
 ```
 
 ## 使用方法

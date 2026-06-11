@@ -102,6 +102,10 @@ public partial class RadialWindow
             Stroke = new SolidColorBrush(Color.FromArgb(0x73, 0xBF, 0xE0, 0xFF)),
             StrokeThickness = 5.0,
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 8 },
+            // Bake the blurred glow stroke to a texture once: it is static, so
+            // without a cache WPF keeps a live blur node that is re-rasterised
+            // whenever the panel composites (e.g. during the rise scale).
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         var slabShade = new System.Windows.Shapes.Rectangle
         {
