@@ -137,12 +137,7 @@ public partial class RadialIcon : UserControl
             double glow = dot * 2.3;
             RunDot.Width = RunDot.Height = dot;
             RunDotGlow.Width = RunDotGlow.Height = glow;
-            double cy = iconSize / 2.0;
-            double cx = dot * 0.05;   // hug the very left edge
-            Canvas.SetLeft(RunDot, cx - dot / 2.0);
-            Canvas.SetTop(RunDot, cy - dot / 2.0);
-            Canvas.SetLeft(RunDotGlow, cx - glow / 2.0);
-            Canvas.SetTop(RunDotGlow, cy - glow / 2.0);
+            PositionRunDot();
         }
 
         // Centre the (zero-layout) name label below the icon.
@@ -174,6 +169,41 @@ public partial class RadialIcon : UserControl
     private readonly bool _dropletHover;
     private readonly bool _leftDockStyle;
     private bool _isRunning;
+    private DockSide _dockEdge = DockSide.Left;
+
+    /// <summary>Tells a left-dock icon which screen edge its dock is anchored
+    /// to, so the running dot hugs the outer (screen-edge) side and the
+    /// window-preview popup opens toward the screen interior.</summary>
+    public void ApplyDockEdge(DockSide side)
+    {
+        _dockEdge = side;
+        if (_leftDockStyle)
+            PositionRunDot();
+        if (_preview != null)
+            _preview.PlaceBelow = side == DockSide.Top;
+    }
+
+    /// <summary>Positions the breathing green "running" dot against the dock's
+    /// outer (screen-edge) side, centred along the other axis.</summary>
+    private void PositionRunDot()
+    {
+        double dot = RunDot.Width;
+        double glow = RunDotGlow.Width;
+        double near = dot * 0.05;
+        double far = IconSize - dot * 0.05;
+        double mid = IconSize / 2.0;
+        (double cx, double cy) = _dockEdge switch
+        {
+            DockSide.Right => (far, mid),
+            DockSide.Top => (mid, near),
+            DockSide.Bottom => (mid, far),
+            _ => (near, mid),
+        };
+        Canvas.SetLeft(RunDot, cx - dot / 2.0);
+        Canvas.SetTop(RunDot, cy - dot / 2.0);
+        Canvas.SetLeft(RunDotGlow, cx - glow / 2.0);
+        Canvas.SetTop(RunDotGlow, cy - glow / 2.0);
+    }
 
     /// <summary>When true the icon does NOT scale itself on hover; instead the
     /// host dock drives a coordinated magnification (a macOS-dock-style wave)
@@ -183,10 +213,11 @@ public partial class RadialIcon : UserControl
     private static readonly Duration MagnifyAnim = new(TimeSpan.FromMilliseconds(150));
 
     /// <summary>Applies an external magnification: scales the icon about its
-    /// centre and offsets it horizontally (the macOS-dock "pop out" toward the
-    /// screen). Animated with an ease-out so neighbouring icons settle smoothly
-    /// as the pointer moves along the dock.</summary>
-    public void Magnify(double scale, double offsetX)
+    /// centre and offsets it toward the screen interior (the macOS-dock "pop
+    /// out"). The offset axis depends on the dock edge — horizontal for a
+    /// Left/Right dock, vertical for a Top/Bottom dock. Animated with an
+    /// ease-out so neighbouring icons settle smoothly as the pointer moves.</summary>
+    public void Magnify(double scale, double offsetX, double offsetY = 0)
     {
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
         Scale.BeginAnimation(ScaleTransform.ScaleXProperty,
@@ -195,20 +226,24 @@ public partial class RadialIcon : UserControl
             new DoubleAnimation(scale, MagnifyAnim) { EasingFunction = ease });
         MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty,
             new DoubleAnimation(offsetX, MagnifyAnim) { EasingFunction = ease });
+        MagnifyTranslate.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(offsetY, MagnifyAnim) { EasingFunction = ease });
     }
 
     /// <summary>Sets the magnification DIRECTLY (no animation) for continuous,
     /// cursor-tracked wave updates. Clears any running <see cref="Magnify"/>
     /// animation first so the assigned values take effect immediately — the
     /// smoothness comes from the host driving this every frame.</summary>
-    public void SetMagnify(double scale, double offsetX)
+    public void SetMagnify(double scale, double offsetX, double offsetY = 0)
     {
         Scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
         Scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
         MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+        MagnifyTranslate.BeginAnimation(TranslateTransform.YProperty, null);
         Scale.ScaleX = scale;
         Scale.ScaleY = scale;
         MagnifyTranslate.X = offsetX;
+        MagnifyTranslate.Y = offsetY;
     }
 
     /// <summary>

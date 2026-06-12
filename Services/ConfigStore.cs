@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Polaris.Models;
 
 namespace Polaris.Services;
@@ -20,6 +21,7 @@ public static class ConfigStore
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
     };
 
     public static AppConfig Load()

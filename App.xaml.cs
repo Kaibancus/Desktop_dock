@@ -298,29 +298,39 @@ public partial class App : Application
             double y = pt.Y / scale;
 
             double sh = SystemParameters.PrimaryScreenHeight;
-            // Trigger band: a strip at the left edge, vertically the centre 50%
-            // of the screen. The threshold is generous (and negative x — i.e. the
-            // cursor pushed a touch past the physical left edge, as happens with
-            // mouse over-travel or a monitor to the left — also counts) so the
-            // dock pops without having to land the pointer exactly on x = 0.
-            bool inTrigger = x <= 17.0 && y >= sh * 0.25 && y <= sh * 0.75;
+            double sw = SystemParameters.PrimaryScreenWidth;
+            const double Reach = 17.0;       // edge sensitivity in DIPs
+            const double Band = 0.25;        // exclude the outer 25% at each end
+
+            // Trigger band: a strip along the dock's anchored edge, covering the
+            // centre 50% of that edge. The threshold is generous (and a touch of
+            // over-travel past the physical edge also counts) so the dock pops
+            // without landing the pointer exactly on the edge.
+            DockSide side = _leftDock.DockSidePosition;
+            bool inTrigger = side switch
+            {
+                DockSide.Right => x >= sw - Reach && y >= sh * Band && y <= sh * (1 - Band),
+                DockSide.Top => y <= Reach && x >= sw * Band && x <= sw * (1 - Band),
+                DockSide.Bottom => y >= sh - Reach && x >= sw * Band && x <= sw * (1 - Band),
+                _ => x <= Reach && y >= sh * Band && y <= sh * (1 - Band),
+            };
 
             // Once shown by the edge, keep it shown while the cursor stays near
-            // the dock. The right-hand margin is deliberately generous so the
-            // dock only retracts once the pointer has moved well clear of it
-            // (rather than the instant it leaves the slab).
+            // the dock. The interior-side margin is deliberately generous so the
+            // dock only retracts once the pointer has moved well clear of it.
             bool inDock = false;
             if (_leftDock.DockVisible)
             {
                 Rect b = _leftDock.GetDockScreenBounds();
-                // No left bound: the dock hugs the screen's left edge, so any
-                // cursor position from the edge up to the dock's right edge (plus
-                // margin) keeps it shown. Requiring x >= b.Left previously left a
-                // few-pixel dead zone between the trigger strip (x <= 3) and the
-                // slab, so moving the mouse rightwards into the dock could
-                // intermittently retract it.
-                inDock = x <= b.Right + 150 &&
-                         y >= b.Top - 60 && y <= b.Bottom + 60;
+                const double Far = 150;      // interior reach beyond the slab
+                const double Slack = 60;     // slack along the edge
+                inDock = side switch
+                {
+                    DockSide.Right => x >= b.Left - Far && y >= b.Top - Slack && y <= b.Bottom + Slack,
+                    DockSide.Top => y <= b.Bottom + Far && x >= b.Left - Slack && x <= b.Right + Slack,
+                    DockSide.Bottom => y >= b.Top - Far && x >= b.Left - Slack && x <= b.Right + Slack,
+                    _ => x <= b.Right + Far && y >= b.Top - Slack && y <= b.Bottom + Slack,
+                };
             }
 
             _leftDock.SetEdgeShown(inTrigger || inDock);
@@ -405,6 +415,9 @@ public partial class App : Application
         {
             // Re-render the panel so theme / layout / size changes apply live.
             _panel?.RefreshFromConfig();
+            // Re-anchor / re-lay the side dock so a changed dock position (or
+            // any geometry-affecting setting) takes effect immediately.
+            _leftDock?.RefreshLayout();
         };
         _settings.TriggerKeyChanged += RebuildHook;
         _settings.Closed += (_, _) => _settings = null;

@@ -2,6 +2,15 @@ using System.Collections.Generic;
 
 namespace Polaris.Models;
 
+/// <summary>Edge of the screen the quick-launch (side) dock is anchored to.</summary>
+public enum DockSide
+{
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// <summary>
 /// User-configurable appearance and behavior settings.
 /// </summary>
@@ -64,6 +73,14 @@ public sealed class AppSettings
     /// Virtual-key code of the hold-to-show trigger key. Default 0xA5 (Right Alt).
     /// </summary>
     public int TriggerKey { get; set; } = 0xA5;
+
+    /// <summary>Screen edge the quick-launch (side) dock is anchored to.
+    /// Defaults to the left edge (the original behavior).</summary>
+    public DockSide DockPosition { get; set; } = DockSide.Left;
+
+    /// <summary>Whether the quick-launch dock is shown on every monitor.
+    /// Reserved for a future release; currently has no effect.</summary>
+    public bool DockOnAllMonitors { get; set; } = false;
 
     /// <summary>Per-theme remembered appearance (transparency + icon size),
     /// keyed by theme id. Lets each theme restore its own look when re-selected;

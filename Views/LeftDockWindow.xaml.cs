@@ -39,6 +39,63 @@ public partial class LeftDockWindow : Window
 
     private double _uiScale = 1.0;
 
+    // Screen edge this dock is anchored to. Drives every geometry decision
+    // through the main/cross axis helpers below: the dock lays its icons out
+    // along the MAIN axis (the length of the screen edge) and pops them / draws
+    // its slab along the CROSS axis (the thickness, growing toward the screen
+    // interior). For Left/Right the main axis is vertical (Y) and the cross axis
+    // horizontal (X); for Top/Bottom they swap.
+    private DockSide _side = DockSide.Left;
+    private bool IsVertical => _side == DockSide.Left || _side == DockSide.Right;
+    private double WinW => ActualWidth > 0 ? ActualWidth : Width;
+    private double WinH => ActualHeight > 0 ? ActualHeight : Height;
+
+    /// <summary>Window-local point for a logical (main, cross) pair. cross = 0
+    /// sits on the screen edge and grows toward the screen interior.</summary>
+    private Point ToLocal(double main, double cross) => _side switch
+    {
+        DockSide.Left => new Point(cross, main),
+        DockSide.Right => new Point(WinW - cross, main),
+        DockSide.Top => new Point(main, cross),
+        DockSide.Bottom => new Point(main, WinH - cross),
+        _ => new Point(cross, main),
+    };
+
+    /// <summary>Main-axis coordinate of a window-local point.</summary>
+    private double MainOf(Point p) => IsVertical ? p.Y : p.X;
+
+    /// <summary>Cross-axis coordinate (distance from the screen edge inward).</summary>
+    private double CrossOf(Point p) => _side switch
+    {
+        DockSide.Left => p.X,
+        DockSide.Right => WinW - p.X,
+        DockSide.Top => p.Y,
+        DockSide.Bottom => WinH - p.Y,
+        _ => p.X,
+    };
+
+    /// <summary>Window-local rect for a logical block spanning [crossStart,
+    /// crossStart+crossLen] across and [mainStart, mainStart+mainLen] along.</summary>
+    private Rect LogicalRect(double mainStart, double crossStart, double mainLen, double crossLen) => _side switch
+    {
+        DockSide.Left => new Rect(crossStart, mainStart, crossLen, mainLen),
+        DockSide.Right => new Rect(WinW - crossStart - crossLen, mainStart, crossLen, mainLen),
+        DockSide.Top => new Rect(mainStart, crossStart, mainLen, crossLen),
+        DockSide.Bottom => new Rect(mainStart, WinH - crossStart - crossLen, mainLen, crossLen),
+        _ => new Rect(crossStart, mainStart, crossLen, mainLen),
+    };
+
+    /// <summary>The (dx, dy) window-local translation for a cross-axis pop of
+    /// <paramref name="pop"/> toward the screen interior.</summary>
+    private (double dx, double dy) PopOffset(double pop) => _side switch
+    {
+        DockSide.Left => (pop, 0.0),
+        DockSide.Right => (-pop, 0.0),
+        DockSide.Top => (0.0, pop),
+        DockSide.Bottom => (0.0, -pop),
+        _ => (pop, 0.0),
+    };
+
     // Scroll container for the pinned column (mirrors the main dock: one
     // translate transform on a clipped layer instead of per-icon repositioning).
     private double _pinnedScroll;
@@ -64,8 +121,8 @@ public partial class LeftDockWindow : Window
     private int _dragInsertIdx = -1;   // gap position while dragging; -1 = not dragging
 
     // Continuous (macOS-dock) magnification state. The wave is driven by the
-    // actual cursor Y position and smoothed per render frame for fluid motion.
-    private double _waveCursorY = double.NaN;        // cursor Y in PanelCanvas coords; NaN = inactive
+    // actual cursor MAIN-axis position and smoothed per render frame.
+    private double _waveCursorY = double.NaN;        // cursor main-axis coord; NaN = inactive
     private int _labelIdx = -1;                       // icon the hover label is showing for (-1 none)
     private double[] _waveCur = Array.Empty<double>(); // smoothed per-icon scale
     private bool _waveTicking;                        // CompositionTarget.Rendering hooked?
@@ -78,15 +135,16 @@ public partial class LeftDockWindow : Window
     private readonly System.Windows.Threading.DispatcherTimer _runningTimer;
     private string? _runSignature;
 
-    // Cached layout geometry (window-local), recomputed each Rebuild.
-    private double _slabLeft, _slabTop, _slabW, _slabH, _colCenterX;
-    // Visible glass/dark body bounds (narrower than the full _slabW hit area),
-    // used for both the slab draw and the running-strip seam.
-    private double _bodyLeft, _bodyW;
+    // Cached layout geometry (logical main/cross), recomputed each Rebuild.
+    // *Cross = thickness direction (toward screen interior); *Main = along edge.
+    private double _slabCross, _slabMain, _slabCrossLen, _slabMainLen, _colCenterCross;
+    // Visible glass/dark body bounds (narrower than the full _slabCrossLen hit
+    // area), used for both the slab draw and the running-strip seam.
+    private double _bodyCross, _bodyCrossLen;
     private int _pinnedVisible;
-    private double _pinnedAreaTop;   // y of the first pinned slot's cell top
-    private double _runAreaTop;      // y where the running strip begins
-    private double _seamY;           // y of the divider between pinned + running
+    private double _pinnedAreaMain;   // main coord of the first pinned slot's cell start
+    private double _runAreaMain;      // main coord where the running strip begins
+    private double _seamMain;         // main coord of the divider between pinned + running
     private bool _hasRunningArea;
     private Rect _pinnedViewport;    // window-local clip rect for the scroll layer
 
@@ -103,6 +161,10 @@ public partial class LeftDockWindow : Window
     private Color AccentColor => ParseColor(_config.Settings.AccentColor, Color.FromRgb(0x3D, 0x7E, 0xFF));
 
     public bool DockVisible => _shown;
+
+    /// <summary>The screen edge this dock is currently anchored to (from
+    /// settings). Used by the host's edge poll to test the correct trigger band.</summary>
+    public DockSide DockSidePosition => _config.Settings.DockPosition;
 
     /// <summary>Invoked when the user clicks the Polaris tile in the running
     /// strip. Wired by App to toggle the pinned docks (equivalent to Ctrl+4).</summary>
@@ -189,14 +251,42 @@ public partial class LeftDockWindow : Window
         // so the dock never covers or crowds the taskbar.
         var wa = SystemParameters.WorkArea;
         _uiScale = Math.Clamp(SystemParameters.PrimaryScreenHeight / 1080.0, 1.0, 2.0);
+        _side = _config.Settings.DockPosition;
 
-        // The window hugs the left edge of the work area and is just tall enough
-        // for the dock to sit vertically centred. It is wider than the glass slab
-        // so the hover name label (drawn to the right of an icon) is not clipped.
-        Left = wa.Left;
-        Top = wa.Top;
-        Width = GIcon * HoverScale + 240 * _uiScale;
-        Height = wa.Height;
+        // The window covers a band along the anchored edge: it spans the full
+        // length of the work area along the MAIN axis and is just thick enough
+        // (along the CROSS axis) for the glass slab plus the hover pop-out and
+        // the floating name label. Vertical docks are narrow + tall; horizontal
+        // docks are wide + short.
+        double thickness = GIcon * HoverScale + 240 * _uiScale;
+        switch (_side)
+        {
+            case DockSide.Right:
+                Left = wa.Right - thickness;
+                Top = wa.Top;
+                Width = thickness;
+                Height = wa.Height;
+                break;
+            case DockSide.Top:
+                Left = wa.Left;
+                Top = wa.Top;
+                Width = wa.Width;
+                Height = thickness;
+                break;
+            case DockSide.Bottom:
+                Left = wa.Left;
+                Top = wa.Bottom - thickness;
+                Width = wa.Width;
+                Height = thickness;
+                break;
+            case DockSide.Left:
+            default:
+                Left = wa.Left;
+                Top = wa.Top;
+                Width = thickness;
+                Height = wa.Height;
+                break;
+        }
     }
 
     // ---- Visibility ------------------------------------------------------
@@ -263,14 +353,15 @@ public partial class LeftDockWindow : Window
         PanelCanvas.Visibility = Visibility.Visible;
         Rebuild();
 
-        // Slide in from the left edge and fade up.
-        double slide = _slabW + 40 * _uiScale;
-        var slfrom = new TranslateTransform(-slide, 0);
+        // Slide in from the anchored edge and fade up.
+        double slide = _slabCrossLen + 40 * _uiScale;
+        var (sdx, sdy) = PopOffset(-slide);   // start offset toward the screen edge
+        var slfrom = new TranslateTransform(sdx, sdy);
         PanelCanvas.RenderTransform = slfrom;
         var ease = new QuinticEase { EasingMode = EasingMode.EaseOut };
-        var slideAnim = new DoubleAnimation(-slide, 0, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
+        var slideAnim = new DoubleAnimation(IsVertical ? sdx : sdy, 0, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
         Timeline.SetDesiredFrameRate(slideAnim, App.AnimationFrameRate);
-        slfrom.BeginAnimation(TranslateTransform.XProperty, slideAnim);
+        slfrom.BeginAnimation(IsVertical ? TranslateTransform.XProperty : TranslateTransform.YProperty, slideAnim);
 
         RootGrid.Opacity = 0;
         RootGrid.BeginAnimation(OpacityProperty,
@@ -306,8 +397,10 @@ public partial class LeftDockWindow : Window
     {
         if (!_realized)
             PositionAndSize();
-        // Slab is in window-local coords; window is at (Left, Top).
-        return new Rect(Left + _slabLeft, Top + _slabTop, _slabW, _slabH);
+        // Slab is logical (main/cross); convert to the window-local rect, then
+        // offset by the window's screen position.
+        Rect local = LogicalRect(_slabMain, _slabCross, _slabMainLen, _slabCrossLen);
+        return new Rect(Left + local.X, Top + local.Y, local.Width, local.Height);
     }
 
     /// <summary>Tests a DEVICE-pixel screen point (from another window's
@@ -328,16 +421,16 @@ public partial class LeftDockWindow : Window
         double icon = EffectiveIconSize;
         double w = ActualWidth > 0 ? ActualWidth : Width;
         double h = ActualHeight > 0 ? ActualHeight : Height;
-        // Accept a drop anywhere over the dock window (full height, generous
-        // horizontal slack) so blank space counts, not just the icons.
+        // Accept a drop anywhere over the dock window (full length, generous
+        // cross slack) so blank space counts, not just the icons.
         if (local.X < -icon || local.X > w + icon)
             return false;
         if (local.Y < -icon || local.Y > h + icon)
             return false;
 
-        // Land the icon at the pointer's vertical position within the column.
-        double contentY = (local.Y - _slabTop) + _pinnedScroll;
-        int dropIdx = (int)Math.Round((contentY - (_pinnedAreaTop - _slabTop) - CellH / 2.0) / CellH);
+        // Land the icon at the pointer's position along the column.
+        double contentMain = MainOf(local) + _pinnedScroll;
+        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
         AddFromMainDock(entry, dropIdx);
         return true;
     }
@@ -347,43 +440,51 @@ public partial class LeftDockWindow : Window
     private void Layout()
     {
         double icon = EffectiveIconSize;
-        double sh = Height > 0 ? Height : SystemParameters.PrimaryScreenHeight;
+        // Length available along the anchored edge (the main axis).
+        double mainExtent = IsVertical
+            ? (Height > 0 ? Height : SystemParameters.PrimaryScreenHeight)
+            : (Width > 0 ? Width : SystemParameters.PrimaryScreenWidth);
 
-        double leftGap = 1 * _uiScale;
-        // Slab is only as wide as the icon at its hover-enlarged size (plus a
-        // hair of breathing room), so the glass background is a snug column.
-        double padX = GIcon * (HoverScale - 1.0) / 2.0 + icon * 0.12;
-        _slabW = GIcon + padX * 2.0;
-        _slabLeft = leftGap;
-        // Bias the resting icon column toward the left of the slab so the icons
-        // hug the screen edge. The hover wave pops icons to the RIGHT, so the
-        // left half of the slab's hover-reserve is unused at rest — shifting the
-        // column left there gives the pop-out more room without clipping.
-        double leftBias = GIcon * (HoverScale - 1.0) * 0.30;
-        _colCenterX = _slabLeft + _slabW / 2.0 - leftBias;
+        double crossGap = 1 * _uiScale;
+        // Slab is only as thick as the icon at its hover-enlarged size (plus a
+        // hair of breathing room), so the glass background is a snug strip.
+        double padCross = GIcon * (HoverScale - 1.0) / 2.0 + icon * 0.12;
+        _slabCrossLen = GIcon + padCross * 2.0;
+        _slabCross = crossGap;
+        // Bias the resting icon column toward the screen edge so the icons hug
+        // it. The hover wave pops icons toward the interior, so the edge-side
+        // half of the slab's hover-reserve is unused at rest — shifting the
+        // column edge-ward there gives the pop-out more room without clipping.
+        double edgeBias = GIcon * (HoverScale - 1.0) * 0.30;
+        _colCenterCross = _slabCross + _slabCrossLen / 2.0 - edgeBias;
 
-        double topPad = icon * 0.7;
-        double botPad = icon * 0.7;
+        double startPad = icon * 0.7;
+        double endPad = icon * 0.7;
         double seam = _hasRunningArea ? icon * 0.55 : 0;
 
-        // Keep clear of the screen edges and the taskbar. WorkArea already
-        // excludes a docked taskbar, but an AUTO-HIDE taskbar leaves WorkArea at
-        // full-screen, so reserve an explicit bottom band the dock never enters.
-        double topReserve = 12 * _uiScale;
-        double bottomReserve = 56 * _uiScale;
-        double usableH = sh - topReserve - bottomReserve;
+        // Keep clear of the edges and the taskbar. WorkArea already excludes a
+        // docked taskbar, but an AUTO-HIDE taskbar leaves WorkArea at full size,
+        // so reserve an explicit band at each end the dock never enters. The
+        // taskbar runs along the bottom, i.e. ACROSS a vertical dock's main
+        // (top→bottom) axis, so only a vertical dock needs the larger end
+        // reserve; a horizontal dock's main axis runs left→right with no taskbar
+        // in its path, so it uses symmetric reserves to stay truly centred
+        // (an asymmetric band would shift the slab toward the smaller end).
+        double startReserve = 12 * _uiScale;
+        double endReserve = IsVertical ? 56 * _uiScale : 12 * _uiScale;
+        double usableMain = mainExtent - startReserve - endReserve;
 
         // The dock shows the resident region (up to 14 icons) AND the running
         // strip (up to RunningMaxComplete + overflow tiles), with one uniform
-        // cell height for both so the spacing is identical above and below the
+        // cell size for both so the spacing is identical above and below the
         // divider. Size that shared cell from the comfortable default and, only
         // if the combined column would overflow the usable band, shrink it just
         // enough to fit every row (down to a snug floor so icons never overlap).
         int pinnedCount = _config.LeftDockApps.Count;
         int runSlots = _hasRunningArea ? CurrentRunSlots() : 0;
         int totalCells = pinnedCount + runSlots;
-        double fixedChrome = topPad + botPad + (_hasRunningArea ? seam : 0);
-        double availForCells = usableH - fixedChrome;
+        double fixedChrome = startPad + endPad + (_hasRunningArea ? seam : 0);
+        double availForCells = usableMain - fixedChrome;
 
         _cellH = DefaultCellH;
         if (totalCells > 0 && totalCells * _cellH > availForCells)
@@ -401,48 +502,59 @@ public partial class LeftDockWindow : Window
 
         double pinnedBlockH = _pinnedVisible * CellH;
 
-        _slabH = topPad + pinnedBlockH
+        _slabMainLen = startPad + pinnedBlockH
                + (_hasRunningArea ? seam + runningBlockH : 0)
-               + botPad;
-        // Centre within the usable band, then clamp so the bottom edge always
-        // stays above the reserved taskbar margin.
-        _slabTop = topReserve + Math.Max(0, (usableH - _slabH) / 2.0);
-        if (_slabTop + _slabH > sh - bottomReserve)
-            _slabTop = sh - bottomReserve - _slabH;
-        if (_slabTop < topReserve)
-            _slabTop = topReserve;
+               + endPad;
 
-        _pinnedAreaTop = _slabTop + topPad;
-        _runAreaTop = _pinnedAreaTop + pinnedBlockH + seam;
+        // Centre the VISIBLE ICON CLUSTER (not the slab box) on the usable band.
+        // The seam gap between the pinned and running groups, combined with their
+        // unequal icon counts, pulls the icons' centre of mass off the slab's
+        // geometric centre — so centring the slab box alone leaves the icons
+        // looking shifted toward the larger (usually pinned) group, i.e. slightly
+        // toward the leading side on a top/bottom dock. Position the slab so the
+        // icon centroid lands on the band centre instead, then clamp to the
+        // reserved end margins so the dock never spills past them.
+        int visibleCells = _pinnedVisible + runSlots;
+        double centroidFromSlab = startPad
+            + (visibleCells > 0 ? CellH * visibleCells / 2.0 : 0)
+            + (_hasRunningArea && visibleCells > 0 ? seam * runSlots / (double)visibleCells : 0);
+        _slabMain = (startReserve + usableMain / 2.0) - centroidFromSlab;
+        if (_slabMain + _slabMainLen > mainExtent - endReserve)
+            _slabMain = mainExtent - endReserve - _slabMainLen;
+        if (_slabMain < startReserve)
+            _slabMain = startReserve;
 
-        // Divider line: the true midpoint between the LAST pinned icon's bottom
-        // edge and the FIRST running tile's top edge, so the drawn seam matches
-        // where the icons actually break.
-        double lastPinnedBottom = _pinnedAreaTop + pinnedBlockH - (CellH - GIcon) / 2.0;
-        double firstRunTop = _runAreaTop + (RunStep - GIcon) / 2.0;
-        _seamY = _pinnedVisible > 0
-            ? (lastPinnedBottom + firstRunTop) / 2.0
-            : _runAreaTop - seam / 2.0;
+        _pinnedAreaMain = _slabMain + startPad;
+        _runAreaMain = _pinnedAreaMain + pinnedBlockH + seam;
+
+        // Divider line: the true midpoint between the LAST pinned icon's far edge
+        // and the FIRST running tile's near edge, so the drawn seam matches where
+        // the icons actually break.
+        double lastPinnedEnd = _pinnedAreaMain + pinnedBlockH - (CellH - GIcon) / 2.0;
+        double firstRunStart = _runAreaMain + (RunStep - GIcon) / 2.0;
+        _seamMain = _pinnedVisible > 0
+            ? (lastPinnedEnd + firstRunStart) / 2.0
+            : _runAreaMain - seam / 2.0;
 
         // Clip rect for the pinned scroll layer. Kept INSIDE the glass slab at
-        // the top (so icons never spill above the glass while scrolling) yet
-        // wide/low enough that a hovered icon's wave (1.7x zoom + pop-out to the
-        // right) is not cut.
+        // the near end (so icons never spill past the glass while scrolling) yet
+        // wide/long enough that a hovered icon's wave (1.7x zoom + pop-out toward
+        // the interior) is not cut.
         double margin = icon * 0.9;
-        double clipTop = _slabTop + icon * 0.12;
-        double clipBottom = _hasRunningArea
-            ? _seamY - icon * 0.05
-            : _slabTop + _slabH - icon * 0.12;
-        // The hovered icon pops out to the right; extend the clip's right edge to
-        // cover its enlarged half-width plus the pop offset.
-        double popRight = GIcon / 2.0 * HoverScale + WavePop(HoverScale) + icon * 0.2;
-        double clipLeft = _colCenterX - GIcon / 2.0 - margin;
-        double clipRight = _colCenterX + popRight;
-        _pinnedViewport = new Rect(
-            clipLeft,
-            clipTop,
-            Math.Max(0, clipRight - clipLeft),
-            Math.Max(0, clipBottom - clipTop));
+        double clipMainLo = _slabMain + icon * 0.12;
+        double clipMainHi = _hasRunningArea
+            ? _seamMain - icon * 0.05
+            : _slabMain + _slabMainLen - icon * 0.12;
+        // The hovered icon pops out toward the interior; extend the clip's
+        // interior cross edge to cover its enlarged half-width plus the pop.
+        double popInterior = GIcon / 2.0 * HoverScale + WavePop(HoverScale) + icon * 0.2;
+        double clipCrossLo = _colCenterCross - GIcon / 2.0 - margin;
+        double clipCrossHi = _colCenterCross + popInterior;
+        _pinnedViewport = LogicalRect(
+            clipMainLo,
+            clipCrossLo,
+            Math.Max(0, clipMainHi - clipMainLo),
+            Math.Max(0, clipCrossHi - clipCrossLo));
     }
 
     private int _runSlotsCached;
@@ -486,34 +598,33 @@ public partial class LeftDockWindow : Window
         bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
         if (darkSlab)
         {
-            // Draw the black tray snug around the icon column, bleeding its left
-            // feather off-screen so the solid black sits flush against the edge.
+            // Draw the black tray snug around the icon column, bleeding its
+            // edge-side feather off-screen so the solid black sits flush against
+            // the screen edge.
             double darkPad = GIcon * 0.55;
             double darkBleed = GIcon * 0.4;
-            double darkLeft = _slabLeft - darkBleed;
-            double darkW = (_colCenterX - darkLeft) + GIcon / 2.0 + darkPad;
-            _bodyLeft = darkLeft;
-            _bodyW = darkW;
-            GlassChrome.DrawSlab(PanelCanvas, darkLeft, _slabTop, darkW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: true);
+            _bodyCross = _slabCross - darkBleed;
+            _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + darkPad;
+            var r = LogicalRect(_slabMain, _bodyCross, _slabMainLen, _bodyCrossLen);
+            GlassChrome.DrawSlab(PanelCanvas, r.X, r.Y, r.Width, r.Height, trayRadius, opacity, track: null, frosted: false, dark: true);
         }
         else
         {
-            // Hug the icon column with only a modest right margin instead of the
-            // full hover-reserve width, so the liquid-glass panel doesn't leave a
-            // large empty block to the right of the icons.
+            // Hug the icon column with only a modest interior margin instead of
+            // the full hover-reserve thickness, so the liquid-glass panel doesn't
+            // leave a large empty block beside the icons.
             double glassPad = GIcon * 0.30;
-            double glassLeft = _slabLeft;
-            double glassW = (_colCenterX - glassLeft) + GIcon / 2.0 + glassPad;
-            _bodyLeft = glassLeft;
-            _bodyW = glassW;
-            GlassChrome.DrawSlab(PanelCanvas, glassLeft, _slabTop, glassW, _slabH, trayRadius, opacity, track: null, frosted: false, dark: false);
+            _bodyCross = _slabCross;
+            _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + glassPad;
+            var r = LogicalRect(_slabMain, _bodyCross, _slabMainLen, _bodyCrossLen);
+            GlassChrome.DrawSlab(PanelCanvas, r.X, r.Y, r.Width, r.Height, trayRadius, opacity, track: null, frosted: false, dark: false);
         }
         if (_hasRunningArea)
-            DrawSeam(_seamY, opacity);
+            DrawSeam(_seamMain, opacity);
 
-        // Pinned column inside a clipped, vertically-scrolling layer.
+        // Pinned column inside a clipped scrolling layer.
         _pinnedScroll = Math.Clamp(_pinnedScroll, 0, PinnedScrollMax);
-        _scrollTransform = new TranslateTransform(0, -_pinnedScroll);
+        _scrollTransform = IsVertical ? new TranslateTransform(0, -_pinnedScroll) : new TranslateTransform(-_pinnedScroll, 0);
         _scrollLayer = new Canvas { RenderTransform = _scrollTransform };
         var clip = new Canvas { Clip = new RectangleGeometry(_pinnedViewport) };
         clip.Children.Add(_scrollLayer);
@@ -522,12 +633,12 @@ public partial class LeftDockWindow : Window
         var apps = _config.LeftDockApps;
         for (int i = 0; i < apps.Count; i++)
         {
-            double cy = _pinnedAreaTop + i * CellH + CellH / 2.0;
-            var slot = new Point(_colCenterX, cy);
+            double mainC = _pinnedAreaMain + i * CellH + CellH / 2.0;
+            var slot = new Point(_colCenterCross, mainC);   // X = cross, Y = main
             _pinnedSlots.Add(slot);
 
             var icon = CreateIcon(apps[i], GIcon);
-            PlaceCentered(icon, slot);
+            PlaceLogical(icon, slot);
             _scrollLayer.Children.Add(icon);
             _pinnedIcons.Add(icon);
         }
@@ -535,11 +646,16 @@ public partial class LeftDockWindow : Window
         RefreshRunning();
     }
 
+    /// <summary>Centres an icon at a window-local point (used while dragging).</summary>
     private void PlaceCentered(RadialIcon icon, Point center)
     {
         Canvas.SetLeft(icon, center.X - icon.IconSize / 2);
         Canvas.SetTop(icon, center.Y - icon.IconSize / 2);
     }
+
+    /// <summary>Centres an icon at a logical (X = cross, Y = main) slot.</summary>
+    private void PlaceLogical(RadialIcon icon, Point logical)
+        => PlaceCentered(icon, ToLocal(logical.Y, logical.X));
 
     private RadialIcon CreateIcon(AppEntry entry, double size)
     {
@@ -549,6 +665,7 @@ public partial class LeftDockWindow : Window
             _iconCache[entry.EffectiveIconSource] = bmp;
         }
         var icon = new RadialIcon(entry, bmp, size, AccentColor, LabelBrush, dropletHover: true, leftDockStyle: true);
+        icon.ApplyDockEdge(_side);
         icon.ExternalMagnify = true;   // the dock drives a coordinated macOS-style wave
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         return icon;
@@ -569,10 +686,12 @@ public partial class LeftDockWindow : Window
             _iconCache.Remove(key);
     }
 
-    private void DrawSeam(double seamY, double opacity)
+    private void DrawSeam(double seamMain, double opacity)
     {
-        double x1 = _bodyLeft + 10 * _uiScale;
-        double x2 = _bodyLeft + _bodyW - 10 * _uiScale;
+        // The divider runs perpendicular to the main axis (across the body), at
+        // main = seamMain. Compute its two window-local endpoints.
+        Point pa = ToLocal(seamMain, _bodyCross + 10 * _uiScale);
+        Point pb = ToLocal(seamMain, _bodyCross + _bodyCrossLen - 10 * _uiScale);
 
         bool isSaturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
 
@@ -587,7 +706,7 @@ public partial class LeftDockWindow : Window
 
         var glow = new System.Windows.Shapes.Line
         {
-            X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
+            X1 = pa.X, X2 = pb.X, Y1 = pa.Y, Y2 = pb.Y,
             StrokeThickness = glowThk,
             Stroke = new SolidColorBrush(Color.FromArgb(glowA, 0xBF, 0xE0, 0xFF)),
             Opacity = opacity,
@@ -598,7 +717,7 @@ public partial class LeftDockWindow : Window
         };
         var shine = new System.Windows.Shapes.Line
         {
-            X1 = x1, X2 = x2, Y1 = seamY, Y2 = seamY,
+            X1 = pa.X, X2 = pb.X, Y1 = pa.Y, Y2 = pb.Y,
             StrokeThickness = shineThk,
             Stroke = new SolidColorBrush(Color.FromArgb(shineA, 0xEA, 0xF4, 0xFF)),
             Opacity = opacity,
@@ -813,7 +932,7 @@ public partial class LeftDockWindow : Window
         double tile = GIcon;
         for (int k = 0; k < slots; k++)
         {
-            double cy = _runAreaTop + k * RunStep + RunStep / 2.0;
+            double mainC = _runAreaMain + k * RunStep + RunStep / 2.0;
             FrameworkElement el;
             if (k == 0)
             {
@@ -828,8 +947,9 @@ public partial class LeftDockWindow : Window
                     ? BuildRunOverflowTile(overflow, tile)
                     : BuildRunTile(display[appIdx], tile);
             }
-            Canvas.SetLeft(el, _colCenterX - tile / 2.0);
-            Canvas.SetTop(el, cy - tile / 2.0);
+            Point c = ToLocal(mainC, _colCenterCross);
+            Canvas.SetLeft(el, c.X - tile / 2.0);
+            Canvas.SetTop(el, c.Y - tile / 2.0);
             Panel.SetZIndex(el, 60);
             PanelCanvas.Children.Add(el);
             _runTiles.Add(el);
@@ -880,9 +1000,9 @@ public partial class LeftDockWindow : Window
             Panel.SetZIndex(root, 100);
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, dur));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, dur));
-            double cy = Canvas.GetTop(root) + size / 2.0;
+            double mainC = MainOf(new Point(Canvas.GetLeft(root), Canvas.GetTop(root))) + size / 2.0;
             _runLabelShown = true;
-            ShowHoverLabelCore("Polaris", cy, size / 2.0 * HoverScale);
+            ShowHoverLabelCore("Polaris", mainC, size / 2.0 * HoverScale);
         };
         root.MouseLeave += (_, _) =>
         {
@@ -947,11 +1067,11 @@ public partial class LeftDockWindow : Window
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, dur));
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, dur));
             // Same hover label / font as the pinned icons. Running tiles scale
-            // about their centre (no rightward pop), so the label sits just past
-            // the icon's enlarged half-width.
-            double cy = Canvas.GetTop(root) + size / 2.0;
+            // about their centre (no pop-out), so the label sits just past the
+            // icon's enlarged half-width.
+            double mainC = MainOf(new Point(Canvas.GetLeft(root), Canvas.GetTop(root))) + size / 2.0;
             _runLabelShown = true;
-            ShowHoverLabelCore(label, cy, size / 2.0 * HoverScale);
+            ShowHoverLabelCore(label, mainC, size / 2.0 * HoverScale);
         };
         root.MouseLeave += (_, _) =>
         {
@@ -978,8 +1098,19 @@ public partial class LeftDockWindow : Window
     {
         double dot = Math.Max(3.0, iconSize * 0.075);
         double glow = dot * 2.3;
-        double cy = iconSize / 2.0;
-        double cx = dot * 0.05;
+        // Hug the screen-edge side of the tile so the indicator always sits on
+        // the outer edge regardless of which screen edge the dock is on.
+        double near = dot * 0.05;
+        double far = iconSize - dot * 0.05;
+        double mid = iconSize / 2.0;
+        (double cx, double cy) = _side switch
+        {
+            DockSide.Left => (near, mid),
+            DockSide.Right => (far, mid),
+            DockSide.Top => (mid, near),
+            DockSide.Bottom => (mid, far),
+            _ => (near, mid),
+        };
 
         var glowEllipse = new System.Windows.Shapes.Ellipse
         {
@@ -1078,9 +1209,9 @@ public partial class LeftDockWindow : Window
         bool inColumn = _pinnedIcons.Count > 0 && _pinnedViewport.Contains(p);
         if (inColumn)
         {
-            _waveCursorY = p.Y;
+            _waveCursorY = MainOf(p);
             EnsureWaveTicking();
-            int idx = NearestVisibleIconIndex(p.Y);
+            int idx = NearestVisibleIconIndex(MainOf(p));
             if (idx != _labelIdx)
             {
                 _labelIdx = idx;
@@ -1188,7 +1319,8 @@ public partial class LeftDockWindow : Window
             double cur = _waveCur[i] + (target - _waveCur[i]) * k;
             _waveCur[i] = cur;
             maxDelta = Math.Max(maxDelta, Math.Abs(target - cur));
-            _pinnedIcons[i].SetMagnify(cur, WavePop(cur));
+            var (pdx, pdy) = PopOffset(WavePop(cur));
+            _pinnedIcons[i].SetMagnify(cur, pdx, pdy);
             // Larger icons sit on top so the bulge overlaps its neighbours cleanly.
             Panel.SetZIndex(_pinnedIcons[i], cur > 1.001 ? 3000 + (int)(cur * 1000) : 0);
         }
@@ -1198,7 +1330,7 @@ public partial class LeftDockWindow : Window
         {
             for (int i = 0; i < n; i++)
             {
-                _pinnedIcons[i].SetMagnify(1.0, 0.0);
+                _pinnedIcons[i].SetMagnify(1.0, 0.0, 0.0);
                 Panel.SetZIndex(_pinnedIcons[i], 0);
             }
             CompositionTarget.Rendering -= OnWaveTick;
@@ -1217,7 +1349,7 @@ public partial class LeftDockWindow : Window
         }
         foreach (var ic in _pinnedIcons)
         {
-            ic.SetMagnify(1.0, 0.0);
+            ic.SetMagnify(1.0, 0.0, 0.0);
             Panel.SetZIndex(ic, 0);
         }
         if (_waveTicking)
@@ -1230,14 +1362,14 @@ public partial class LeftDockWindow : Window
 
     private void ShowHoverLabel(RadialIcon ic, int idx)
     {
-        double cy = _pinnedSlots[idx].Y - _pinnedScroll;
-        double rightExtent = GIcon / 2.0 * HoverScale + WavePop(HoverScale);
-        ShowHoverLabelCore(ic.Entry.Name, cy, rightExtent);
+        double mainC = _pinnedSlots[idx].Y - _pinnedScroll;
+        double crossExtent = GIcon / 2.0 * HoverScale + WavePop(HoverScale);
+        ShowHoverLabelCore(ic.Entry.Name, mainC, crossExtent);
     }
 
     /// <summary>Shared hover-label renderer used by both the pinned icons and the
     /// running strip, so both use the same font, size and styling.</summary>
-    private void ShowHoverLabelCore(string name, double cy, double rightExtent)
+    private void ShowHoverLabelCore(string name, double mainCenter, double crossExtent)
     {
         if (_hoverLabel == null)
         {
@@ -1263,25 +1395,54 @@ public partial class LeftDockWindow : Window
 
         _hoverLabelText!.Text = name;
 
-        // Centre vertically on the icon, floated to its right (clear of the
-        // hover-enlarged icon — pinned icons also pop out to the right).
-        double labelX = _colCenterX + rightExtent + 8 * _uiScale;
+        // Cross position of the label's near edge: just past the hover-enlarged
+        // icon, toward the screen interior.
+        double crossPos = _colCenterCross + crossExtent + 8 * _uiScale;
+        double thickness = IsVertical ? WinW : WinH;
+        double mainExtent = IsVertical ? WinH : WinW;
 
-        // Auto-shrink the font so the WHOLE name fits between the label's left
-        // edge and the screen's right edge (no ellipsis). Start from the regular
-        // size and step down only as far as needed, with a sensible floor.
+        // Auto-shrink the font so the WHOLE name fits without ellipsis. For
+        // vertical docks the label grows along the cross axis toward the far
+        // edge; for horizontal docks it grows along the main axis, centred on
+        // the icon, so the budget is whichever side has less room.
         double maxFont = 10.5 * HoverScale;
         double minFont = 7.5 * HoverScale;
         double horizPad = 20 * _uiScale;                 // matches Border padding (10 + 10)
-        double screenW = ActualWidth > 0 ? ActualWidth : Width;
-        double avail = Math.Max(40 * _uiScale, screenW - labelX - horizPad - 6 * _uiScale);
+        double avail = IsVertical
+            ? Math.Max(40 * _uiScale, thickness - crossPos - horizPad - 6 * _uiScale)
+            : Math.Max(40 * _uiScale, 2 * Math.Min(mainCenter, mainExtent - mainCenter) - horizPad - 6 * _uiScale);
         _hoverLabelText.FontSize = FitFontSize(name, maxFont, minFont, avail);
 
         _hoverLabel.InvalidateMeasure();
         _hoverLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double lw = _hoverLabel.DesiredSize.Width;
         double lh = _hoverLabel.DesiredSize.Height;
-        Canvas.SetLeft(_hoverLabel, labelX);
-        Canvas.SetTop(_hoverLabel, cy - lh / 2.0);
+
+        // Anchor per edge so the label hangs off the icon toward the interior,
+        // centred on the icon along the main axis.
+        double left, top;
+        switch (_side)
+        {
+            case DockSide.Right:
+                left = WinW - crossPos - lw;       // grows left (interior)
+                top = mainCenter - lh / 2.0;
+                break;
+            case DockSide.Top:
+                left = mainCenter - lw / 2.0;
+                top = crossPos;                    // grows down (interior)
+                break;
+            case DockSide.Bottom:
+                left = mainCenter - lw / 2.0;
+                top = WinH - crossPos - lh;        // grows up (interior)
+                break;
+            case DockSide.Left:
+            default:
+                left = crossPos;                   // grows right (interior)
+                top = mainCenter - lh / 2.0;
+                break;
+        }
+        Canvas.SetLeft(_hoverLabel, left);
+        Canvas.SetTop(_hoverLabel, top);
 
         _hoverLabel.BeginAnimation(OpacityProperty,
             new DoubleAnimation(_hoverLabel.Opacity, 1, TimeSpan.FromMilliseconds(110)));
@@ -1383,7 +1544,7 @@ public partial class LeftDockWindow : Window
 
         PlaceCentered(_pressedIcon, p);
         // Fade while dragged outside the column (marks for removal).
-        bool outside = Math.Abs(p.X - _colCenterX) > _slabW * 0.85;
+        bool outside = Math.Abs(CrossOf(p) - _colCenterCross) > _slabCrossLen * 0.85;
         _pressedIcon.Opacity = outside ? 0.4 : 1.0;
 
         // macOS-style "push aside": slide the other icons open to reveal a gap at
@@ -1391,8 +1552,8 @@ public partial class LeftDockWindow : Window
         // index actually changes so the eases run to completion smoothly.
         if (!outside)
         {
-            double contentY = p.Y + _pinnedScroll;
-            int tgt = (int)Math.Round((contentY - _pinnedAreaTop - CellH / 2.0) / CellH);
+            double contentMain = MainOf(p) + _pinnedScroll;
+            int tgt = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
             tgt = Math.Clamp(tgt, 0, Math.Max(0, _pinnedIcons.Count - 1));
             if (tgt != _dragInsertIdx)
             {
@@ -1426,9 +1587,11 @@ public partial class LeftDockWindow : Window
         }
     }
 
-    /// <summary>Smoothly slides an icon's Canvas position toward a slot centre.</summary>
-    private void AnimateIconTo(RadialIcon icon, Point center)
+    /// <summary>Smoothly slides an icon's Canvas position toward a logical
+    /// (X = cross, Y = main) slot centre.</summary>
+    private void AnimateIconTo(RadialIcon icon, Point logical)
     {
+        Point center = ToLocal(logical.Y, logical.X);
         double left = center.X - icon.IconSize / 2.0;
         double top = center.Y - icon.IconSize / 2.0;
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
@@ -1471,18 +1634,18 @@ public partial class LeftDockWindow : Window
             return;
         }
 
-        bool outside = Math.Abs(p.X - _colCenterX) > _slabW * 0.85;
+        bool outside = Math.Abs(CrossOf(p) - _colCenterCross) > _slabCrossLen * 0.85;
         if (outside)
         {
             RemoveFromLeftDock(icon.Entry);
             return;
         }
 
-        // Reorder: drop into the slot nearest the cursor's (scroll-adjusted) Y.
-        // The left dock mirrors the main dock's resident region, so reorder the
-        // matching entries in the resident slice of _config.Apps directly.
-        double contentY = p.Y + _pinnedScroll;
-        int tgt = (int)Math.Round((contentY - _pinnedAreaTop - CellH / 2.0) / CellH);
+        // Reorder: drop into the slot nearest the cursor's (scroll-adjusted)
+        // main-axis position. The left dock mirrors the main dock's resident
+        // region, so reorder the matching entries in the resident slice directly.
+        double contentMain = MainOf(p) + _pinnedScroll;
+        int tgt = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
         tgt = Math.Clamp(tgt, 0, _config.LeftDockApps.Count - 1);
         int src = _config.LeftDockApps.IndexOf(icon.Entry);
         if (src >= 0 && tgt != src && src < _config.Apps.Count && tgt < _config.Apps.Count)
@@ -1523,14 +1686,21 @@ public partial class LeftDockWindow : Window
         double step = CellH * (e.Delta / 120.0);
         _pinnedScroll = Math.Clamp(_pinnedScroll - step, 0, PinnedScrollMax);
         var ease = new QuinticEase { EasingMode = EasingMode.EaseOut };
-        var anim = new DoubleAnimation(_scrollTransform.Y, -_pinnedScroll, TimeSpan.FromMilliseconds(140))
+        // The scroll layer translates along the MAIN axis (Y for vertical docks,
+        // X for horizontal docks).
+        var prop = IsVertical ? TranslateTransform.YProperty : TranslateTransform.XProperty;
+        double from = IsVertical ? _scrollTransform.Y : _scrollTransform.X;
+        var anim = new DoubleAnimation(from, -_pinnedScroll, TimeSpan.FromMilliseconds(140))
         {
             EasingFunction = ease,
             FillBehavior = FillBehavior.Stop,
         };
         Timeline.SetDesiredFrameRate(anim, App.AnimationFrameRate);
-        _scrollTransform.Y = -_pinnedScroll;
-        _scrollTransform.BeginAnimation(TranslateTransform.YProperty, anim);
+        if (IsVertical)
+            _scrollTransform.Y = -_pinnedScroll;
+        else
+            _scrollTransform.X = -_pinnedScroll;
+        _scrollTransform.BeginAnimation(prop, anim);
         e.Handled = true;
     }
 
@@ -1593,6 +1763,16 @@ public partial class LeftDockWindow : Window
         Rebuild();
     }
 
+    /// <summary>Re-reads the dock-position setting, re-anchors the window to the
+    /// (possibly new) screen edge and rebuilds the layout. Called by the host
+    /// after the settings window changes the dock position.</summary>
+    public void RefreshLayout()
+    {
+        PositionAndSize();
+        if (_realized)
+            Rebuild();
+    }
+
     // ---- External drop (desktop shortcut -> both docks) -------------------
 
     protected override void OnDragOver(DragEventArgs e)
@@ -1621,11 +1801,11 @@ public partial class LeftDockWindow : Window
         if (ShellNamespace.HasShellItems(e.Data))
             entries.AddRange(ShellNamespace.CreateEntries(e.Data));
 
-        // Insertion index from the pointer Y, so the dropped icon lands where the
-        // cursor is rather than always at the bottom of the resident region.
+        // Insertion index from the pointer's main-axis position, so the dropped
+        // icon lands where the cursor is rather than always at the end.
         var drop = e.GetPosition(PanelCanvas);
-        double contentY = drop.Y + _pinnedScroll;
-        int dropIdx = (int)Math.Round((contentY - _pinnedAreaTop - CellH / 2.0) / CellH);
+        double contentMain = MainOf(drop) + _pinnedScroll;
+        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
         dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
 
         bool changed = false;

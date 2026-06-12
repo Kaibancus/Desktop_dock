@@ -65,7 +65,29 @@ public partial class SettingsWindow : Window
         foreach (var opt in TriggerKeyOptions)
             TriggerKeyCombo.Items.Add(new ComboBoxItem { Content = opt.Name, Tag = opt.Vk });
         SelectTriggerKey(s.TriggerKey);
+
+        DockPositionCombo.Items.Add(new ComboBoxItem { Content = "左侧", Tag = DockSide.Left });
+        DockPositionCombo.Items.Add(new ComboBoxItem { Content = "右侧", Tag = DockSide.Right });
+        DockPositionCombo.Items.Add(new ComboBoxItem { Content = "顶部", Tag = DockSide.Top });
+        DockPositionCombo.Items.Add(new ComboBoxItem { Content = "底部", Tag = DockSide.Bottom });
+        SelectDockPosition(s.DockPosition);
+        MultiMonitorCheck.IsChecked = s.DockOnAllMonitors;
+
         UpdateHint();
+    }
+
+    private void SelectDockPosition(DockSide side)
+    {
+        foreach (ComboBoxItem item in DockPositionCombo.Items)
+        {
+            if (item.Tag is DockSide d && d == side)
+            {
+                DockPositionCombo.SelectedItem = item;
+                return;
+            }
+        }
+        if (DockPositionCombo.Items.Count > 0)
+            DockPositionCombo.SelectedIndex = 0;
     }
 
     private void SelectTheme(string id)
@@ -252,6 +274,27 @@ public partial class SettingsWindow : Window
     }
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
+
+    private void OnDockPositionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_loaded)
+            return;
+        if (DockPositionCombo.SelectedItem is ComboBoxItem item && item.Tag is DockSide side)
+        {
+            _config.Settings.DockPosition = side;
+            _persist();
+            Changed?.Invoke();
+        }
+    }
+
+    private void OnMultiMonitorChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_loaded)
+            return;
+        _config.Settings.DockOnAllMonitors = MultiMonitorCheck.IsChecked == true;
+        _persist();
+        Changed?.Invoke();
+    }
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
     {

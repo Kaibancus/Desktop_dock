@@ -37,6 +37,11 @@ internal sealed class WindowPreviewPopup
     private bool _pointerInPopup;
     private int _previewToken;
 
+    /// <summary>When true the popup opens BELOW the target instead of above it
+    /// (used by a Top-anchored side dock, whose icons sit at the screen's top
+    /// edge with no room overhead).</summary>
+    public bool PlaceBelow { get; set; }
+
     // Maps a window handle to its tile's thumbnail host so a background capture
     // can swap in the fresh image once it finishes.
     private readonly Dictionary<IntPtr, Border> _tileHosts = new();
@@ -182,9 +187,10 @@ internal sealed class WindowPreviewPopup
             CustomPopupPlacementCallback = (popupSize, targetSize, _) =>
             {
                 // Centre the popup horizontally over the target and sit it just
-                // above the target's top edge.
+                // above the target's top edge — or just below it when the dock
+                // is anchored to the top of the screen.
                 double x = (targetSize.Width - popupSize.Width) / 2.0;
-                double y = -popupSize.Height - 6;
+                double y = PlaceBelow ? targetSize.Height + 6 : -popupSize.Height - 6;
                 return new[] { new CustomPopupPlacement(new Point(x, y), PopupPrimaryAxis.Horizontal) };
             },
             AllowsTransparency = true,
