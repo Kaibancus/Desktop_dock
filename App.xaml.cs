@@ -141,6 +141,9 @@ public partial class App : Application
         _leftDock.Realize();
         // Let the main dock hand an icon to the left dock when dragged onto it.
         _panel.DropToLeftDock = TryDropToLeftDock;
+        // Lift the liquid-glass main dock clear of the side dock when the latter
+        // is docked at the bottom (so they never overlap).
+        _panel.BottomDockReserve = GetBottomDockReserve;
         // Keep the left dock in step when the main dock's resident region changes.
         _panel.AppsChanged = () =>
         {
@@ -348,6 +351,21 @@ public partial class App : Application
         return _leftDock?.TryAcceptDrop(screenPoint, entry) == true;
     }
 
+    /// <summary>Height (DIP, measured up from the bottom screen edge) that the
+    /// side dock occupies when it is docked at the BOTTOM, plus a small gap, so
+    /// the liquid-glass main dock can lift itself clear of it. Returns 0 when the
+    /// side dock is on any other edge.</summary>
+    private double GetBottomDockReserve()
+    {
+        if (_leftDock == null || _leftDock.DockSidePosition != DockSide.Bottom)
+            return 0.0;
+        Rect b = _leftDock.GetDockScreenBounds();
+        double sh = SystemParameters.PrimaryScreenHeight;
+        const double gap = 18.0;
+        double reserve = sh - b.Top + gap;
+        return reserve > 0 ? reserve : 0.0;
+    }
+
     private static double GetDpiScale()
     {
         IntPtr hdc = GetDC(IntPtr.Zero);
@@ -413,11 +431,14 @@ public partial class App : Application
         _settings = new SettingsWindow(_config, Persist);
         _settings.Changed += () =>
         {
-            // Re-render the panel so theme / layout / size changes apply live.
-            _panel?.RefreshFromConfig();
-            // Re-anchor / re-lay the side dock so a changed dock position (or
-            // any geometry-affecting setting) takes effect immediately.
+            // Re-anchor / re-lay the side dock FIRST so a changed dock position
+            // (or any geometry-affecting setting) takes effect immediately and
+            // its new bounds are available to the main dock below.
             _leftDock?.RefreshLayout();
+            // Then re-render the panel so theme / layout / size changes apply
+            // live — and so the glass main dock reads the side dock's updated
+            // bottom reserve and lifts clear of it.
+            _panel?.RefreshFromConfig();
         };
         _settings.TriggerKeyChanged += RebuildHook;
         _settings.Closed += (_, _) => _settings = null;

@@ -71,8 +71,17 @@ public partial class RadialWindow : Window
 
     // The glass dock's bottom edge sits ABOVE the system taskbar: the frosted
     // slab ends at the top of the taskbar (plus a small gap) rather than
-    // covering down past it.
-    private double GlassDockBottomMargin => SystemTaskbarHeight + EffectiveIconSize * 0.12;
+    // covering down past it. When the side dock is docked at the BOTTOM, the
+    // whole main dock lifts further so it never overlaps the side dock band.
+    private double GlassDockBottomMargin
+    {
+        get
+        {
+            double baseMargin = SystemTaskbarHeight + EffectiveIconSize * 0.12;
+            double sideReserve = BottomDockReserve?.Invoke() ?? 0.0;
+            return Math.Max(baseMargin, sideReserve);
+        }
+    }
 
     /// <summary>Height (DIP) of the system taskbar when it is docked at the
     /// bottom of the primary screen; 0 when the taskbar is on another edge or
@@ -403,6 +412,13 @@ public partial class RadialWindow : Window
     /// the entry. Returns true when the entry was pinned to the left dock (the
     /// main-dock entry is then left in place).</summary>
     public Func<Point, AppEntry, bool>? DropToLeftDock;
+
+    /// <summary>Set by the host: returns the height (DIP, measured up from the
+    /// bottom screen edge) that the side dock occupies when it is docked at the
+    /// BOTTOM, so the liquid-glass main dock can lift itself clear of it. Returns
+    /// 0 when the side dock is on another edge. Used by
+    /// <see cref="GlassDockBottomMargin"/>.</summary>
+    public Func<double>? BottomDockReserve;
 
     /// <summary>Raised after the main dock mutates its app list (add / delete /
     /// reorder), so the host can re-mirror the resident region into the left

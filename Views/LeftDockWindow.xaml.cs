@@ -258,7 +258,20 @@ public partial class LeftDockWindow : Window
         // (along the CROSS axis) for the glass slab plus the hover pop-out and
         // the floating name label. Vertical docks are narrow + tall; horizontal
         // docks are wide + short.
-        double thickness = GIcon * HoverScale + 240 * _uiScale;
+        //
+        // The cross THICKNESS differs by orientation. A vertical dock's name
+        // label extends sideways (along the cross axis) by its full WIDTH (a long
+        // app name can be 150+ px), so it needs the generous 240 reserve. A
+        // horizontal dock's label instead hangs above/below the icon and extends
+        // by its (single-line) HEIGHT, so it needs far less cross room — only the
+        // hover-enlarged icon, the interior wave pop-out, and one label line.
+        // Keeping a horizontal dock thin shrinks its layered (AllowsTransparency)
+        // surface, which otherwise overlaps the full-screen main dock at the
+        // bottom of the screen and forces a costly double per-frame composite on
+        // the render thread (visible as a frame-rate drop on summon).
+        double thickness = IsVertical
+            ? GIcon * HoverScale + 240 * _uiScale
+            : GIcon * HoverScale + 130 * _uiScale;
         switch (_side)
         {
             case DockSide.Right:
@@ -268,17 +281,31 @@ public partial class LeftDockWindow : Window
                 Height = wa.Height;
                 break;
             case DockSide.Top:
-                Left = wa.Left;
+            {
+                // A horizontal dock is sized to hug its centred content rather
+                // than spanning the full work-area width. A full-width layered
+                // (AllowsTransparency) window forces a large per-frame software
+                // composite that competes with the main dock's full-screen
+                // summon animation and visibly drops the frame rate; a snug,
+                // screen-centred window keeps that surface small. The icon
+                // cluster stays centred on the work area regardless (Layout
+                // centres it within the window, and the window is centred here).
+                double winW = Math.Min(DesiredContentMain(), wa.Width);
+                Left = wa.Left + (wa.Width - winW) / 2.0;
                 Top = wa.Top;
-                Width = wa.Width;
+                Width = winW;
                 Height = thickness;
                 break;
+            }
             case DockSide.Bottom:
-                Left = wa.Left;
+            {
+                double winW = Math.Min(DesiredContentMain(), wa.Width);
+                Left = wa.Left + (wa.Width - winW) / 2.0;
                 Top = wa.Bottom - thickness;
-                Width = wa.Width;
+                Width = winW;
                 Height = thickness;
                 break;
+            }
             case DockSide.Left:
             default:
                 Left = wa.Left;
@@ -287,6 +314,25 @@ public partial class LeftDockWindow : Window
                 Height = wa.Height;
                 break;
         }
+    }
+
+    /// <summary>Desired length (DIP) of the dock window along its MAIN axis for a
+    /// HORIZONTAL dock: just enough for the pinned column plus the running strip
+    /// at the default cell pitch, with the running strip reserved at its MAXIMUM
+    /// slot count so the window never has to resize (and flicker) as apps come
+    /// and go. Capped to the work-area width by the caller. Mirrors the slab
+    /// length computed in <see cref="Layout"/> (DefaultCellH, no shrink) so the
+    /// content fits without the cell-shrink path triggering.</summary>
+    private double DesiredContentMain()
+    {
+        double icon = EffectiveIconSize;
+        double cell = DefaultCellH;
+        double pad = icon * 0.7;                              // startPad / endPad
+        double seam = icon * 0.55;                            // running area always present
+        int pinned = _config.LeftDockApps.Count;
+        const int maxRunSlots = 1 + RunningMaxComplete + 1;   // Polaris + full tiles + overflow
+        double reserve = 12 * _uiScale;                       // horizontal: symmetric end reserves
+        return reserve + pad + pinned * cell + seam + maxRunSlots * cell + pad + reserve;
     }
 
     // ---- Visibility ------------------------------------------------------
@@ -419,17 +465,23 @@ public partial class LeftDockWindow : Window
         catch { return false; }
 
         double icon = EffectiveIconSize;
-        double w = ActualWidth > 0 ? ActualWidth : Width;
-        double h = ActualHeight > 0 ? ActualHeight : Height;
-        // Accept a drop anywhere over the dock window (full length, generous
-        // cross slack) so blank space counts, not just the icons.
-        if (local.X < -icon || local.X > w + icon)
+        // Accept a drop only over the DOCK SLAB (plus a modest slack so blank
+        // space around the icons still counts), NOT the whole window. The window
+        // is a band that, for a top/bottom dock, spans the full screen width and
+        // a few hundred px of height — testing the whole window would let the
+        // side dock hijack drops that land over the centred main dock's
+        // non-resident region, blocking the main dock's resident<->non-resident
+        // drag. Constraining to the slab keeps the drop zone hugging the screen
+        // edge on every side (left/right behaviour is unchanged).
+        double cross = CrossOf(local);
+        double main = MainOf(local);
+        if (cross < -icon || cross > _slabCross + _slabCrossLen + icon)
             return false;
-        if (local.Y < -icon || local.Y > h + icon)
+        if (main < _slabMain - icon || main > _slabMain + _slabMainLen + icon)
             return false;
 
         // Land the icon at the pointer's position along the column.
-        double contentMain = MainOf(local) + _pinnedScroll;
+        double contentMain = main + _pinnedScroll;
         int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
         AddFromMainDock(entry, dropIdx);
         return true;
