@@ -90,9 +90,12 @@ public partial class RadialWindow : Window
     {
         get
         {
-            // Prefer the work-area delta (accurate for a normally-docked bar).
-            double sh = SystemParameters.PrimaryScreenHeight;
-            double h = sh - SystemParameters.WorkArea.Bottom;
+            // Prefer the work-area delta (accurate for a normally-docked bar) on
+            // the ACTIVE monitor — its full bounds minus its work area gives the
+            // bottom taskbar thickness on that monitor (0 when the taskbar lives
+            // on another monitor/edge).
+            double sh = MonitorLayout.ActiveBounds.Height;
+            double h = MonitorLayout.ActiveBounds.Bottom - MonitorLayout.ActiveWorkArea.Bottom;
             if (h > 1.0)
                 return h;
 
@@ -509,11 +512,25 @@ public partial class RadialWindow : Window
         // composition, which lifts the real animation frame rate. The large
         // margin keeps hover zoom, drop shadows, the settings gear and the
         // drag-to-delete ring comfortably inside the window.
-        double sw = SystemParameters.PrimaryScreenWidth;
-        double sh = SystemParameters.PrimaryScreenHeight;
-        // Scale the whole panel up on taller displays (never below 1.0) so it
-        // does not look tiny on large monitors.
-        _uiScale = Math.Clamp(sh / ReferenceScreenHeight, 1.0, 2.0);
+        //
+        // Sizes/positions are taken from the ACTIVE monitor (the primary one by
+        // default, or the monitor the cursor was on when "show on all monitors"
+        // is enabled), so the dock summons on whichever screen the user invoked
+        // it from.
+        Rect mon = MonitorLayout.ActiveBounds;
+        double sw = mon.Width;
+        double sh = mon.Height;
+        // The liquid-glass dock is a per-pixel-alpha layered window whose
+        // per-frame CPU compositing cost grows with its PHYSICAL pixel area. On
+        // a high-DPI / 4K monitor the Windows display-scale factor already
+        // enlarges the dock physically, so ALSO scaling it up by the
+        // tall-display _uiScale ramp multiplies the composited area (and the
+        // per-frame cost) for no real visual gain — and reads as "too big".
+        // Keep the glass dock pinned at the base scale so it stays compact and
+        // smooth on large/high-DPI displays. Vector themes (Saturn / planet)
+        // rasterise cheaply, so they still scale up to fill tall screens.
+        bool glass = ThemeRegistry.Get(_config.Settings.Theme).ShowGlassPanel;
+        _uiScale = glass ? 1.0 : Math.Clamp(sh / ReferenceScreenHeight, 1.0, 2.0);
 
         bool saturn = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
         // Saturn renders larger overall; the liquid-glass dock renders at 0.9 so
@@ -530,7 +547,13 @@ public partial class RadialWindow : Window
         // edge) for a comfortable distance before it is dropped to delete. Added
         // only sideways and upward: the glass dock pins its bottom to the screen
         // edge and Saturn grows symmetrically, so this never shifts the layout.
-        double dragHeadroom = icon * 5.0;
+        //
+        // The headroom is EMPTY space (no dock content), yet it enlarges the
+        // layered window and so the per-frame composite cost. Keep it a fixed
+        // DIP distance derived from the BASE icon size (NOT scaled up by _uiScale
+        // on large monitors) so 4K windows stay smaller without shrinking the
+        // dock or reducing the drag-to-delete clearance on a 1080p display.
+        double dragHeadroom = _config.Settings.IconSize * _themeScale * 5.0;
 
         double halfW, halfH;
         if (saturn)
@@ -563,8 +586,8 @@ public partial class RadialWindow : Window
         double w = Math.Min((halfW + margin) * 2.0, sw);
         double h = Math.Min((halfH + margin) * 2.0, sh);
 
-        // Anchor flag: the glass dock is bottom-docked, everything else centred.
-        bool glass = ThemeRegistry.Get(_config.Settings.Theme).ShowGlassPanel;
+        // Anchor flag: the glass dock is bottom-docked, everything else centred
+        // (glass was computed above to pick the per-theme scale cap).
 
         // The liquid-glass dock is bottom-docked and can scroll. Rather than
         // spanning the WHOLE screen (a fullscreen per-pixel-alpha layered window
@@ -588,10 +611,11 @@ public partial class RadialWindow : Window
 
         Width = w;
         Height = h;
-        Left = (sw - w) / 2.0;
-        // Glass: pin the window's bottom edge to the screen bottom so the dock
-        // (which lays out flush to Height - margin) docks to the real bottom.
-        Top = glass ? sh - h : (sh - h) / 2.0;
+        Left = mon.Left + (sw - w) / 2.0;
+        // Glass: pin the window's bottom edge to the active monitor's bottom so
+        // the dock (which lays out flush to Height - margin) docks to the real
+        // bottom of that monitor.
+        Top = glass ? mon.Bottom - h : mon.Top + (sh - h) / 2.0;
         UpdateCenter();
     }
 
@@ -798,6 +822,14 @@ public partial class RadialWindow : Window
 
     public void HidePanel()
     {
+        HidePanel(null);
+    }
+
+    /// <summary>Hides the panel, optionally invoking <paramref name="onFaded"/>
+    /// once the fade-out animation has fully completed (used so the settings
+    /// window only appears after the dock has finished disappearing).</summary>
+    public void HidePanel(Action? onFaded)
+    {
         _shown = false;
         IsPinned = false;
         CancelDrag();
@@ -835,6 +867,14 @@ public partial class RadialWindow : Window
             // Only collapse if still hidden (a fast re-show may have intervened).
             if (!_shown)
                 PanelCanvas.Visibility = Visibility.Collapsed;
+            // Defer the callback to a LATER dispatcher pass (Background) instead
+            // of running it inline on the fade's final frame. The callback may
+            // build a heavy window (the settings UI), and doing that synchronously
+            // here blocks the UI thread before the collapsed/transparent frame is
+            // presented — which reads as the dock flashing/stuttering as it
+            // disappears. Letting the collapse render first keeps the fade smooth.
+            if (onFaded != null)
+                Dispatcher.BeginInvoke(onFaded, System.Windows.Threading.DispatcherPriority.Background);
         };
         RootGrid.BeginAnimation(OpacityProperty, fade);
     }

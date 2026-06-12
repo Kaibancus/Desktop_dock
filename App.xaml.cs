@@ -39,6 +39,10 @@ public partial class App : Application
     private KeyboardHook? _escHook;
     private RadialWindow? _panel;
     private SettingsWindow? _settings;
+    // True from the moment a settings-open is requested until the window is
+    // actually shown. During this window the docks are fading out, so the edge
+    // poll must NOT re-summon the side dock (which would flash on screen).
+    private bool _openingSettings;
     private Forms.NotifyIcon? _tray;
     private LeftDockWindow? _leftDock;
     private DispatcherTimer? _edgePollTimer;
@@ -255,6 +259,12 @@ public partial class App : Application
         }
         else
         {
+            // If the settings window is open, close it first so the summoned
+            // dock does not stack on top of it and block interaction.
+            CloseSettingsIfOpen();
+            // Summon on whichever monitor the cursor is on (when multi-monitor
+            // is enabled) so both docks appear where the user invoked them.
+            SetActiveMonitorFromCursor();
             _panel?.ShowPinned();
             _leftDock?.SetPinnedShown(true);   // summon the left dock together
         }
@@ -262,8 +272,35 @@ public partial class App : Application
 
     private void OnHotkeyPressed()
     {
+        // The hotkey-summoned dock should replace the settings window, not
+        // overlap it.
+        CloseSettingsIfOpen();
+        SetActiveMonitorFromCursor();
         _panel?.ShowPanel();
         _leftDock?.SetMainShown(true);   // the left dock summons together with the main dock
+    }
+
+    /// <summary>Closes the settings window if it is open (or still in the middle
+    /// of opening), so a freshly summoned dock never stacks on top of it.</summary>
+    private void CloseSettingsIfOpen()
+    {
+        _openingSettings = false;   // cancel a pending deferred open
+        if (_settings != null)
+        {
+            _settings.Close();
+            _settings = null;
+        }
+    }
+
+    /// <summary>Points the shared dock-positioning target at the monitor under
+    /// the cursor when "show on all monitors" is enabled, or the primary monitor
+    /// otherwise. Both docks read this when they lay themselves out.</summary>
+    private void SetActiveMonitorFromCursor()
+    {
+        if (_config.Settings.DockOnAllMonitors && GetCursorPos(out POINT pt))
+            Polaris.Services.MonitorLayout.SetTargetForPhysicalPoint(pt.X, pt.Y, GetDpiScale());
+        else
+            Polaris.Services.MonitorLayout.UsePrimary();
     }
 
     private void OnHotkeyReleased()
@@ -286,8 +323,9 @@ public partial class App : Application
             if (_leftDock == null)
                 return;
             // Suppress the left-edge auto-summon while the settings window is
-            // open, so the dock cannot immediately re-appear over it.
-            if (_settings != null)
+            // open (or in the middle of opening), so the dock cannot re-appear
+            // over it or flash during the dock fade-out.
+            if (_settings != null || _openingSettings)
             {
                 _leftDock.SetEdgeShown(false);
                 return;
@@ -300,10 +338,27 @@ public partial class App : Application
             double x = pt.X / scale;
             double y = pt.Y / scale;
 
-            double sh = SystemParameters.PrimaryScreenHeight;
-            double sw = SystemParameters.PrimaryScreenWidth;
+            // Evaluate the trigger against the monitor the dock will summon on:
+            // the monitor under the cursor when "show on all monitors" is enabled
+            // (also updating the shared target so the dock positions there), or
+            // the primary monitor otherwise.
+            Rect mon;
+            if (_config.Settings.DockOnAllMonitors)
+            {
+                Polaris.Services.MonitorLayout.SetTargetForPhysicalPoint(pt.X, pt.Y, scale);
+                mon = Polaris.Services.MonitorLayout.ActiveBounds;
+            }
+            else
+            {
+                Polaris.Services.MonitorLayout.UsePrimary();
+                mon = new Rect(0, 0,
+                    SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
+            }
+
             const double Reach = 17.0;       // edge sensitivity in DIPs
             const double Band = 0.25;        // exclude the outer 25% at each end
+            double bandV = mon.Height * Band;
+            double bandH = mon.Width * Band;
 
             // Trigger band: a strip along the dock's anchored edge, covering the
             // centre 50% of that edge. The threshold is generous (and a touch of
@@ -312,10 +367,10 @@ public partial class App : Application
             DockSide side = _leftDock.DockSidePosition;
             bool inTrigger = side switch
             {
-                DockSide.Right => x >= sw - Reach && y >= sh * Band && y <= sh * (1 - Band),
-                DockSide.Top => y <= Reach && x >= sw * Band && x <= sw * (1 - Band),
-                DockSide.Bottom => y >= sh - Reach && x >= sw * Band && x <= sw * (1 - Band),
-                _ => x <= Reach && y >= sh * Band && y <= sh * (1 - Band),
+                DockSide.Right => x >= mon.Right - Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
+                DockSide.Top => y <= mon.Top + Reach && x >= mon.Left + bandH && x <= mon.Right - bandH,
+                DockSide.Bottom => y >= mon.Bottom - Reach && x >= mon.Left + bandH && x <= mon.Right - bandH,
+                _ => x <= mon.Left + Reach && y >= mon.Top + bandV && y <= mon.Bottom - bandV,
             };
 
             // Once shown by the edge, keep it shown while the cursor stays near
@@ -360,9 +415,14 @@ public partial class App : Application
         if (_leftDock == null || _leftDock.DockSidePosition != DockSide.Bottom)
             return 0.0;
         Rect b = _leftDock.GetDockScreenBounds();
-        double sh = SystemParameters.PrimaryScreenHeight;
+        // For a bottom dock the slab's rect HEIGHT is its thickness, which is
+        // independent of which monitor it sits on. Reserve that thickness plus a
+        // small gap so the glass dock lifts just clear of it. (Deriving the
+        // reserve from screen coordinates — e.g. primaryHeight - b.Top — breaks
+        // on a secondary monitor whose bottom edge differs from the primary's,
+        // producing a huge bogus reserve that shoves the glass dock off-screen.)
         const double gap = 18.0;
-        double reserve = sh - b.Top + gap;
+        double reserve = b.Height + gap;
         return reserve > 0 ? reserve : 0.0;
     }
 
@@ -420,8 +480,31 @@ public partial class App : Application
 
     private void OpenSettings()
     {
-        _panel?.HidePanel();
+        if (_settings != null)
+        {
+            _settings.Activate();
+            return;
+        }
+
+        // Dismiss the main dock (and the left dock) FIRST, then show the
+        // settings window only AFTER the dock's fade-out animation has fully
+        // finished, so it never appears over a still-animating dock.
+        _openingSettings = true;   // suppress edge re-summon during the fade
         _leftDock?.HideAll();   // dismiss the left dock too, not just the main dock
+        if (_panel != null)
+            _panel.HidePanel(ShowSettingsWindow);
+        else
+            ShowSettingsWindow();
+    }
+
+    private void ShowSettingsWindow()
+    {
+        // A pending open can be cancelled (e.g. the user summoned the dock with
+        // the hotkey during the dock's fade-out): CloseSettingsIfOpen clears the
+        // flag, so bail here instead of popping the settings window over the dock.
+        if (!_openingSettings)
+            return;
+        _openingSettings = false;
         if (_settings != null)
         {
             _settings.Activate();
@@ -431,6 +514,10 @@ public partial class App : Application
         _settings = new SettingsWindow(_config, Persist);
         _settings.Changed += () =>
         {
+            // The "show on all monitors" toggle may have changed; re-point the
+            // shared positioning target so the refresh below lands the docks on
+            // the right monitor (the cursor's when enabled, the primary when not).
+            SetActiveMonitorFromCursor();
             // Re-anchor / re-lay the side dock FIRST so a changed dock position
             // (or any geometry-affecting setting) takes effect immediately and
             // its new bounds are available to the main dock below.
@@ -442,8 +529,25 @@ public partial class App : Application
         };
         _settings.TriggerKeyChanged += RebuildHook;
         _settings.Closed += (_, _) => _settings = null;
+
+        // The window cloaks itself on SourceInitialized (see SettingsWindow) so
+        // DWM never shows its white first frame. Centre it on the active monitor,
+        // then uncloak + fade in once its content has rendered.
+        var settings = _settings;
+        settings.Opacity = 0;
+        settings.WindowStartupLocation = WindowStartupLocation.Manual;
+        settings.ContentRendered += (_, _) =>
+        {
+            Rect wa = Polaris.Services.MonitorLayout.ActiveWorkArea;
+            settings.Left = wa.Left + (wa.Width - settings.ActualWidth) / 2.0;
+            settings.Top = wa.Top + (wa.Height - settings.ActualHeight) / 2.0;
+            settings.Uncloak();
+            settings.BeginAnimation(Window.OpacityProperty,
+                new System.Windows.Media.Animation.DoubleAnimation(
+                    0, 1, TimeSpan.FromMilliseconds(120)));
+            settings.Activate();
+        };
         _settings.Show();
-        _settings.Activate();
     }
 
     private void SetupTray()

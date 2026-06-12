@@ -247,10 +247,12 @@ public partial class LeftDockWindow : Window
 
     private void PositionAndSize()
     {
-        // Size and position against the WORK AREA (which excludes the taskbar)
-        // so the dock never covers or crowds the taskbar.
-        var wa = SystemParameters.WorkArea;
-        _uiScale = Math.Clamp(SystemParameters.PrimaryScreenHeight / 1080.0, 1.0, 2.0);
+        // Size and position against the ACTIVE monitor's WORK AREA (which
+        // excludes the taskbar) so the dock never covers or crowds the taskbar.
+        // The active monitor is the primary one by default, or the monitor the
+        // cursor was on when "show on all monitors" is enabled.
+        var wa = MonitorLayout.ActiveWorkArea;
+        _uiScale = Math.Clamp(MonitorLayout.ActiveBounds.Height / 1080.0, 1.0, 2.0);
         _side = _config.Settings.DockPosition;
 
         // The window covers a band along the anchored edge: it spans the full
@@ -494,8 +496,8 @@ public partial class LeftDockWindow : Window
         double icon = EffectiveIconSize;
         // Length available along the anchored edge (the main axis).
         double mainExtent = IsVertical
-            ? (Height > 0 ? Height : SystemParameters.PrimaryScreenHeight)
-            : (Width > 0 ? Width : SystemParameters.PrimaryScreenWidth);
+            ? (Height > 0 ? Height : MonitorLayout.ActiveBounds.Height)
+            : (Width > 0 ? Width : MonitorLayout.ActiveBounds.Width);
 
         double crossGap = 1 * _uiScale;
         // Slab is only as thick as the icon at its hover-enlarged size (plus a

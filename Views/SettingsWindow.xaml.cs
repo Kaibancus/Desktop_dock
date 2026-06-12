@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Runtime.InteropServices;
 using Polaris.Models;
 using Polaris.Services;
 
@@ -406,5 +408,34 @@ public partial class SettingsWindow : Window
             CheckUpdateButton.Content = originalText;
             CheckUpdateButton.IsEnabled = true;
         }
+    }
+
+    // --- First-frame white-flash suppression via DWM cloaking ---------------
+    // A freshly created top-level WPF window has DWM paint one frame with the
+    // window-class (white) background brush BEFORE the WPF render thread submits
+    // its first dark frame — Opacity=0 and off-screen positioning cannot hide it
+    // because the flash happens at the DWM composition layer. Cloaking the window
+    // (the same mechanism Visual Studio / Office use) keeps it fully invisible
+    // until the host calls Uncloak() after the content has rendered.
+    private const int DWMWA_CLOAK = 13;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        IntPtr hwnd = new WindowInteropHelper(this).Handle;
+        int on = 1;
+        DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref on, sizeof(int));
+    }
+
+    /// <summary>Reveals the window once its content has rendered, so the white
+    /// first frame is never shown.</summary>
+    public void Uncloak()
+    {
+        IntPtr hwnd = new WindowInteropHelper(this).Handle;
+        int off = 0;
+        DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref off, sizeof(int));
     }
 }
