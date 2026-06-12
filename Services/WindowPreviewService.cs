@@ -116,6 +116,10 @@ public static class WindowPreviewService
     private static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid riid,
         [MarshalAs(UnmanagedType.Interface)] out IPropertyStore? ppv);
 
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHGetPropertyStoreFromParsingName(string pszPath, IntPtr pbc,
+        int flags, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore? ppv);
+
     [DllImport("propsys.dll")]
     private static extern int PropVariantToStringAlloc(ref PROPVARIANT propvar, out IntPtr ppszOut);
 
@@ -128,8 +132,14 @@ public static class WindowPreviewService
     [StructLayout(LayoutKind.Explicit)]
     private struct PROPVARIANT
     {
+        // A real PROPVARIANT is 24 bytes on x64 (2-byte VARTYPE + 6 reserved =
+        // 8-byte header, then a 16-byte value union that can hold two pointers).
+        // Under-declaring it (e.g. only 16 bytes) lets IPropertyStore::GetValue
+        // overflow the managed buffer, corrupting the value so the AUMID reads
+        // back empty — which silently disables packaged-app window detection.
         [FieldOffset(0)] public ushort vt;
         [FieldOffset(8)] public IntPtr p;
+        [FieldOffset(16)] public IntPtr p2;
     }
 
     private static Guid IID_IPropertyStore = new("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99");
@@ -139,6 +149,14 @@ public static class WindowPreviewService
     {
         fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),
         pid = 5,
+    };
+
+    // PKEY_Link_TargetParsingPath: fmtid {B9B4B3FC-2B51-4A42-B5D8-324146AFCF25}, pid 2.
+    // An shell:AppsFolder item exposes the path of the program it launches here.
+    private static readonly PROPERTYKEY PKEY_Link_TargetParsingPath = new()
+    {
+        fmtid = new Guid("B9B4B3FC-2B51-4A42-B5D8-324146AFCF25"),
+        pid = 2,
     };
 
     [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
@@ -215,7 +233,21 @@ public static class WindowPreviewService
     {
         string? aumid = TryGetLauncherAumid(path, arguments);
         if (aumid != null)
-            return GetWindowsByAumid(aumid);
+        {
+            var byAumid = GetWindowsByAumid(aumid);
+            if (byAumid.Count > 0)
+                return byAumid;
+
+            // The AUMID matched no window. Many shell:AppsFolder entries are not
+            // genuine packaged apps (e.g. VS Code, File Explorer): they launch a
+            // plain Win32 exe whose windows carry no AUMID. Resolve the real
+            // target executable and match those windows by process instead.
+            string? exe = TryResolveAppsFolderExe(aumid);
+            if (!string.IsNullOrEmpty(exe))
+                return GetWindows(exe);
+
+            return byAumid;
+        }
 
         // Protocol launchers (e.g. "explorer.exe ms-settings:") open a UWP app
         // that is usually hosted by ApplicationFrameHost — its window has no
@@ -278,25 +310,40 @@ public static class WindowPreviewService
     /// </summary>
     public static string? TryGetLauncherAumid(string path, string? arguments)
     {
-        if (string.IsNullOrWhiteSpace(arguments))
-            return null;
-        try
+        const string token = "shell:AppsFolder\\";
+
+        // New form: the entry's Path itself is "shell:AppsFolder\<AUMID>" (a
+        // packaged app dragged from the Start menu, normalized on import) with no
+        // arguments. Older pins stored it as explorer.exe + the token in the
+        // arguments, so accept both.
+        string? source = null;
+        if (!string.IsNullOrWhiteSpace(path) &&
+            path.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
-                    StringComparison.OrdinalIgnoreCase))
-                return null;
+            source = path;
         }
-        catch
+        else if (!string.IsNullOrWhiteSpace(arguments))
         {
-            return null;
+            try
+            {
+                if (string.Equals(Path.GetFileName(path), "explorer.exe",
+                        StringComparison.OrdinalIgnoreCase))
+                    source = arguments;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
-        const string token = "shell:AppsFolder\\";
-        int i = arguments.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+        if (source == null)
+            return null;
+
+        int i = source.IndexOf(token, StringComparison.OrdinalIgnoreCase);
         if (i < 0)
             return null;
 
-        string aumid = arguments.Substring(i + token.Length).Trim().Trim('"');
+        string aumid = source.Substring(i + token.Length).Trim().Trim('"');
         int ws = aumid.IndexOf(' ');
         if (ws > 0)
             aumid = aumid.Substring(0, ws);
@@ -309,8 +356,7 @@ public static class WindowPreviewService
     /// such as the new Teams / Outlook).
     /// </summary>
     public static List<WindowPreview> GetWindowsByAumid(string aumid)
-    {
-        var result = new List<WindowPreview>();
+    {        var result = new List<WindowPreview>();
         int ownPid = Environment.ProcessId;
 
         EnumWindows((hWnd, _) =>
@@ -340,6 +386,54 @@ public static class WindowPreviewService
         return result;
     }
 
+    /// <summary>
+    /// Enumerates alt-tab windows once and returns the set of package-family
+    /// names that currently own a window. Used to light the "running" glow on
+    /// pinned packaged-app (UWP / Store) icons without an EnumWindows pass per
+    /// icon. Match an entry with <see cref="IsAumidInSnapshot"/>.
+    /// </summary>
+    public static HashSet<string> SnapshotRunningAumids()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int ownPid = Environment.ProcessId;
+        try
+        {
+            EnumWindows((hWnd, _) =>
+            {
+                if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                    return true;
+                if (!IsAltTabWindow(hWnd))
+                    return true;
+
+                string? winAumid = GetWindowAumid(hWnd);
+                if (string.IsNullOrEmpty(winAumid))
+                    GetProcessInfo(pid, out winAumid);
+                if (!string.IsNullOrEmpty(winAumid))
+                    set.Add(PackageFamilyOf(winAumid));
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            // Best-effort; an empty set just means no UWP glow this tick.
+        }
+        return set;
+    }
+
+    /// <summary>True when the packaged app identified by <paramref name="aumid"/>
+    /// has a window in <paramref name="runningAumids"/> (compared by package
+    /// family name, matching <see cref="AumidMatches"/>).</summary>
+    public static bool IsAumidInSnapshot(string? aumid, HashSet<string>? runningAumids)
+    {
+        if (string.IsNullOrEmpty(aumid) || runningAumids == null || runningAumids.Count == 0)
+            return false;
+        string family = PackageFamilyOf(aumid);
+        foreach (var running in runningAumids)
+            if (FamilyMatches(family, running))
+                return true;
+        return false;
+    }
+
     /// <summary>True when a window's Application User Model ID
     /// <paramref name="winAumid"/> identifies the same packaged app as the pinned
     /// launcher's <paramref name="target"/> AUMID. Some packaged apps (e.g. the
@@ -355,8 +449,34 @@ public static class WindowPreviewService
 
         string winPfn = PackageFamilyOf(winAumid);
         string targetPfn = PackageFamilyOf(target);
-        return winPfn.Length > 0 &&
-            string.Equals(winPfn, targetPfn, StringComparison.OrdinalIgnoreCase);
+        return winPfn.Length > 0 && FamilyMatches(winPfn, targetPfn);
+    }
+
+    /// <summary>Compares two package-family names, tolerating a profile/variant
+    /// suffix. Edge, for instance, is launched as app-id <c>MSEdge</c> but its
+    /// windows report <c>MSEdge.UserData.Profile1</c>; treat one as matching the
+    /// other when it is the same string or a dotted extension of it.</summary>
+    private static bool FamilyMatches(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+            return false;
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return a.StartsWith(b + ".", StringComparison.OrdinalIgnoreCase)
+            || b.StartsWith(a + ".", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True when two AUMIDs identify the same packaged app, comparing by
+    /// package family name with the same profile/variant-suffix tolerance as
+    /// <see cref="FamilyMatches"/>. Used to exclude a pinned packaged app (whose
+    /// stored AUMID may be the bare launcher id, e.g. <c>MSEdge</c>) from the
+    /// running strip even when its live window reports a profile-suffixed AUMID
+    /// (e.g. <c>MSEdge.UserData.Profile1</c>).</summary>
+    public static bool AumidFamilyMatches(string? a, string? b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+            return false;
+        return FamilyMatches(PackageFamilyOf(a), PackageFamilyOf(b));
     }
 
     /// <summary>Returns the package-family-name portion of an AUMID (everything
@@ -389,6 +509,78 @@ public static class WindowPreviewService
                         return null;
                     try { return Marshal.PtrToStringUni(str); }
                     finally { Marshal.FreeCoTaskMem(str); }
+                }
+                finally
+                {
+                    PropVariantClear(ref pv);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(store);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Caches the <see cref="TryResolveAppsFolderExe"/> result per AUMID
+    /// (AppsFolder targets are static for the session), so the COM property-store
+    /// lookup runs at most once per app rather than every running-state tick.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> _appsFolderExeCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Resolves an <c>shell:AppsFolder\&lt;AUMID&gt;</c> pseudo-AUMID to the full
+    /// path of the executable it actually launches, by reading the AppsFolder
+    /// item's <c>System.Link.TargetParsingPath</c>. Many Start-menu entries (e.g.
+    /// Visual Studio Code = <c>Microsoft.VisualStudioCode</c>, File Explorer =
+    /// <c>Microsoft.Windows.Explorer</c>) are NOT genuine packaged apps: their
+    /// windows carry no AUMID, so they can only be matched to a running process
+    /// by exe path. A shell-location target (<c>::{CLSID}</c>, e.g. File
+    /// Explorer's Home) is hosted by the shell, so it maps to
+    /// <c>%WINDIR%\explorer.exe</c>. Returns null for a true packaged app (whose
+    /// windows DO carry the AUMID) or when the target cannot be resolved.
+    /// </summary>
+    public static string? TryResolveAppsFolderExe(string? aumid)
+    {
+        if (string.IsNullOrWhiteSpace(aumid))
+            return null;
+        return _appsFolderExeCache.GetOrAdd(aumid, ResolveAppsFolderExeUncached);
+    }
+
+    private static string? ResolveAppsFolderExeUncached(string aumid)
+    {
+        try
+        {
+            string parsing = "shell:AppsFolder\\" + aumid;
+            var iid = IID_IPropertyStore;
+            if (SHGetPropertyStoreFromParsingName(parsing, IntPtr.Zero, 0, ref iid, out IPropertyStore? store) != 0
+                || store == null)
+                return null;
+            try
+            {
+                var key = PKEY_Link_TargetParsingPath;
+                if (store.GetValue(ref key, out PROPVARIANT pv) != 0)
+                    return null;
+                try
+                {
+                    if (PropVariantToStringAlloc(ref pv, out IntPtr str) != 0 || str == IntPtr.Zero)
+                        return null;
+                    string? target;
+                    try { target = Marshal.PtrToStringUni(str); }
+                    finally { Marshal.FreeCoTaskMem(str); }
+                    if (string.IsNullOrWhiteSpace(target))
+                        return null;
+                    // A shell location ("::{CLSID}") runs inside the shell process.
+                    if (target.StartsWith("::", StringComparison.Ordinal))
+                    {
+                        string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                        return Path.Combine(win, "explorer.exe");
+                    }
+                    return File.Exists(target) ? target : null;
                 }
                 finally
                 {

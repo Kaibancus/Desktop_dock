@@ -40,9 +40,16 @@ public partial class RadialWindow : Window
     private const double SaturnEnlarge = 1.10;
     private double _themeScale = 1.0;
 
-    // Ring radii scaled by the current resolution + theme factors.
-    private double InnerRadius => BaseInnerRadius * _uiScale * _themeScale;
-    private double RingStep => BaseRingStep * _uiScale * _themeScale;
+    // Extra scale applied ONLY to the Saturn rings (disk) and centre planet —
+    // NOT to the icons or the side dock — so the planet/disk can be enlarged
+    // without changing icon size. 1.0 for non-Saturn themes.
+    private const double SaturnDiskEnlarge = 1.05;
+    private double _diskScale = 1.0;
+
+    // Ring radii scaled by the current resolution + theme factors (plus the
+    // Saturn-only disk enlargement).
+    private double InnerRadius => BaseInnerRadius * _uiScale * _themeScale * _diskScale;
+    private double RingStep => BaseRingStep * _uiScale * _themeScale * _diskScale;
 
     // User-chosen icon diameter scaled by the resolution (and theme) factors, so
     // icons (and the grid/ring geometry derived from them) grow on larger
@@ -53,7 +60,7 @@ public partial class RadialWindow : Window
     // user's icon-size setting) so adjusting icon size never resizes the planet;
     // it still scales with screen resolution and the Saturn enlargement.
     private const double PlanetIconBase = 56.0;
-    private double PlanetDiameter => PlanetIconBase * _uiScale * _themeScale * 2.5;
+    private double PlanetDiameter => PlanetIconBase * _uiScale * _themeScale * _diskScale * 2.5;
 
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.18;
@@ -497,8 +504,17 @@ public partial class RadialWindow : Window
         // the whole dock (panel, taskbar strip and icons all derive from
         // EffectiveIconSize) is 10% more compact.
         _themeScale = saturn ? SaturnEnlarge : 0.9;
+        // Enlarge only the Saturn rings/planet (not the icons) by SaturnDiskEnlarge.
+        _diskScale = saturn ? SaturnDiskEnlarge : 1.0;
 
         double icon = EffectiveIconSize;
+
+        // Extra clearance kept around the content so an icon dragged off the dock
+        // stays visible (instead of being clipped by the content-sized window
+        // edge) for a comfortable distance before it is dropped to delete. Added
+        // only sideways and upward: the glass dock pins its bottom to the screen
+        // edge and Saturn grows symmetrically, so this never shifts the layout.
+        double dragHeadroom = icon * 5.0;
 
         double halfW, halfH;
         if (saturn)
@@ -506,8 +522,8 @@ public partial class RadialWindow : Window
             // Ring disc radius + an outer icon, plus room for the 1.7x hover zoom.
             double discR = InnerRadius + RingStep + icon * OuterIconScale;
             double reach = discR + icon * OuterIconScale;
-            halfW = reach;
-            halfH = reach;
+            halfW = reach + dragHeadroom;
+            halfH = reach + dragHeadroom;
         }
         else
         {
@@ -521,8 +537,8 @@ public partial class RadialWindow : Window
             double panelHalfH = (gridH + icon + icon * 1.15 * 2) / 2.0;
             // The settings gear sits above the grid; keep it inside.
             double gearUp = 2 * (icon * 2.1) + icon * 0.7 + icon * 0.6;
-            halfW = panelHalfW + icon * 1.7;
-            halfH = Math.Max(panelHalfH, gearUp) + icon * 1.7;
+            halfW = panelHalfW + icon * 1.7 + dragHeadroom;
+            halfH = Math.Max(panelHalfH, gearUp) + icon * 1.7 + dragHeadroom;
         }
 
         // Generous fixed margin on top of the computed reach (ample headroom),
@@ -547,8 +563,11 @@ public partial class RadialWindow : Window
             double shadowPad = 72.0 * _uiScale;        // slab drop shadow (blur 48 + depth)
             double scrollPad = icon * 1.6;             // scrollbar parked right of the grid
             double hoverHeadroom = icon * 2.4;         // 1.7x zoom + label above the top row
-            w = Math.Min(dockW + shadowPad * 2 + scrollPad, sw);
-            h = Math.Min(GlassDockTotalHeight + GlassDockBottomMargin + hoverHeadroom + shadowPad, sh);
+            // dragHeadroom is added sideways (both edges) and upward only — the
+            // window's bottom stays pinned to the screen edge so the dock keeps
+            // its position while drag-out clearance grows above and beside it.
+            w = Math.Min(dockW + shadowPad * 2 + scrollPad + dragHeadroom * 2, sw);
+            h = Math.Min(GlassDockTotalHeight + GlassDockBottomMargin + hoverHeadroom + shadowPad + dragHeadroom, sh);
         }
 
         Width = w;
@@ -1032,13 +1051,25 @@ public partial class RadialWindow : Window
             List<string> explorerTitles;
             try { explorerTitles = WindowPreviewService.GetExplorerWindowTitles(); }
             catch { explorerTitles = new List<string>(); }
+            System.Collections.Generic.HashSet<string> runningAumids;
+            try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
+            catch { runningAumids = new System.Collections.Generic.HashSet<string>(); }
             Dispatcher.BeginInvoke(() =>
             {
                 foreach (var icon in icons)
                 {
                     try
                     {
-                        icon.IsRunning = RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, running)
+                        // Packaged apps (UWP / Store, launched via shell:AppsFolder)
+                        // own no exe-path process to match, so detect by AUMID first.
+                        string? aumid = WindowPreviewService.TryGetLauncherAumid(icon.Entry.Path, icon.Entry.Arguments);
+                        // Non-packaged AppsFolder launchers (VS Code, File Explorer…)
+                        // carry no window AUMID; match their resolved exe in the
+                        // process snapshot so the running glow lights up too.
+                        string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+                        icon.IsRunning = WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
+                            || (!string.IsNullOrEmpty(aumidExe) && RunningAppTracker.IsRunningInSnapshot(aumidExe, running))
+                            || RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, running)
                             || RunningAppTracker.IsShellItemRunning(icon.Entry.Name, icon.Entry.Path, explorerTitles);
                     }
                     catch
@@ -2125,6 +2156,16 @@ public partial class RadialWindow : Window
         // Shell-namespace objects (This PC, Recycle Bin…) open through explorer.
         if (entry.IsShellItem)
         {
+            // Packaged apps (UWP / Store) are stored as "shell:AppsFolder\<AUMID>"
+            // — also a shell item, but they own real app windows, so activate an
+            // existing one instead of always launching a second instance.
+            try
+            {
+                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
+                    return;
+            }
+            catch { /* fall through to a fresh launch */ }
+
             try
             {
                 ShellNamespace.Launch(entry.Path);

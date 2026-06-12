@@ -54,6 +54,7 @@ public static class ConfigStore
             cfg.Settings ??= new AppSettings();
             cfg.Apps ??= new();
             cfg.LeftDockApps ??= new();
+            MigrateAppsFolderPaths(cfg);
             config = cfg;
             return true;
         }
@@ -62,6 +63,34 @@ public static class ConfigStore
             // Corrupt/partial file — let the caller fall back to the backup.
             return false;
         }
+    }
+
+    /// <summary>Upgrades entries saved before packaged-app (UWP / Microsoft
+    /// Store) launch support: their <see cref="AppEntry.Path"/> was stored as a
+    /// bare AUMID that could neither launch nor render an icon. Rewrite them to
+    /// the "shell:AppsFolder\&lt;AUMID&gt;" form so existing dock icons heal.</summary>
+    private static void MigrateAppsFolderPaths(AppConfig cfg)
+    {
+        void Fix(System.Collections.Generic.List<AppEntry>? list)
+        {
+            if (list == null)
+                return;
+            foreach (var app in list)
+            {
+                var norm = ShellNamespace.NormalizeAppsFolderPath(app.Path);
+                // Heal known-folder-GUID-relative paths saved by older builds
+                // (e.g. "{6D809377-…}\App\app.exe") into real file-system paths.
+                norm = ShellNamespace.ExpandKnownFolderPath(norm);
+                if (norm != app.Path)
+                {
+                    if (app.IconSource == app.Path || string.IsNullOrWhiteSpace(app.IconSource))
+                        app.IconSource = norm;
+                    app.Path = norm;
+                }
+            }
+        }
+        Fix(cfg.Apps);
+        Fix(cfg.LeftDockApps);
     }
 
     public static void Save(AppConfig config)

@@ -248,10 +248,19 @@ public static class RunningAppTracker
         if (aumid != null)
         {
             var windows = WindowPreviewService.GetWindowsByAumid(aumid);
-            if (windows.Count == 0)
-                return false;
-            ActivateWindow(windows[0].Handle);
-            return true;
+            if (windows.Count > 0)
+            {
+                ActivateWindow(windows[0].Handle);
+                return true;
+            }
+
+            // Non-packaged AppsFolder launchers (VS Code, File Explorer…) have no
+            // window carrying the AUMID; fall back to the resolved exe.
+            string? exe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+            if (!string.IsNullOrEmpty(exe))
+                return ActivateExisting(exe);
+
+            return false;
         }
 
         return ActivateExisting(path);

@@ -637,6 +637,23 @@ public partial class LeftDockWindow : Window
             if (aumid != null)
             {
                 excludeAumids.Add(aumid);
+                // Non-packaged AppsFolder launchers (VS Code, File Explorer…) run
+                // a plain exe whose windows carry no AUMID, so the running strip
+                // lists them by exe path. Resolve that path so they are excluded
+                // here too (otherwise the pinned app ALSO shows in the strip).
+                string? exe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+                if (!string.IsNullOrWhiteSpace(exe))
+                {
+                    try { excludePaths.Add(System.IO.Path.GetFullPath(exe)); }
+                    catch { excludePaths.Add(exe); }
+                    try
+                    {
+                        string fn = System.IO.Path.GetFileName(exe);
+                        if (!string.IsNullOrWhiteSpace(fn))
+                            excludeFileNames.Add(fn);
+                    }
+                    catch { /* ignore */ }
+                }
             }
             else
             {
@@ -664,6 +681,10 @@ public partial class LeftDockWindow : Window
             try { explorerTitles = WindowPreviewService.GetExplorerWindowTitles(); }
             catch { explorerTitles = new List<string>(); }
 
+            System.Collections.Generic.HashSet<string> runningAumids;
+            try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
+            catch { runningAumids = new System.Collections.Generic.HashSet<string>(); }
+
             List<TaskbarApp> apps;
             try { apps = WindowPreviewService.GetTaskbarApps(); }
             catch { apps = new List<TaskbarApp>(); }
@@ -676,8 +697,23 @@ public partial class LeftDockWindow : Window
                 catch { full = ta.Path; }
                 if (excludePaths.Contains(full))
                     continue;
-                if (ta.Aumid != null && excludeAumids.Contains(ta.Aumid))
-                    continue;
+                if (ta.Aumid != null)
+                {
+                    bool excluded = excludeAumids.Contains(ta.Aumid);
+                    if (!excluded)
+                    {
+                        foreach (var ex in excludeAumids)
+                        {
+                            if (WindowPreviewService.AumidFamilyMatches(ta.Aumid, ex))
+                            {
+                                excluded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (excluded)
+                        continue;
+                }
                 try
                 {
                     string fn = System.IO.Path.GetFileName(ta.Path);
@@ -692,7 +728,7 @@ public partial class LeftDockWindow : Window
             {
                 if (!_shown)
                     return;
-                ApplyPinnedRunning(snapshot, explorerTitles);
+                ApplyPinnedRunning(snapshot, explorerTitles, runningAumids);
                 ApplyRunning(filtered);
             });
         });
@@ -700,13 +736,23 @@ public partial class LeftDockWindow : Window
 
     /// <summary>Lights up the flowing blue border on each pinned icon whose
     /// target program is currently running (mirrors the main dock).</summary>
-    private void ApplyPinnedRunning(RunningAppTracker.RunningSnapshot snapshot, List<string> explorerTitles)
+    private void ApplyPinnedRunning(RunningAppTracker.RunningSnapshot snapshot, List<string> explorerTitles,
+        System.Collections.Generic.HashSet<string> runningAumids)
     {
         foreach (var icon in _pinnedIcons)
         {
             try
             {
-                icon.IsRunning = RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, snapshot)
+                // Packaged apps (UWP / Store, launched via shell:AppsFolder) own
+                // no exe-path process we can match, so detect them by AUMID first.
+                string? aumid = WindowPreviewService.TryGetLauncherAumid(icon.Entry.Path, icon.Entry.Arguments);
+                // Non-packaged AppsFolder launchers (VS Code, File Explorer…)
+                // carry no window AUMID; match their resolved exe in the process
+                // snapshot so the running glow lights up for them too.
+                string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+                icon.IsRunning = WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
+                    || (!string.IsNullOrEmpty(aumidExe) && RunningAppTracker.IsRunningInSnapshot(aumidExe, snapshot))
+                    || RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, snapshot)
                     || RunningAppTracker.IsShellItemRunning(icon.Entry.Name, icon.Entry.Path, explorerTitles);
             }
             catch { icon.IsRunning = false; }
@@ -1621,6 +1667,17 @@ public partial class LeftDockWindow : Window
 
         if (entry.IsShellItem)
         {
+            // Packaged apps (UWP / Store) are stored as "shell:AppsFolder\<AUMID>"
+            // — also a shell item, but unlike This PC / Recycle Bin they own real
+            // app windows, so bring an existing one forward instead of always
+            // spawning a new instance.
+            try
+            {
+                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
+                    return;
+            }
+            catch { /* fall through to a fresh launch */ }
+
             try { ShellNamespace.Launch(entry.Path); }
             catch (Exception ex)
             {
