@@ -220,7 +220,15 @@
                            FontWeight="SemiBold"
                            TextAlignment="Center"
                            TextTrimming="CharacterEllipsis"
-                           HorizontalAlignment="Center"/>
+                           HorizontalAlignment="Center">
+                    <!-- Dark drop shadow: gives the name depth ("3D") plus a halo
+                         so light text stays legible even over a white window. -->
+                    <TextBlock.Effect>
+                        <DropShadowEffect Color="Black" BlurRadius="5"
+                                          ShadowDepth="1.4" Direction="315"
+                                          Opacity="0.9"/>
+                    </TextBlock.Effect>
+                </TextBlock>
             </Border>
         </Canvas>
     </Grid>

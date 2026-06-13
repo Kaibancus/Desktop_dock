@@ -24,7 +24,7 @@ namespace Polaris.Views;
 public partial class LeftDockWindow : Window
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
-    private const double HoverScale = 1.6;
+    private const double HoverScale = 1.5;
     private const double DragThreshold = 6.0;
     private const int RunningMaxComplete = 6;     // at most 6 full running-app icons
     // Left dock icon scale relative to the main dock. Kept identical for every
@@ -37,6 +37,17 @@ public partial class LeftDockWindow : Window
     private readonly Action _persist;
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
     private readonly Dictionary<string, BitmapSource?> _runIconCache = new();
+
+    // Known launcher → helper exe names. A pinned launcher whose taskbar window is
+    // actually owned by a differently-named helper process (so it can't be matched
+    // by the launcher's own path/name) lists its helper exe file name(s) here, so
+    // the helper window is folded into the launcher tile instead of showing as a
+    // separate running app. Keyed on the pinned launcher's exe file name.
+    private static readonly Dictionary<string, string[]> LauncherHelperExeNames =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["steam.exe"] = new[] { "steamwebhelper.exe" },
+        };
 
     private double _uiScale = 1.0;
 
@@ -86,6 +97,16 @@ public partial class LeftDockWindow : Window
         _ => new Rect(crossStart, mainStart, crossLen, mainLen),
     };
 
+    /// <summary>Window-local point for a logical (main, cross) coordinate.</summary>
+    private Point LogicalPoint(double main, double cross) => _side switch
+    {
+        DockSide.Left => new Point(cross, main),
+        DockSide.Right => new Point(WinW - cross, main),
+        DockSide.Top => new Point(main, cross),
+        DockSide.Bottom => new Point(main, WinH - cross),
+        _ => new Point(cross, main),
+    };
+
     /// <summary>The (dx, dy) window-local translation for a cross-axis pop of
     /// <paramref name="pop"/> toward the screen interior.</summary>
     private (double dx, double dy) PopOffset(double pop) => _side switch
@@ -109,6 +130,9 @@ public partial class LeftDockWindow : Window
     private bool _shownByEdge;
     private bool _shownByDrag;
     private bool _shownByPinned;
+    // Held true while a clicked icon plays its launch bounce, so the dock can't
+    // dismiss out from under the animation before it finishes.
+    private bool _bounceHold;
     private bool _shown;
     private bool _realized;
 
@@ -129,6 +153,38 @@ public partial class LeftDockWindow : Window
     private bool _waveTicking;                        // CompositionTarget.Rendering hooked?
     private TimeSpan _waveLastTick;
 
+    // Saturn-only: a black overlay whose interior edge bulges outward to follow
+    // the magnification wave, so the dark dock background "breathes" with the
+    // icons instead of staying a rigid rectangle. Rebuilt each wave frame.
+    private System.Windows.Shapes.Path? _waveBulge;
+    private bool _darkDock;
+    private double _bulgeOpacity = 1.0;
+    private double _flameFeather = 10.0;   // flame outline feather, matched to the slab edge fade
+
+    // Launch-bounce flame: while a clicked icon hops, the wave loop is stopped, so
+    // we feed the Saturn flame a synthetic contributor (a single tongue centred on
+    // the bouncing icon whose intensity tracks the live hop height) so the flame
+    // leaps up with the icon. Driven by OnBounceFlameTick; ignored by glass themes.
+    private bool _bounceFlameActive;
+    private double _bounceFlameAmp;        // 0..1 hop progress → flame intensity
+    private double _bounceFlameCenterMain; // main-axis centre of the bouncing item
+    private TranslateTransform? _bounceFlameTrans; // live transform we read the hop from
+    private bool _bounceFlameAxisY = true; // read the hop from Y (Left/Right) or X (Top/Bottom)
+    private double _bounceFlameMaxLift = 1.0;
+
+    // Saturn debris belt: scattered rocks rendered across the dark slab. Each rock
+    // keeps its resting (main, cross) and a live TranslateTransform so the wave can
+    // shove it toward the screen interior as the magnification bulge sweeps past —
+    // the rubble field "parts" around the cursor. Rebuilt with the slab.
+    private sealed class DebrisRock
+    {
+        public double Main;          // resting main-axis coord
+        public double Parallax;      // 0..1 displacement factor (depth feel)
+        public TranslateTransform Tr = new();
+        public double Cur;           // current cross-axis push (eased)
+    }
+    private readonly List<DebrisRock> _debris = new();
+
     private Border? _hoverLabel;
     private TextBlock? _hoverLabelText;
     private bool _runLabelShown;
@@ -148,6 +204,9 @@ public partial class LeftDockWindow : Window
     private double _seamMain;         // main coord of the divider between pinned + running
     private bool _hasRunningArea;
     private Rect _pinnedViewport;    // window-local clip rect for the scroll layer
+    private Rect _waveHitRect;       // window-local region that activates the wave
+                                     // (pinned column + running strip, so the wave
+                                     // is continuous across the seam)
 
     private double EffectiveIconSize => _config.Settings.IconSize * _uiScale * LeftDockScale;
     private double GIcon => EffectiveIconSize * GlassIconScale;
@@ -387,7 +446,7 @@ public partial class LeftDockWindow : Window
 
     private void UpdateVisibility()
     {
-        bool want = _shownByMain || _shownByEdge || _shownByDrag || _shownByPinned;
+        bool want = _shownByMain || _shownByEdge || _shownByDrag || _shownByPinned || _bounceHold;
         if (want == _shown)
             return;
         if (want)
@@ -616,6 +675,17 @@ public partial class LeftDockWindow : Window
             clipCrossLo,
             Math.Max(0, clipMainHi - clipMainLo),
             Math.Max(0, clipCrossHi - clipCrossLo));
+
+        // The wave activates over the WHOLE dock body — pinned column AND running
+        // strip — so dragging the cursor across the seam keeps one continuous wave
+        // instead of two disjoint ones. Spans to the slab's far main end (which
+        // already includes the running block) with the same cross band as above.
+        double waveMainHi = _slabMain + _slabMainLen - icon * 0.12;
+        _waveHitRect = LogicalRect(
+            clipMainLo,
+            clipCrossLo,
+            Math.Max(0, waveMainHi - clipMainLo),
+            Math.Max(0, clipCrossHi - clipCrossLo));
     }
 
     private int _runSlotsCached;
@@ -646,7 +716,12 @@ public partial class LeftDockWindow : Window
         // (otherwise the signature guard would skip the redraw and leave the
         // reserved running area blank).
         _runTiles.Clear();
+        _runScale.Clear();
+        _runTrans.Clear();
+        _runCenterMain.Clear();
+        _runWaveCur = Array.Empty<double>();
         _runSignature = null;
+        _debris.Clear();
         ClearRunPopups();
         PruneIconCache();
 
@@ -658,6 +733,8 @@ public partial class LeftDockWindow : Window
         // The Saturn theme uses a black smoked-glass side dock; every other
         // theme keeps the clear "liquid glass" body.
         bool darkSlab = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn;
+        _darkDock = darkSlab;
+        _waveBulge = null;
         if (darkSlab)
         {
             // Draw the black tray snug around the icon column, bleeding its
@@ -668,7 +745,73 @@ public partial class LeftDockWindow : Window
             _bodyCross = _slabCross - darkBleed;
             _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + darkPad;
             var r = LogicalRect(_slabMain, _bodyCross, _slabMainLen, _bodyCrossLen);
-            GlassChrome.DrawSlab(PanelCanvas, r.X, r.Y, r.Width, r.Height, trayRadius, opacity, track: null, frosted: false, dark: true);
+
+            // Slab + flame share ONE opacity group AND one feather: each is drawn
+            // fully opaque with hard edges inside the group, then a single blur is
+            // applied to the whole group and the panel transparency once. Feathering
+            // the union (rather than each element separately) is what makes the
+            // flame's edge softness identical to the dock's — they are literally the
+            // same blurred silhouette — and fuses them into one black mass instead
+            // of two stacked semi-transparent layers.
+            double slabFeather = Math.Max(10.0, Math.Min(_slabMainLen, _bodyCrossLen) * 0.16);
+            _flameFeather = slabFeather;
+            var darkGroup = new Canvas
+            {
+                Opacity = opacity,
+                IsHitTestVisible = false,
+                Effect = new System.Windows.Media.Effects.BlurEffect
+                {
+                    Radius = Math.Max(6.0, slabFeather),
+                    KernelType = System.Windows.Media.Effects.KernelType.Gaussian,
+                },
+            };
+            Panel.SetZIndex(darkGroup, -12);
+            PanelCanvas.Children.Add(darkGroup);
+
+            // Slab drawn opaque with hard edges (no per-slab feather mask) — the
+            // group blur above feathers it uniformly with the flame.
+            GlassChrome.DrawSlab(darkGroup, r.X, r.Y, r.Width, r.Height, trayRadius, 1.0, track: null, frosted: false, dark: true, featherMask: false);
+
+            // Dynamic "black flame" tongue that licks up from the slab and rides
+            // the magnification wave. Opaque, hard-edged, same black as the slab
+            // rim; the group blur gives it the dock's exact edge feather.
+            _bulgeOpacity = opacity;
+            double maxBulge = WavePop(HoverScale) + GIcon * HoverScale / 2.0 + GIcon;
+            double baseEdge = _bodyCross + _bodyCrossLen;
+            double bulgeCrossHi = _colCenterCross + maxBulge;
+            // Clip the flame so it can never spill past the dock's ROUNDED corners.
+            // The lower band (the buried skirt) is clipped to the slab's exact rounded
+            // rectangle; the upper band (the tongue) is clipped to an inset rectangle
+            // so the tip stays clear of the corner radius. The union of the two is the
+            // dock silhouette grown upward only in the middle.
+            var slabRound = new RectangleGeometry(r, trayRadius, trayRadius);
+            var upperRect = LogicalRect(
+                _slabMain + trayRadius, baseEdge,
+                Math.Max(0, _slabMainLen - 2.0 * trayRadius),
+                Math.Max(0, bulgeCrossHi - baseEdge));
+            var clipGeo = new GeometryGroup { FillRule = FillRule.Nonzero };
+            clipGeo.Children.Add(slabRound);
+            clipGeo.Children.Add(new RectangleGeometry(upperRect));
+
+            _waveBulge = new System.Windows.Shapes.Path
+            {
+                // Pure black to match the slab body's rim colour; fully opaque and
+                // hard-edged — feathering is done once by the group blur.
+                Fill = new SolidColorBrush(Color.FromRgb(0x00, 0x00, 0x00)),
+                Opacity = 1.0,
+                IsHitTestVisible = false,
+                Clip = clipGeo,
+            };
+            Panel.SetZIndex(_waveBulge, -10);
+            darkGroup.Children.Add(_waveBulge);
+
+            // Saturn's signature: scatter a belt of tiny asteroids/rubble along the
+            // dock's interior edge so the dark slab reads as a ring of space debris.
+            DrawDebrisBelt(baseEdge);
+
+            // Faint starfield over the black slab, matching the main dock's planet
+            // backdrop, so the side dock feels like the same patch of space.
+            DrawDockStarfield(baseEdge);
         }
         else
         {
@@ -792,6 +935,13 @@ public partial class LeftDockWindow : Window
     // ---- Running-but-unpinned strip --------------------------------------
 
     private readonly List<FrameworkElement> _runTiles = new();
+    // Per-running-tile magnification-wave state, parallel to _runTiles, so the
+    // macOS-style wave flows continuously from the pinned column into the running
+    // strip (same field driven by the cursor for both halves of the dock).
+    private readonly List<ScaleTransform> _runScale = new();
+    private readonly List<TranslateTransform> _runTrans = new();
+    private readonly List<double> _runCenterMain = new();   // un-scrolled slot centres
+    private double[] _runWaveCur = Array.Empty<double>();
     // Hover-thumbnail popups for the running-strip tiles, torn down whenever the
     // strip is rebuilt so they never leak or linger over a stale tile.
     private readonly List<WindowPreviewPopup> _runPopups = new();
@@ -821,23 +971,25 @@ public partial class LeftDockWindow : Window
         var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var excludeFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Directories of pinned executables. A multi-process app (e.g. Steam) owns
-        // its taskbar window from a HELPER process that lives in a SUBdirectory of
-        // the pinned exe's folder (steamwebhelper.exe under ...\Steam\bin\cef\…),
-        // so its window can't be matched to the pinned exe by path or name. Any
-        // running exe sitting in a strict subdirectory of a pinned app's folder is
-        // treated as that same app and kept out of the running strip. Same-folder
-        // siblings (e.g. Word/Excel/Outlook under …\Office16) are NOT excluded.
-        var excludeDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        void AddExcludeDir(string exePath)
+        // Some multi-process apps own their taskbar window from a HELPER process
+        // whose exe name differs from the pinned launcher's, so the window can't be
+        // matched to the pinned exe by path or name. We special-case the known
+        // helpers by name (keyed on the pinned launcher's exe file name) instead of
+        // excluding the launcher's whole folder subtree — the latter wrongly hides
+        // unrelated apps installed underneath it (e.g. Steam games in
+        // ...\Steam\steamapps\common\…).
+        void AddLauncherHelpers(string exePath)
         {
-            try
+            string launcher;
+            try { launcher = System.IO.Path.GetFileName(exePath); }
+            catch { return; }
+            if (string.IsNullOrWhiteSpace(launcher))
+                return;
+            if (LauncherHelperExeNames.TryGetValue(launcher, out var helpers))
             {
-                string dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(exePath)) ?? "";
-                if (!string.IsNullOrWhiteSpace(dir) && System.IO.Path.IsPathRooted(dir))
-                    excludeDirs.Add(dir);
+                foreach (var h in helpers)
+                    excludeFileNames.Add(h);
             }
-            catch { /* not a real file-system path */ }
         }
         // Same logic as the main dock's running strip: hide any app that is
         // pinned in EITHER dock, so both strips show the identical set of
@@ -868,7 +1020,7 @@ public partial class LeftDockWindow : Window
                             excludeFileNames.Add(fn);
                     }
                     catch { /* ignore */ }
-                    AddExcludeDir(exe);
+                    AddLauncherHelpers(exe);
                 }
             }
             else
@@ -882,7 +1034,7 @@ public partial class LeftDockWindow : Window
                         excludeFileNames.Add(fn);
                 }
                 catch { /* ignore */ }
-                AddExcludeDir(a.Path);
+                AddLauncherHelpers(a.Path);
             }
         }
 
@@ -938,29 +1090,6 @@ public partial class LeftDockWindow : Window
                         continue;
                 }
                 catch { /* ignore */ }
-                // Helper process living in a strict subdirectory of a pinned app's
-                // folder (e.g. Steam's steamwebhelper.exe) — treat as that app.
-                if (excludeDirs.Count > 0)
-                {
-                    string? taDir = null;
-                    try { taDir = System.IO.Path.GetDirectoryName(full); }
-                    catch { /* ignore */ }
-                    if (!string.IsNullOrEmpty(taDir))
-                    {
-                        bool underPinned = false;
-                        foreach (var dir in excludeDirs)
-                        {
-                            if (taDir.StartsWith(dir + System.IO.Path.DirectorySeparatorChar,
-                                    StringComparison.OrdinalIgnoreCase))
-                            {
-                                underPinned = true;
-                                break;
-                            }
-                        }
-                        if (underPinned)
-                            continue;
-                    }
-                }
                 filtered.Add(ta);
             }
 
@@ -1033,6 +1162,10 @@ public partial class LeftDockWindow : Window
         foreach (var t in _runTiles)
             PanelCanvas.Children.Remove(t);
         _runTiles.Clear();
+        _runScale.Clear();
+        _runTrans.Clear();
+        _runCenterMain.Clear();
+        _runWaveCur = Array.Empty<double>();
         ClearRunPopups();
 
         if (slots == 0)
@@ -1056,6 +1189,20 @@ public partial class LeftDockWindow : Window
                     ? BuildRunOverflowTile(overflow, tile)
                     : BuildRunTile(display[appIdx], tile);
             }
+            // Wire this tile into the magnification wave: its inner visual (tagged
+            // by the build methods) carries a scale + pop-out transform the wave
+            // tick drives, so the running strip magnifies exactly like the pinned
+            // column above it.
+            var scale = new ScaleTransform(1, 1);
+            var trans = new TranslateTransform(0, 0);
+            if (el.Tag is FrameworkElement visual)
+            {
+                visual.RenderTransformOrigin = new Point(0.5, 0.5);
+                visual.RenderTransform = new TransformGroup { Children = { scale, trans } };
+            }
+            _runScale.Add(scale);
+            _runTrans.Add(trans);
+            _runCenterMain.Add(mainC);
             Point c = ToLocal(mainC, _colCenterCross);
             Canvas.SetLeft(el, c.X - tile / 2.0);
             Canvas.SetTop(el, c.Y - tile / 2.0);
@@ -1089,52 +1236,58 @@ public partial class LeftDockWindow : Window
             Child = image,
         };
 
+        var visual = new Grid { Background = Brushes.Transparent };
+        visual.Children.Add(plate);
+        // Polaris is always "running", so show the same breathing green dot.
+        visual.Children.Add(BuildRunningDot(size));
+
         var root = new Grid
         {
             Width = size,
             Height = size,
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = new ScaleTransform(1, 1),
         };
-        root.Children.Add(plate);
-        // Polaris is always "running", so show the same breathing green dot.
-        root.Children.Add(BuildRunningDot(size));
+        root.Children.Add(visual);
+        // The magnification wave drives this tile's scale + pop-out via the inner
+        // visual (see ApplyRunning); the root stays a fixed-size, stable hit area
+        // so the pop-out can't create a hover enter/leave feedback loop.
+        root.Tag = visual;
 
-        var scale = (ScaleTransform)root.RenderTransform;
-        var dur = new Duration(TimeSpan.FromMilliseconds(110));
         root.MouseEnter += (_, _) =>
         {
             Panel.SetZIndex(root, 100);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, dur));
             double mainC = MainOf(new Point(Canvas.GetLeft(root), Canvas.GetTop(root))) + size / 2.0;
             _runLabelShown = true;
-            ShowHoverLabelCore("Polaris", mainC, size / 2.0 * HoverScale);
+            ShowHoverLabelCore("Polaris", mainC, size / 2.0 * HoverScale + WavePop(HoverScale));
         };
         root.MouseLeave += (_, _) =>
         {
             Panel.SetZIndex(root, 60);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
             _runLabelShown = false;
             HideHoverLabel();
         };
         root.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            ToggleDocks?.Invoke();
+            PlayRunTileBounce(root, () => ToggleDocks?.Invoke());
         };
         return root;
     }
 
     private FrameworkElement BuildRunTile(TaskbarApp app, double size)
     {
-        if (!_runIconCache.TryGetValue(app.Path, out var bmp))
+        // Elevated / protected apps (e.g. a game launched as administrator) expose
+        // no readable executable path. Fall back to the window's own icon and
+        // title — exactly how the taskbar represents such windows.
+        bool pathless = string.IsNullOrEmpty(app.Path);
+        string iconKey = pathless ? "win:" + app.Window : app.Path;
+        if (!_runIconCache.TryGetValue(iconKey, out var bmp))
         {
-            bmp = IconExtractor.GetIcon(app.Path);
-            _runIconCache[app.Path] = bmp;
+            bmp = pathless
+                ? WindowPreviewService.GetWindowIconImage(app.Window)
+                : IconExtractor.GetIcon(app.Path);
+            _runIconCache[iconKey] = bmp;
         }
 
         var image = new Image { Source = bmp, Stretch = Stretch.Uniform };
@@ -1152,24 +1305,29 @@ public partial class LeftDockWindow : Window
             Child = image,
         };
 
+        var visual = new Grid { Background = Brushes.Transparent };
+        visual.Children.Add(plate);
+        // Every tile here is by definition running → always show the breathing
+        // green dot, exactly like the pinned icons.
+        visual.Children.Add(BuildRunningDot(size));
+
         var root = new Grid
         {
             Width = size,
             Height = size,
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = new ScaleTransform(1, 1),
         };
-        root.Children.Add(plate);
-        // Every tile here is by definition running → always show the breathing
-        // green dot, exactly like the pinned icons.
-        root.Children.Add(BuildRunningDot(size));
+        root.Children.Add(visual);
+        // The wave drives scale + pop-out via the inner visual (see ApplyRunning);
+        // the root is a fixed-size, stable hit area so the pop-out never triggers a
+        // hover enter/leave feedback loop.
+        root.Tag = visual;
 
-        var scale = (ScaleTransform)root.RenderTransform;
-        var dur = new Duration(TimeSpan.FromMilliseconds(110));
         IntPtr win = app.Window;
-        string label = System.IO.Path.GetFileNameWithoutExtension(app.Path);
+        string label = pathless
+            ? (app.Title ?? "")
+            : System.IO.Path.GetFileNameWithoutExtension(app.Path);
 
         // Hover-thumbnail preview, opening toward the screen interior like the
         // pinned icons. Shows even for a single open window.
@@ -1179,7 +1337,9 @@ public partial class LeftDockWindow : Window
             root,
             () => taAumid != null
                 ? WindowPreviewService.GetWindowsByAumid(taAumid)
-                : WindowPreviewService.GetWindowsForEntry(taPath, null),
+                : pathless
+                    ? WindowPreviewService.GetWindowsByHandle(win)
+                    : WindowPreviewService.GetWindowsForEntry(taPath, null),
             minWindows: 1,
             onActivated: () => SetEdgeShown(false))
         {
@@ -1190,21 +1350,16 @@ public partial class LeftDockWindow : Window
         root.MouseEnter += (_, _) =>
         {
             Panel.SetZIndex(root, 100);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(HoverScale, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(HoverScale, dur));
-            // Same hover label / font as the pinned icons. Running tiles scale
-            // about their centre (no pop-out), so the label sits just past the
-            // icon's enlarged half-width.
+            // Same hover label / font as the pinned icons; the wave pops the tile
+            // toward the interior, so the label clears the enlarged + popped icon.
             double mainC = MainOf(new Point(Canvas.GetLeft(root), Canvas.GetTop(root))) + size / 2.0;
             _runLabelShown = true;
-            ShowHoverLabelCore(label, mainC, size / 2.0 * HoverScale);
+            ShowHoverLabelCore(label, mainC, size / 2.0 * HoverScale + WavePop(HoverScale));
             preview.OnPointerEnter();
         };
         root.MouseLeave += (_, _) =>
         {
             Panel.SetZIndex(root, 60);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, dur));
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
             _runLabelShown = false;
             HideHoverLabel();
             preview.OnPointerLeave();
@@ -1212,8 +1367,13 @@ public partial class LeftDockWindow : Window
         root.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            WindowPreviewService.Activate(win);
-            SetEdgeShown(false);
+            // Hop first (dock held visible), then bring the window forward and
+            // dismiss — activating first would cover the dock and hide the bounce.
+            PlayRunTileBounce(root, () =>
+            {
+                WindowPreviewService.Activate(win);
+                SetEdgeShown(false);
+            });
         };
         return root;
     }
@@ -1315,13 +1475,15 @@ public partial class LeftDockWindow : Window
             Background = Brushes.Transparent,
             Child = label,
         };
+        var visual = new Grid { Background = Brushes.Transparent, Children = { plate } };
         return new Grid
         {
             Width = size,
             Height = size,
             Background = Brushes.Transparent,
             ToolTip = $"另有 {extra} 个正在运行",
-            Children = { plate },
+            Tag = visual,
+            Children = { visual },
         };
     }
 
@@ -1334,11 +1496,32 @@ public partial class LeftDockWindow : Window
     /// loop. That loop was the source of the hover flicker/jump.</summary>
     private void UpdateWaveFromPointer(Point p)
     {
-        bool inColumn = _pinnedIcons.Count > 0 && _pinnedViewport.Contains(p);
-        if (inColumn)
+        // While a launch bounce is playing, keep the wave fully quiescent — a
+        // wave restart would call SetMagnify and cancel the bounce animation.
+        if (_bounceHold)
+            return;
+
+        bool valid = !double.IsNaN(p.X) && !double.IsNaN(p.Y);
+        // The wave activates over the whole dock body (pinned column + running
+        // strip) so it stays continuous as the cursor crosses the seam.
+        bool inDock = valid
+            && (_pinnedIcons.Count > 0 || _runCenterMain.Count > 0)
+            && _waveHitRect.Contains(p);
+        if (inDock)
         {
             _waveCursorY = MainOf(p);
             EnsureWaveTicking();
+        }
+        else
+        {
+            _waveCursorY = double.NaN;   // the tick loop eases everything back to rest
+        }
+
+        // The pinned hover label is still gated on the pinned viewport only; the
+        // running tiles drive their own label/preview from their fixed hit areas.
+        bool inColumn = valid && _pinnedIcons.Count > 0 && _pinnedViewport.Contains(p);
+        if (inColumn)
+        {
             int idx = NearestVisibleIconIndex(MainOf(p));
             if (idx != _labelIdx)
             {
@@ -1351,7 +1534,6 @@ public partial class LeftDockWindow : Window
         }
         else
         {
-            _waveCursorY = double.NaN;   // the tick loop eases everything back to rest
             if (_labelIdx >= 0)
             {
                 _labelIdx = -1;
@@ -1403,6 +1585,11 @@ public partial class LeftDockWindow : Window
     /// growing with the scale so larger icons jut out further — the macOS feel.</summary>
     private double WavePop(double scale) => (scale - 1.0) * GIcon * 1.18;
 
+    // Black-flame geometry (in cross-axis units): how far the tallest tongue
+    // licks past the resting edge. The base roots at the slab's edge side so the
+    // opaque pedestal spans the full slab thickness and fuses with the body.
+    private double FlameMaxHeight => GIcon * 1.05;
+
     private void EnsureWaveTicking()
     {
         if (_waveTicking)
@@ -1453,6 +1640,35 @@ public partial class LeftDockWindow : Window
             Panel.SetZIndex(_pinnedIcons[i], cur > 1.001 ? 3000 + (int)(cur * 1000) : 0);
         }
 
+        // Same wave, applied to the running strip below the seam, so a hovered
+        // running icon magnifies — and its neighbours ripple — exactly like the
+        // pinned column. The cursor coordinate is shared, so the bulge glides
+        // seamlessly across the divider.
+        int rn = _runCenterMain.Count;
+        if (_runWaveCur.Length != rn)
+        {
+            var old = _runWaveCur;
+            _runWaveCur = new double[rn];
+            for (int j = 0; j < rn; j++)
+                _runWaveCur[j] = j < old.Length ? old[j] : 1.0;
+        }
+        for (int j = 0; j < rn; j++)
+        {
+            double target = active ? WaveScaleAt(_waveCursorY, _runCenterMain[j]) : 1.0;
+            double cur = _runWaveCur[j] + (target - _runWaveCur[j]) * k;
+            _runWaveCur[j] = cur;
+            maxDelta = Math.Max(maxDelta, Math.Abs(target - cur));
+            var (pdx, pdy) = PopOffset(WavePop(cur));
+            _runScale[j].ScaleX = _runScale[j].ScaleY = cur;
+            _runTrans[j].X = pdx;
+            _runTrans[j].Y = pdy;
+            Panel.SetZIndex(_runTiles[j], cur > 1.001 ? 3000 + (int)(cur * 1000) : 60);
+        }
+
+        // Deform the black Saturn background so its interior edge follows the wave.
+        maxDelta = Math.Max(maxDelta, UpdateDebrisWave(k));
+        UpdateWaveBulge();
+
         // Once the wave has fully settled back to rest, stop the loop.
         if (!active && maxDelta < 0.0015)
         {
@@ -1461,9 +1677,180 @@ public partial class LeftDockWindow : Window
                 _pinnedIcons[i].SetMagnify(1.0, 0.0, 0.0);
                 Panel.SetZIndex(_pinnedIcons[i], 0);
             }
+            for (int j = 0; j < rn; j++)
+            {
+                _runScale[j].ScaleX = _runScale[j].ScaleY = 1.0;
+                _runTrans[j].X = _runTrans[j].Y = 0.0;
+                _runWaveCur[j] = 1.0;
+                Panel.SetZIndex(_runTiles[j], 60);
+            }
+            foreach (var d in _debris)
+            {
+                d.Cur = 0.0;
+                d.Tr.X = 0.0;
+                d.Tr.Y = 0.0;
+            }
+            UpdateWaveBulge();   // flatten the background bulge back to rest
             CompositionTarget.Rendering -= OnWaveTick;
             _waveTicking = false;
         }
+    }
+
+    /// <summary>
+    /// Rebuilds the Saturn dark dock's "black flame": a single large tongue that
+    /// rides the magnification wave (centred on the wave's weighted peak, sized by
+    /// its intensity) rather than one spike per icon. The silhouette is a smooth,
+    /// Catmull-Rom flame profile — wide bellied base tapering to a leaning,
+    /// flickering tip — rooted deep in the solid slab so its base fuses with the
+    /// background and dissolves at the tip via the fill gradient. Pinches to
+    /// nothing at rest; no-op for every non-Saturn (clear-glass) theme.
+    /// </summary>
+    private void UpdateWaveBulge()
+    {
+        var path = _waveBulge;
+        if (path == null || !_darkDock)
+            return;
+
+        int n = _pinnedIcons.Count;
+        bool pinnedOk = n > 0 && _waveCur.Length == n;
+        bool runOk = _runCenterMain.Count > 0 && _runWaveCur.Length == _runCenterMain.Count;
+        if (!pinnedOk && !runOk && !_bounceFlameActive)
+        {
+            path.Data = null;
+            return;
+        }
+
+        double denom = Math.Max(0.0001, HoverScale - 1.0);
+
+        // Collapse the per-icon wave into a single flame: peak intensity and the
+        // magnification-weighted centre, so one tongue glides between icons as the
+        // cursor sweeps instead of several fixed spikes. The pinned column AND the
+        // running strip feed the SAME accumulator, so the tongue flows continuously
+        // across the seam exactly as the cursor crosses it.
+        double peak = 0.0, wsum = 0.0, csum = 0.0;
+        if (pinnedOk)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                double a = Math.Clamp((_waveCur[i] - 1.0) / denom, 0.0, 1.0);
+                if (a <= 0.0)
+                    continue;
+                double w = a * a;
+                double main = _pinnedSlots[i].Y - _pinnedScroll;
+                wsum += w;
+                csum += w * main;
+                if (a > peak)
+                    peak = a;
+            }
+        }
+        if (runOk)
+        {
+            for (int j = 0; j < _runCenterMain.Count; j++)
+            {
+                double a = Math.Clamp((_runWaveCur[j] - 1.0) / denom, 0.0, 1.0);
+                if (a <= 0.0)
+                    continue;
+                double w = a * a;
+                double main = _runCenterMain[j];   // running tiles are not scrolled
+                wsum += w;
+                csum += w * main;
+                if (a > peak)
+                    peak = a;
+            }
+        }
+
+        if (peak < 0.05 || wsum <= 0.0)
+        {
+            // No wave, but a launch bounce may still want its own tongue.
+            if (_bounceFlameActive && _bounceFlameAmp > 0.01)
+            {
+                double ba = Math.Clamp(_bounceFlameAmp, 0.0, 1.0);
+                peak = ba;
+                wsum = ba * ba;
+                csum = wsum * _bounceFlameCenterMain;
+            }
+            else
+            {
+                path.Data = null;
+                return;
+            }
+        }
+        else if (_bounceFlameActive && _bounceFlameAmp > 0.01)
+        {
+            // Blend the hop tongue in alongside any residual wave.
+            double ba = Math.Clamp(_bounceFlameAmp, 0.0, 1.0);
+            double w = ba * ba;
+            wsum += w;
+            csum += w * _bounceFlameCenterMain;
+            if (ba > peak)
+                peak = ba;
+        }
+
+        double cm = csum / wsum;                       // flame centre (main axis)
+        double baseEdge = _bodyCross + _bodyCrossLen;  // resting interior edge
+        // Root just inside the solid slab core — below the interior feather band
+        // (so the blurred base is buried in solid black and leaves no seam) but
+        // NOT down at the screen edge (so the flame never spills past the dock).
+        double rootC = Math.Max(_bodyCross, baseEdge - _flameFeather - GIcon * 0.55);
+        double t = _waveLastTick.TotalSeconds;         // flicker clock
+
+        double half = CellH * (2.05 + 1.85 * peak);   // wide footprint: long, gradual flanks
+        double flick = Math.Sin(t * 8.5) * 0.5 + Math.Sin(t * 5.3 + 1.1) * 0.5;
+        double H = Math.Pow(peak, 1.1) * FlameMaxHeight * 0.90 * (0.88 + 0.12 * flick);
+        double lean = (0.18 * Math.Sin(t * 3.7) + 0.10 * Math.Sin(t * 6.1 + 0.7)) * H;
+
+        // Sample the flame silhouette as a height profile over the footprint. The
+        // envelope blends a sharp central peak with a wide bell, raised to a gamma so
+        // the flanks ease down to zero with a flat tangent. Because the height never
+        // dips below the resting edge, the flanks GRAZE the dock surface tangentially
+        // (no transversal crossing, no visible corner) and merge into it. A small
+        // surface ripple and a height-weighted lateral lean make the tip curl and
+        // flicker organically; the buried base anchors the shape inside the slab.
+        const int M = 30;
+        // Smooth taper so the flame fades out before the dock's rounded main-axis
+        // ends — it must never jut past the corner where there's no slab beneath it.
+        double mainLo = _slabMain, mainHi = _slabMain + _slabMainLen;
+        double endPad = GIcon * 0.45, endRamp = GIcon * 1.00;
+        static double SS(double e) { e = Math.Clamp(e, 0.0, 1.0); return e * e * (3.0 - 2.0 * e); }
+        var q = new Point[M + 1];   // logical (main, cross) silhouette points
+        for (int k = 0; k <= M; k++)
+        {
+            double x = -1.0 + 2.0 * k / M;
+            double b = 0.5 * (1.0 + Math.Cos(Math.PI * x));
+            double env = Math.Pow(0.40 * b * b + 0.60 * b, 1.6);   // sharp peak; flanks ease flat into the dock
+            double protUp = H * env * (1.0 + 0.05 * Math.Sin(3.5 * Math.PI * x + t * 5.0));
+            double up = Math.Pow(Math.Clamp(protUp / Math.Max(1e-6, H), 0.0, 1.0), 1.3);
+            double m = cm + x * half + lean * up;
+            double edgeFac = SS((m - (mainLo + endPad)) / endRamp) * SS(((mainHi - endPad) - m) / endRamp);
+            protUp *= edgeFac;
+            q[k] = new Point(m, baseEdge + protUp);
+        }
+
+        // Build a closed figure: straight up the left base from the buried root,
+        // a smooth Catmull-Rom curve over the silhouette, straight down the right
+        // base, and an implicit straight base across the slab interior.
+        Point CR1(int i) => new Point(
+            q[i].X + (q[Math.Min(M, i + 1)].X - q[Math.Max(0, i - 1)].X) / 6.0,
+            q[i].Y + (q[Math.Min(M, i + 1)].Y - q[Math.Max(0, i - 1)].Y) / 6.0);
+        Point CR2(int i) => new Point(
+            q[i + 1].X - (q[Math.Min(M, i + 2)].X - q[i].X) / 6.0,
+            q[i + 1].Y - (q[Math.Min(M, i + 2)].Y - q[i].Y) / 6.0);
+
+        var geo = new StreamGeometry();
+        using (var ctx = geo.Open())
+        {
+            ctx.BeginFigure(ToLocal(cm - half, rootC), true, true);
+            ctx.LineTo(ToLocal(q[0].X, q[0].Y), false, false);
+            for (int i = 0; i < M; i++)
+                ctx.BezierTo(
+                    ToLocal(CR1(i).X, CR1(i).Y),
+                    ToLocal(CR2(i).X, CR2(i).Y),
+                    ToLocal(q[i + 1].X, q[i + 1].Y),
+                    false, true);
+            ctx.LineTo(ToLocal(cm + half, rootC), false, false);
+        }
+        geo.Freeze();
+        path.Data = geo;
     }
 
     /// <summary>Hard, immediate reset of the wave (used on rebuild / drag start).</summary>
@@ -1480,12 +1867,23 @@ public partial class LeftDockWindow : Window
             ic.SetMagnify(1.0, 0.0, 0.0);
             Panel.SetZIndex(ic, 0);
         }
+        for (int j = 0; j < _runScale.Count; j++)
+        {
+            _runScale[j].ScaleX = _runScale[j].ScaleY = 1.0;
+            _runTrans[j].X = _runTrans[j].Y = 0.0;
+            if (j < _runTiles.Count)
+                Panel.SetZIndex(_runTiles[j], 60);
+        }
+        for (int j = 0; j < _runWaveCur.Length; j++)
+            _runWaveCur[j] = 1.0;
         if (_waveTicking)
         {
             CompositionTarget.Rendering -= OnWaveTick;
             _waveTicking = false;
         }
         _waveCur = Array.Empty<double>();
+        if (_waveBulge != null)
+            _waveBulge.Data = null;
     }
 
     private void ShowHoverLabel(RadialIcon ic, int idx)
@@ -1507,10 +1905,21 @@ public partial class LeftDockWindow : Window
                 Foreground = LabelBrush,
                 TextAlignment = TextAlignment.Left,
                 TextWrapping = TextWrapping.NoWrap,
+                // A dark drop shadow gives the name depth (more "3D") AND a dark
+                // halo so light text stays legible even over a white window behind
+                // the translucent label.
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = Colors.Black,
+                    BlurRadius = 5,
+                    ShadowDepth = 1.4,
+                    Direction = 315,
+                    Opacity = 0.9,
+                },
             };
             _hoverLabel = new Border
             {
-                Background = new SolidColorBrush(Color.FromArgb(0x26, 0x1A, 0x1A, 0x1A)),
+                Background = new SolidColorBrush(Color.FromArgb(0x05, 0x1A, 0x1A, 0x1A)),
                 CornerRadius = new CornerRadius(7),
                 Padding = new Thickness(10, 4, 10, 4),
                 IsHitTestVisible = false,
@@ -1758,7 +2167,7 @@ public partial class LeftDockWindow : Window
 
         if (!wasDragging)
         {
-            Launch(icon.Entry);
+            Launch(icon.Entry, icon);
             return;
         }
 
@@ -1971,9 +2380,371 @@ public partial class LeftDockWindow : Window
 
     // ---- Launch -----------------------------------------------------------
 
-    private void Launch(AppEntry entry)
+    /// <summary>The (dx, dy) "hop" vector for a launch bounce: the icon leaps up
+    /// off the dock surface and falls back. Vertical (Left/Right) and bottom docks
+    /// jump up the screen; a top dock jumps down into the screen.</summary>
+    private (double x, double y) BounceLift()
     {
-        AppLauncher.Launch(entry, () => SetEdgeShown(false));
+        double amp = GIcon * 0.6;
+        return _side == DockSide.Top ? (0.0, amp) : (0.0, -amp);
+    }
+
+    private void Launch(AppEntry entry, RadialIcon? icon = null)
+    {
+        if (icon != null)
+        {
+            // Play the macOS-style hop FIRST while the dock is held visible, then
+            // launch + dismiss when it finishes. Launching first would bring the
+            // target window to the foreground over the dock, hiding the bounce.
+            ResetWave();   // settle the wave so it can't fight the bounce transform
+            _bounceHold = true;
+            Panel.SetZIndex(icon, 5000);   // hop above its neighbours
+            var (lx, ly) = BounceLift();
+            int idx = _pinnedIcons.IndexOf(icon);
+            double centerMain = idx >= 0 && idx < _pinnedSlots.Count
+                ? _pinnedSlots[idx].Y - _pinnedScroll
+                : _colCenterCross;
+            double maxLift = ly != 0 ? ly : lx;
+            StartBounceFlame(icon.HopTransform, ly != 0, maxLift, centerMain);
+            icon.PlayLaunchBounce(lx, ly, () =>
+            {
+                _bounceHold = false;
+                Panel.SetZIndex(icon, 0);
+                StopBounceFlame();
+                AppLauncher.Launch(entry, null);
+                SetEdgeShown(false);
+            });
+        }
+        else
+        {
+            AppLauncher.Launch(entry, () => SetEdgeShown(false));
+        }
+    }
+
+    /// <summary>Plays the launch bounce on a running-strip tile (a plain Grid
+    /// whose inner visual carries the wave's scale + translate transforms), then
+    /// runs <paramref name="onDone"/>. Falls back to running it immediately if the
+    /// tile has no transform group.</summary>
+    private void PlayRunTileBounce(FrameworkElement tileRoot, Action onDone)
+    {
+        ScaleTransform? scale = null;
+        TranslateTransform? trans = null;
+        if (tileRoot.Tag is FrameworkElement visual && visual.RenderTransform is TransformGroup tg)
+        {
+            foreach (var t in tg.Children)
+            {
+                if (t is ScaleTransform st) scale = st;
+                else if (t is TranslateTransform tt) trans = tt;
+            }
+        }
+        if (scale == null || trans == null)
+        {
+            onDone();
+            return;
+        }
+        ResetWave();   // settle the wave so it can't fight the bounce transform
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        trans.BeginAnimation(TranslateTransform.XProperty, null);
+        trans.BeginAnimation(TranslateTransform.YProperty, null);
+        scale.ScaleX = scale.ScaleY = 1.0;
+        trans.X = trans.Y = 0.0;
+
+        Panel.SetZIndex(tileRoot, 5000);   // hop above its neighbours
+        var (lx, ly) = BounceLift();
+        int ridx = _runTiles.IndexOf(tileRoot);
+        double centerMain = ridx >= 0 && ridx < _runCenterMain.Count
+            ? _runCenterMain[ridx]
+            : _colCenterCross;
+        double maxLift = ly != 0 ? ly : lx;
+        StartBounceFlame(trans, ly != 0, maxLift, centerMain);
+        var tx = DockBounce.BuildTranslate(lx);
+        var ty = DockBounce.BuildTranslate(ly);
+        var sx = DockBounce.BuildScale();
+        var sy = DockBounce.BuildScale();
+        _bounceHold = true;
+        sy.Completed += (_, _) =>
+        {
+            _bounceHold = false;
+            Panel.SetZIndex(tileRoot, 60);
+            StopBounceFlame();
+            onDone();
+        };
+        trans.BeginAnimation(TranslateTransform.XProperty, tx);
+        trans.BeginAnimation(TranslateTransform.YProperty, ty);
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty, sx);
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty, sy);
+    }
+
+    /// <summary>Starts feeding the Saturn flame from a live launch-bounce hop:
+    /// each frame it reads how far the bouncing item has jumped and drives the
+    /// flame intensity to match, so the tongue leaps up with the icon. No-op for
+    /// non-Saturn (glass) docks. Stopped via StopBounceFlame when the bounce ends.</summary>
+    private void StartBounceFlame(TranslateTransform trans, bool axisY, double maxLift, double centerMain)
+    {
+        if (!_darkDock || _waveBulge == null)
+            return;
+        _bounceFlameTrans = trans;
+        _bounceFlameAxisY = axisY;
+        _bounceFlameMaxLift = Math.Max(0.0001, Math.Abs(maxLift));
+        _bounceFlameCenterMain = centerMain;
+        _bounceFlameAmp = 0.0;
+        if (!_bounceFlameActive)
+        {
+            _bounceFlameActive = true;
+            CompositionTarget.Rendering += OnBounceFlameTick;
+        }
+    }
+
+    private void StopBounceFlame()
+    {
+        if (!_bounceFlameActive)
+            return;
+        _bounceFlameActive = false;
+        _bounceFlameAmp = 0.0;
+        _bounceFlameTrans = null;
+        CompositionTarget.Rendering -= OnBounceFlameTick;
+        UpdateWaveBulge();   // collapse the flame back to rest
+    }
+
+    private void OnBounceFlameTick(object? sender, EventArgs e)
+    {
+        var trans = _bounceFlameTrans;
+        if (trans == null)
+        {
+            StopBounceFlame();
+            return;
+        }
+        double cur = _bounceFlameAxisY ? trans.Y : trans.X;
+        _bounceFlameAmp = Math.Clamp(Math.Abs(cur) / _bounceFlameMaxLift, 0.0, 1.0);
+        UpdateWaveBulge();
+    }
+
+    /// <summary>Sprinkles a small, faint starfield across the Saturn dock's black
+    /// slab (pinned column + running strip), a few of them slowly twinkling — the
+    /// same look as the main dock's planet backdrop, so the side dock reads as the
+    /// same patch of space. Purely decorative; rebuilt with the slab each Layout.</summary>
+    private void DrawDockStarfield(double baseEdge)
+    {
+        if (_slabMainLen <= 0)
+            return;
+        double s = Math.Max(0.5, _uiScale);
+        double mainLo = _slabMain + GIcon * 0.1;
+        double mainHi = _slabMain + _slabMainLen - GIcon * 0.1;
+        double mainSpan = mainHi - mainLo;
+        double crossLo = _bodyCross + GIcon * 0.08;
+        double crossSpan = Math.Max(1.0, baseEdge - crossLo);
+        if (mainSpan <= 0)
+            return;
+
+        var layer = new Canvas { IsHitTestVisible = false };
+        Panel.SetZIndex(layer, -9);   // on the black slab, beneath the rubble + icons
+        PanelCanvas.Children.Add(layer);
+
+        var rng = new Random(0x2B17F3);
+        int count = Math.Max(12, (int)(mainSpan / (22.0 * s)));
+        for (int i = 0; i < count; i++)
+        {
+            double main = mainLo + rng.NextDouble() * mainSpan;
+            double cross = crossLo + rng.NextDouble() * crossSpan;
+            var p = LogicalPoint(main, cross);
+            double sz = (0.6 + 1.7 * rng.NextDouble()) * s;
+            byte br = (byte)(50 + 140 * rng.NextDouble());
+            var star = new System.Windows.Shapes.Ellipse
+            {
+                Width = sz,
+                Height = sz,
+                Fill = new SolidColorBrush(Color.FromArgb(br, 255, 255, 250)),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(star, p.X - sz / 2.0);
+            Canvas.SetTop(star, p.Y - sz / 2.0);
+            layer.Children.Add(star);
+
+            if (rng.NextDouble() > 0.62)   // a subset slowly twinkles
+            {
+                double full = br / 255.0;
+                var tw = new DoubleAnimation(full * 0.28, full,
+                    TimeSpan.FromSeconds(1.5 + 2.4 * rng.NextDouble()))
+                {
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever,
+                    BeginTime = TimeSpan.FromSeconds(2.2 * rng.NextDouble()),
+                };
+                Timeline.SetDesiredFrameRate(tw, App.AmbientFrameRate);
+                star.BeginAnimation(OpacityProperty, tw);
+            }
+        }
+    }
+
+    // ---- Saturn debris belt ----------------------------------------------
+
+    /// <summary>Scatters a field of tiny irregular asteroids/rubble across the
+    /// Saturn dock — densest as a belt along the interior edge, but also strewn
+    /// through the dock body (centre) and down toward the screen-edge side — so the
+    /// dark slab reads as a band of space debris, like a slice of Saturn's rings.
+    /// Each rock registers a live transform so the magnification wave shoves it
+    /// outward as the bulge sweeps past. Rebuilt with the slab each Layout.</summary>
+    private void DrawDebrisBelt(double baseEdge)
+    {
+        _debris.Clear();
+        if (_slabMainLen <= 0)
+            return;
+        double s = Math.Max(0.5, _uiScale);
+        double mainLo = _slabMain + GIcon * 0.15;
+        double mainHi = _slabMain + _slabMainLen - GIcon * 0.15;
+        double span = mainHi - mainLo;
+        if (span <= 0)
+            return;
+
+        double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
+        var layer = new Canvas
+        {
+            IsHitTestVisible = false,
+            Opacity = Math.Clamp(opacity, 0.0, 1.0),
+            // A whisper of blur softens the rubble so it sits in the dock's haze
+            // rather than reading as crisp UI shapes.
+            Effect = new System.Windows.Media.Effects.BlurEffect
+            {
+                Radius = 0.7,
+                KernelType = System.Windows.Media.Effects.KernelType.Gaussian,
+            },
+        };
+        Panel.SetZIndex(layer, -8);   // above slab + flame, below the icons
+        PanelCanvas.Children.Add(layer);
+
+        // Fixed seed → the belt is stable across rebuilds (no distracting reshuffle).
+        var rng = new Random(0x9C34A1);
+        double innerCross = _bodyCross + GIcon * 0.08;   // toward the screen edge
+        double beltCross = baseEdge;                     // the dock's interior edge
+
+        // Two populations: a dense rubble BELT straddling the interior edge, and a
+        // sparser scattering of grains spread through the whole dock body so the
+        // centre and the screen-edge side aren't bare.
+        int beltCount = Math.Max(14, (int)(span / (9.0 * s)));
+        int bodyCount = Math.Max(14, (int)(span / (9.0 * s)));
+
+        for (int i = 0; i < beltCount; i++)
+        {
+            double main = mainLo + rng.NextDouble() * span;
+            double g = (rng.NextDouble() + rng.NextDouble() + rng.NextDouble()) / 3.0 - 0.5;
+            double cross = beltCross + g * GIcon * 1.05 - GIcon * 0.05;
+            double r = (1.2 + rng.NextDouble() * rng.NextDouble() * 5.2) * s;
+            double alpha = 0.16 + rng.NextDouble() * 0.44;
+            AddDebrisRock(layer, main, cross, r, alpha, rng);
+        }
+        for (int i = 0; i < bodyCount; i++)
+        {
+            double main = mainLo + rng.NextDouble() * span;
+            // Uniform across the body, from the screen-edge side out to the belt.
+            double cross = innerCross + rng.NextDouble() * Math.Max(1.0, beltCross - innerCross);
+            double r = (1.0 + rng.NextDouble() * rng.NextDouble() * 3.6) * s;
+            double alpha = 0.12 + rng.NextDouble() * 0.34;
+            AddDebrisRock(layer, main, cross, r, alpha, rng);
+        }
+
+        // Almost-imperceptible drift along the belt so it feels alive, like rubble
+        // slowly orbiting in space.
+        var drift = new TranslateTransform();
+        layer.RenderTransform = drift;
+        var prop = IsVertical ? TranslateTransform.YProperty : TranslateTransform.XProperty;
+        var anim = new DoubleAnimation(-1.6 * s, 1.6 * s, new Duration(TimeSpan.FromSeconds(16)))
+        {
+            AutoReverse = true,
+            RepeatBehavior = RepeatBehavior.Forever,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+        };
+        drift.BeginAnimation(prop, anim);
+    }
+
+    /// <summary>Builds one rock at logical (<paramref name="main"/>,
+    /// <paramref name="cross"/>), adds it to <paramref name="layer"/>, and registers
+    /// it for wave displacement. Smaller/fainter grains get less parallax so the
+    /// field has depth.</summary>
+    private void AddDebrisRock(Canvas layer, double main, double cross, double r, double alpha, Random rng)
+    {
+        var rock = MakeRock(LogicalPoint(main, cross), r, rng, alpha);
+        var tr = new TranslateTransform();
+        rock.RenderTransform = tr;
+        layer.Children.Add(rock);
+        _debris.Add(new DebrisRock
+        {
+            Main = main,
+            // Bigger, bolder rocks ride the bulge further (foreground parallax).
+            Parallax = 0.35 + Math.Clamp(r / (7.0 * Math.Max(0.5, _uiScale)), 0.0, 1.0) * 0.65,
+            Tr = tr,
+        });
+    }
+
+    /// <summary>Eases every debris rock toward the cross-axis push implied by the
+    /// magnification wave at its main coordinate, so the rubble field bulges out
+    /// under the cursor and relaxes behind it. Returns the largest pending delta so
+    /// the wave loop keeps ticking until the rubble has settled.</summary>
+    private double UpdateDebrisWave(double k)
+    {
+        if (_debris.Count == 0)
+            return 0.0;
+        bool active = !double.IsNaN(_waveCursorY);
+        double denom = Math.Max(0.0001, HoverScale - 1.0);
+        double maxPush = GIcon * 0.5;
+        double maxDelta = 0.0;
+        foreach (var d in _debris)
+        {
+            double target = 0.0;
+            if (active)
+            {
+                double a = Math.Clamp((WaveScaleAt(_waveCursorY, d.Main) - 1.0) / denom, 0.0, 1.0);
+                target = a * maxPush * d.Parallax;
+            }
+            double cur = d.Cur + (target - d.Cur) * k;
+            d.Cur = cur;
+            maxDelta = Math.Max(maxDelta, Math.Abs(target - cur));
+            var (dx, dy) = PopOffset(cur);
+            d.Tr.X = dx;
+            d.Tr.Y = dy;
+        }
+        return maxDelta;
+    }
+
+    /// <summary>Builds one irregular, faceted "rock": a jittered polygon shaded from
+    /// a lit upper-left facet to a dark lower-right so it reads as a 3D pebble.</summary>
+    private static System.Windows.Shapes.Path MakeRock(Point c, double r, Random rng, double alpha)
+    {
+        int verts = 6 + rng.Next(3);
+        var fig = new PathFigure { IsClosed = true, IsFilled = true };
+        double a0 = rng.NextDouble() * Math.PI * 2.0;
+        for (int k = 0; k < verts; k++)
+        {
+            double ang = a0 + (Math.PI * 2.0) * k / verts + (rng.NextDouble() - 0.5) * 0.55;
+            double rad = r * (0.58 + rng.NextDouble() * 0.42);
+            var p = new Point(c.X + Math.Cos(ang) * rad, c.Y + Math.Sin(ang) * rad);
+            if (k == 0)
+                fig.StartPoint = p;
+            else
+                fig.Segments.Add(new LineSegment(p, true));
+        }
+        var geo = new PathGeometry();
+        geo.Figures.Add(fig);
+
+        byte b = (byte)(70 + rng.Next(60));   // mid-grey base value
+        byte Lit(int add) => (byte)Math.Min(255, b + add);
+        byte Dark(double mul) => (byte)Math.Max(0, b * mul);
+        var brush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0.2, 0.1),
+            EndPoint = new Point(0.85, 0.95),
+        };
+        brush.GradientStops.Add(new GradientStop(Color.FromRgb(Lit(58), Lit(54), Lit(50)), 0.0));
+        brush.GradientStops.Add(new GradientStop(Color.FromRgb(b, b, Lit(6)), 0.55));
+        brush.GradientStops.Add(new GradientStop(Color.FromRgb(Dark(0.32), Dark(0.32), Dark(0.4)), 1.0));
+        brush.Freeze();
+        return new System.Windows.Shapes.Path
+        {
+            Data = geo,
+            Fill = brush,
+            Opacity = Math.Clamp(alpha, 0.0, 1.0),
+            IsHitTestVisible = false,
+        };
     }
 
     private static Color ParseColor(string hex, Color fallback)

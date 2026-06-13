@@ -370,6 +370,8 @@ public partial class RadialWindow : Window
     private TextBlock? _glassClockTime;
     private TextBlock? _glassClockDate;
     private readonly System.Windows.Threading.DispatcherTimer _clockTimer;
+    // Key-free weather + city shown after the clock; refreshes itself every ~20 min.
+    private readonly Polaris.Services.WeatherService _weather = new();
 
     // Set while showing the window so the SizeChanged fired by Show() does not
     // trigger a premature (wrong-centre) Rebuild that would flash the ring.
@@ -479,21 +481,34 @@ public partial class RadialWindow : Window
         {
             Interval = TimeSpan.FromSeconds(1),
         };
-        _clockTimer.Tick += (_, _) => UpdateGlassClock();
+        _clockTimer.Tick += (_, _) =>
+        {
+            UpdateGlassClock();
+            // Cheap: the service self-throttles to one network fetch per ~20 min.
+            _ = _weather.RefreshAsync();
+        };
+        // Repaint the clock line as soon as fresh weather arrives.
+        _weather.Updated += () => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
     }
 
-    /// <summary>Updates the glass dock's clock labels to the current local time.</summary>
+    /// <summary>Updates the glass dock's clock labels to the current local time,
+    /// appending the key-free weather + city after the time when available.</summary>
     private void UpdateGlassClock()
     {
         if (_glassClockTime == null && _glassClockDate == null)
             return;
         var now = DateTime.Now;
+        var zh = System.Globalization.CultureInfo.GetCultureInfo("zh-CN");
         if (_glassClockTime != null)
-            _glassClockTime.Text = now.ToString("yyyy年M月d日 ddd  H:mm",
-                System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
+        {
+            string text = now.ToString("yyyy年M月d日  ddd   H:mm", zh);
+            string? wx = _weather.Summary;
+            if (!string.IsNullOrEmpty(wx))
+                text += "     " + wx;
+            _glassClockTime.Text = text;
+        }
         if (_glassClockDate != null)
-            _glassClockDate.Text = now.ToString("M月d日 ddd",
-                System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
+            _glassClockDate.Text = now.ToString("M月d日 ddd", zh);
     }
 
     private void WarmPreviewCache()
@@ -733,6 +748,7 @@ public partial class RadialWindow : Window
         _runningTimer.Start();
         UpdateGlassClock();
         _clockTimer.Start();
+        _ = _weather.RefreshAsync();   // fetch weather promptly on show
 
         var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
         {
@@ -1941,10 +1957,20 @@ public partial class RadialWindow : Window
                 TextAlignment = TextAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 HorizontalAlignment = HorizontalAlignment.Center,
+                // Dark drop shadow → depth ("3D") plus a halo that keeps the light
+                // text legible even when a white window shows through the label.
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = Colors.Black,
+                    BlurRadius = 5,
+                    ShadowDepth = 1.4,
+                    Direction = 315,
+                    Opacity = 0.9,
+                },
             };
             _glassHoverLabel = new Border
             {
-                Background = new SolidColorBrush(Color.FromArgb(0x26, 0x1A, 0x1A, 0x1A)),
+                Background = new SolidColorBrush(Color.FromArgb(0x05, 0x1A, 0x1A, 0x1A)),
                 CornerRadius = new CornerRadius(7),
                 Padding = new Thickness(10, 4, 10, 4),
                 IsHitTestVisible = false,

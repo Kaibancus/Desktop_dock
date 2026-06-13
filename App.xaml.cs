@@ -362,6 +362,13 @@ public partial class App : Application
                 _leftDock.SetEdgeShown(false);
                 return;
             }
+            // Don't let the mouse summon the dock over a full-screen / borderless
+            // app (typically a game running full-screen): the dock must not intrude.
+            if (IsFullscreenForeground())
+            {
+                _leftDock.SetEdgeShown(false);
+                return;
+            }
             if (!GetCursorPos(out POINT pt))
                 return;
 
@@ -638,7 +645,7 @@ public partial class App : Application
     // Pixel rows above the monitor's bottom edge that the cursor is held clear of
     // inside the centre band, so the auto-hide taskbar's reveal tolerance never
     // fires there. Stays below the dock's 20px edge reach so the dock still pops.
-    private const int TaskbarGuardRows = 12;
+    private const int TaskbarGuardRows = 5;
     private const int WM_MOUSEMOVE = 0x0200;
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
@@ -798,6 +805,83 @@ public partial class App : Application
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FSRECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out FSRECT lpRect);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    // The shell's "do not disturb / full-screen" signal — the same state the
+    // taskbar and notification centre consult before showing themselves.
+    private enum QUNS { NOT_PRESENT = 1, BUSY = 2, RUNNING_D3D_FULL_SCREEN = 3, PRESENTATION_MODE = 4, ACCEPTS_NOTIFICATIONS = 5, QUIET_TIME = 6, APP = 7 }
+
+    [DllImport("shell32.dll")]
+    private static extern int SHQueryUserNotificationState(out QUNS state);
+
+    /// <summary>True when a full-screen app (a game in exclusive or borderless
+    /// full-screen, or presentation mode) owns the screen — so the edge-summon is
+    /// suppressed and the dock never pops over it, exactly like the auto-hide
+    /// taskbar. Mirrors the taskbar's two checks:
+    ///   1. <c>SHQueryUserNotificationState</c> — the shell's authoritative
+    ///      "busy / full-screen / presentation" state (normal apps such as a
+    ///      browser or Explorer, even maximised, report ACCEPTS_NOTIFICATIONS and
+    ///      do NOT suppress).
+    ///   2. The "rude window" geometry test — foreground window covers the WHOLE
+    ///      monitor rectangle (not just the work area), which is how the shell flags
+    ///      a borderless full-screen window. A maximised window stops at the work
+    ///      area (leaving room for the taskbar) and so is excluded.
+    /// Our own windows, the desktop and the shell are always excluded.</summary>
+    private static bool IsFullscreenForeground()
+    {
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero || fg == GetDesktopWindow() || fg == GetShellWindow())
+            return false;
+        GetWindowThreadProcessId(fg, out uint pid);
+        if (pid == (uint)Environment.ProcessId)
+            return false;   // our own dock / overlay windows
+
+        // 1. Shell notification state — the taskbar's authoritative signal.
+        try
+        {
+            if (SHQueryUserNotificationState(out QUNS s) == 0 &&
+                (s == QUNS.BUSY || s == QUNS.RUNNING_D3D_FULL_SCREEN ||
+                 s == QUNS.PRESENTATION_MODE || s == QUNS.APP))
+                return true;
+        }
+        catch { /* fall through to the geometry test */ }
+
+        // 2. "Rude window" geometry test — a BORDERLESS window that covers the
+        // whole monitor. The style test (no caption, no sizing frame) is essential:
+        // with an auto-hide taskbar the work area equals the full monitor, so a
+        // merely maximised browser / Explorer window also fills rcMonitor — but it
+        // KEEPS its caption and thick frame, so it is correctly excluded here. Only
+        // a true borderless full-screen window (WS_POPUP-style, no caption/frame)
+        // trips this branch.
+        if (!GetWindowRect(fg, out FSRECT wr))
+            return false;
+        const int GWL_STYLE = -16, WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
+        int style = GetWindowLong(fg, GWL_STYLE);
+        if ((style & (WS_CAPTION | WS_THICKFRAME)) != 0)
+            return false;   // has a caption / sizing frame → ordinary (maybe maximised) window
+        const uint MONITOR_DEFAULTTONEAREST = 2;
+        IntPtr mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        if (mon == IntPtr.Zero)
+            return false;
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(mon, ref mi))
+            return false;
+        const int T = 2;   // a couple of pixels of slack
+        return wr.Left <= mi.rcMonitor.Left + T && wr.Top <= mi.rcMonitor.Top + T
+            && wr.Right >= mi.rcMonitor.Right - T && wr.Bottom >= mi.rcMonitor.Bottom - T;
+    }
 
     /// <summary>Primary monitor's vertical refresh rate in Hz (falls back to 60
     /// if the device-context query is unavailable).</summary>

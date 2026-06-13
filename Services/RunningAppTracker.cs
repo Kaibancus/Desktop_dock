@@ -40,6 +40,18 @@ public static class RunningAppTracker
     [DllImport("user32.dll")]
     private static extern bool BringWindowToTop(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct WINDOWPLACEMENT
     {
@@ -59,6 +71,47 @@ public static class RunningAppTracker
     private const int SW_SHOWMAXIMIZED = 3;
 
     private const int WPF_RESTORETOMAXIMIZED = 0x0002;
+
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+
+    /// <summary>
+    /// True when <paramref name="h"/> is a non-iconic window that has no real,
+    /// user-facing presence — either parked far off-screen or so small in both
+    /// dimensions that it can only be a background/helper window. Some apps
+    /// "minimize to the tray" not by hiding or minimizing the window, but by
+    /// parking it off-screen at a tiny size (iQiyi's QyClient.exe parks its main
+    /// window at ~(-6667,-6667), 13×13, while keeping it WS_VISIBLE). Steam's
+    /// steam.exe always exposes a 128×66 helper window as its MainWindowHandle
+    /// while the real client UI lives in a separate steamwebhelper.exe process.
+    /// Such a window still reports a valid MainWindowHandle, so a naive activation
+    /// "succeeds" yet shows nothing; callers should treat it as not-activatable
+    /// and re-launch the app instead (which triggers the app's own open/restore
+    /// logic).
+    /// </summary>
+    private static bool IsWindowParkedOffscreen(IntPtr h)
+    {
+        if (!GetWindowRect(h, out RECT r))
+            return false;
+
+        int w = r.Right - r.Left;
+        int ht = r.Bottom - r.Top;
+        // Tiny in BOTH dimensions — a background/helper window, not a real app
+        // window the user can interact with (Steam's 128×66 helper, iQiyi's
+        // 13×13 parked window, …).
+        if (w < 200 && ht < 200)
+            return true;
+
+        // Entirely outside the virtual desktop (bounding box of all monitors).
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vr = vx + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vb = vy + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        bool intersects = r.Left < vr && r.Right > vx && r.Top < vb && r.Bottom > vy;
+        return !intersects;
+    }
 
     /// <summary>
     /// Returns true if at least one running process was started from
@@ -336,6 +389,12 @@ public static class RunningAppTracker
         if (h == IntPtr.Zero)
             return false;
 
+        // An app "minimized to the tray" by parking its window off-screen still
+        // exposes a MainWindowHandle; foregrounding it shows nothing. Report
+        // failure so the caller re-launches and triggers the app's restore.
+        if (!IsIconic(h) && IsWindowParkedOffscreen(h))
+            return false;
+
         ActivateWindow(h);
         return true;
     }
@@ -356,8 +415,14 @@ public static class RunningAppTracker
             var windows = WindowPreviewService.GetWindowsByAumid(aumid);
             if (windows.Count > 0)
             {
-                ActivateWindow(windows[0].Handle);
-                return true;
+                IntPtr wh = windows[0].Handle;
+                // Skip a window that is only parked off-screen (tray) — fall
+                // through so the app gets re-launched and restores itself.
+                if (IsIconic(wh) || !IsWindowParkedOffscreen(wh))
+                {
+                    ActivateWindow(wh);
+                    return true;
+                }
             }
 
             // Non-packaged AppsFolder launchers (VS Code, iQiyi…) have no window

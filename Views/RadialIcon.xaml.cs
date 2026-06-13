@@ -251,6 +251,39 @@ public partial class RadialIcon : UserControl
         MagnifyTranslate.Y = offsetY;
     }
 
+    /// <summary>The live hop translation while a launch bounce plays (the animated
+    /// MagnifyTranslate). Lets the dock read the current jump height so the Saturn
+    /// flame can rise in sync with the icon.</summary>
+    public TranslateTransform HopTransform => MagnifyTranslate;
+
+    /// <summary>Plays a one-off macOS-dock-style launch bounce: the icon hops by
+    /// (<paramref name="liftX"/>, <paramref name="liftY"/>) and falls back with a
+    /// landing bounce, swelling slightly at the apex. Invokes
+    /// <paramref name="onCompleted"/> when it finishes. The caller should settle
+    /// any magnification wave first so the frame loop doesn't fight it.</summary>
+    public void PlayLaunchBounce(double liftX, double liftY, Action? onCompleted = null)
+    {
+        Scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        Scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+        MagnifyTranslate.BeginAnimation(TranslateTransform.YProperty, null);
+        Scale.ScaleX = 1.0;
+        Scale.ScaleY = 1.0;
+        MagnifyTranslate.X = 0.0;
+        MagnifyTranslate.Y = 0.0;
+
+        var tx = DockBounce.BuildTranslate(liftX);
+        var ty = DockBounce.BuildTranslate(liftY);
+        var sx = DockBounce.BuildScale();
+        var sy = DockBounce.BuildScale();
+        if (onCompleted != null)
+            sy.Completed += (_, _) => onCompleted();
+        MagnifyTranslate.BeginAnimation(TranslateTransform.XProperty, tx);
+        MagnifyTranslate.BeginAnimation(TranslateTransform.YProperty, ty);
+        Scale.BeginAnimation(ScaleTransform.ScaleXProperty, sx);
+        Scale.BeginAnimation(ScaleTransform.ScaleYProperty, sy);
+    }
+
     /// <summary>
     /// When true the icon shows a flowing blue light around its square border,
     /// indicating the target program is currently running.
@@ -331,7 +364,7 @@ public partial class RadialIcon : UserControl
             };
             Timeline.SetDesiredFrameRate(pulse, loopFps);
             RunDot.BeginAnimation(OpacityProperty, pulse);
-            var glowPulse = new DoubleAnimation(0.25, 0.65, new Duration(TimeSpan.FromSeconds(2.0)))
+            var glowPulse = new DoubleAnimation(0.15, 0.42, new Duration(TimeSpan.FromSeconds(2.0)))
             {
                 AutoReverse = true,
                 RepeatBehavior = RepeatBehavior.Forever,

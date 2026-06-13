@@ -19,7 +19,7 @@ internal static class GlassChrome
     /// When <paramref name="track"/> is supplied, every created element is added
     /// to it so the caller can remove the slab later.</summary>
     public static void DrawSlab(Canvas target, double left, double top, double w, double h, double radius, double opacity,
-        List<FrameworkElement>? track = null, bool frosted = false, bool dark = false)
+        List<FrameworkElement>? track = null, bool frosted = false, bool dark = false, bool featherMask = true)
     {
         // Body: clear, lightly cool-tinted glass sheet with a soft floating shadow.
         // When frosted, the fill is milkier (higher white alpha) to read as
@@ -64,10 +64,10 @@ internal static class GlassChrome
                 RadiusY = 0.72,
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0x3E, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x26, 0xEA, 0xF2, 0xFF), 0.48),
-                    new GradientStop(Color.FromArgb(0x1C, 0xCE, 0xDE, 0xF2), 0.8),
-                    new GradientStop(Color.FromArgb(0x12, 0xAE, 0xC2, 0xDC), 1.0),
+                    new GradientStop(Color.FromArgb(0x2E, 0xDA, 0xEC, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x1A, 0xEA, 0xF2, 0xFF), 0.48),
+                    new GradientStop(Color.FromArgb(0x12, 0xCE, 0xDE, 0xF2), 0.8),
+                    new GradientStop(Color.FromArgb(0x0A, 0xAE, 0xC2, 0xDC), 1.0),
                 },
             };
         var glass = new Border
@@ -93,7 +93,7 @@ internal static class GlassChrome
             IsHitTestVisible = false,
             CacheMode = new System.Windows.Media.BitmapCache(),
         };
-        if (dark)
+        if (dark && featherMask)
         {
             // Dark Saturn dock: feather the whole slab so its edges dissolve
             // gradually into the desktop rather than ending on a hard rim. The

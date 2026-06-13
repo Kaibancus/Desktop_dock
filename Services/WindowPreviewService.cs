@@ -27,6 +27,9 @@ public sealed class TaskbarApp
     public string Path { get; init; } = "";
     public string? Aumid { get; init; }
     public IntPtr Window { get; init; }
+    /// <summary>The representative window's title — used as the tile label when
+    /// the executable path is unreadable (elevated app).</summary>
+    public string? Title { get; init; }
 }
 
 /// <summary>
@@ -64,6 +67,9 @@ public static class WindowPreviewService
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll")]
     private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 
     [DllImport("user32.dll")]
@@ -73,6 +79,62 @@ public static class WindowPreviewService
     private static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
     private const uint WM_CLOSE = 0x0010;
+
+    // Window-icon retrieval — exactly how the taskbar gets a tile's glyph: ask the
+    // window itself (WM_GETICON), then fall back to its window-class icon. This
+    // works even for elevated / protected processes (e.g. games launched as admin)
+    // whose executable path we cannot read via OpenProcess.
+    private const uint WM_GETICON = 0x007F;
+    private const int ICON_SMALL = 0, ICON_BIG = 1, ICON_SMALL2 = 2;
+    private const int GCL_HICON = -14, GCL_HICONSM = -34;
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    private static extern IntPtr GetClassLongPtr64(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "GetClassLongW")]
+    private static extern uint GetClassLong32(IntPtr hWnd, int nIndex);
+    private static IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex)
+        => IntPtr.Size == 8 ? GetClassLongPtr64(hWnd, nIndex) : new IntPtr(GetClassLong32(hWnd, nIndex));
+
+    /// <summary>The icon a window advertises for the taskbar/alt-tab, as a WPF
+    /// bitmap. Tries WM_GETICON (big → small) then the window class icon, mirroring
+    /// the shell. Returns null if the window exposes no icon. Used for running-strip
+    /// tiles whose process executable path is unreadable (elevated games), so they
+    /// still get a real icon instead of being dropped.</summary>
+    public static BitmapSource? GetWindowIconImage(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero)
+            return null;
+        IntPtr hicon = SendMessageW(hWnd, WM_GETICON, (IntPtr)ICON_BIG, IntPtr.Zero);
+        if (hicon == IntPtr.Zero) hicon = SendMessageW(hWnd, WM_GETICON, (IntPtr)ICON_SMALL2, IntPtr.Zero);
+        if (hicon == IntPtr.Zero) hicon = SendMessageW(hWnd, WM_GETICON, (IntPtr)ICON_SMALL, IntPtr.Zero);
+        if (hicon == IntPtr.Zero) hicon = GetClassLongPtr(hWnd, GCL_HICON);
+        if (hicon == IntPtr.Zero) hicon = GetClassLongPtr(hWnd, GCL_HICONSM);
+        if (hicon == IntPtr.Zero)
+            return null;
+        try
+        {
+            // The HICON is owned by the window/class — copied here, NOT destroyed.
+            var src = Imaging.CreateBitmapSourceFromHIcon(
+                hicon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            src.Freeze();
+            return src;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A single-window preview list for a known HWND — used when a
+    /// running-strip tile has no readable executable path (elevated app) and can
+    /// only be tracked by the representative window the taskbar enumeration found.</summary>
+    public static List<WindowPreview> GetWindowsByHandle(IntPtr hWnd)
+    {
+        var result = new List<WindowPreview>();
+        if (hWnd != IntPtr.Zero)
+            result.Add(new WindowPreview { Handle = hWnd, Title = GetWindowTitle(hWnd) });
+        return result;
+    }
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -172,6 +234,17 @@ public static class WindowPreviewService
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPLACEMENT
+    {
+        public int length;
+        public int flags;
+        public int showCmd;
+        public System.Drawing.Point ptMinPosition;
+        public System.Drawing.Point ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
 
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -745,7 +818,19 @@ public static class WindowPreviewService
     {
         if (string.IsNullOrWhiteSpace(aumid))
             return null;
-        return _appsFolderExeCache.GetOrAdd(aumid, ResolveAppsFolderExeUncached);
+        string? cached = _appsFolderExeCache.GetOrAdd(aumid, ResolveAppsFolderExeUncached);
+        // Version-numbered installers (e.g. iQiyi at D:\IQIYI Video\LStyle\<ver>\)
+        // relocate their target exe on every auto-update, leaving the cached path
+        // stale; the launch then silently no-ops via explorer.exe shell:AppsFolder.
+        // Re-resolve whenever the cached file has vanished. A null entry (genuine
+        // UWP) and explorer.exe (always present) never trigger a re-resolve.
+        if (!string.IsNullOrEmpty(cached) && !File.Exists(cached))
+        {
+            string? fresh = ResolveAppsFolderExeUncached(aumid);
+            _appsFolderExeCache[aumid] = fresh;
+            return fresh;
+        }
+        return cached;
     }
 
     private static string? ResolveAppsFolderExeUncached(string aumid)
@@ -822,32 +907,34 @@ public static class WindowPreviewService
                 return true;
 
             string? path = GetProcessInfo(pid, out string? procAumid);
-            if (string.IsNullOrWhiteSpace(path))
-                return true;
+            bool accessible = !string.IsNullOrWhiteSpace(path);
 
             // ApplicationFrameHost.exe merely hosts UWP windows (Settings, some
             // Store apps); its window exposes no usable AUMID, so it would show
             // up as a generic host tile that duplicates the real (often pinned)
             // app. Skip it so the running strip never lists the host process.
-            if (string.Equals(Path.GetFileName(path), "ApplicationFrameHost.exe",
+            if (accessible && string.Equals(Path.GetFileName(path), "ApplicationFrameHost.exe",
                     StringComparison.OrdinalIgnoreCase))
                 return true;
 
             // Prefer the process's packaged identity (reliable for Win32-hosted
             // packaged apps like new Teams/Outlook, whose windows do not expose
             // an AUMID via the window property store), then the window AUMID.
-            string? aumid = procAumid;
+            string? aumid = accessible ? procAumid : null;
             if (string.IsNullOrWhiteSpace(aumid))
                 aumid = GetWindowAumid(hWnd);
             if (string.IsNullOrWhiteSpace(aumid))
                 aumid = null;
-            // Distinct by packaged identity when present, else by exe path, so a
-            // multi-window app shows a single tile.
-            string key = aumid ?? path;
+            // Distinct by packaged identity when present, else by exe path. When
+            // the path is unreadable (an elevated app such as a game launched as
+            // administrator) we still surface the window — exactly like the
+            // taskbar, which lists a window by its HWND/icon/title without needing
+            // the process image — keyed by pid so a multi-window app shows once.
+            string key = aumid ?? (accessible ? path! : "pid:" + pid);
             if (!seen.Add(key))
                 return true;
 
-            result.Add(new TaskbarApp { Path = path, Aumid = aumid, Window = hWnd });
+            result.Add(new TaskbarApp { Path = path ?? "", Aumid = aumid, Window = hWnd, Title = title });
             return true;
         }, IntPtr.Zero);
 
@@ -1130,8 +1217,6 @@ public static class WindowPreviewService
         return true;
     }
 
-    /// <summary>Requests that the window close (posts WM_CLOSE, same as clicking
-    /// its title-bar X). The app may prompt to save; we don't force-kill.</summary>
     public static void CloseWindow(IntPtr hWnd)
     {
         if (hWnd == IntPtr.Zero)
@@ -1170,7 +1255,43 @@ public static class WindowPreviewService
         if (owner != IntPtr.Zero && !isAppWindow)
             return false;
 
+        // Exclude tiny background/helper top-level windows that masquerade as the
+        // app's window — e.g. Steam's 128×66 steam.exe helper window (its real UI
+        // lives in a separate steamwebhelper.exe process) and iQiyi's 13×13 window
+        // parked off-screen while minimized to the tray. Treating these as the
+        // app window yields a blank thumbnail and a no-op activation. Letting them
+        // fail here lets the caller fall through to a folder/child-process match
+        // that finds the genuine window. A minimized window reports a placeholder
+        // rect, so measure its restored size instead.
+        if (!HasRealWindowSize(hWnd))
+            return false;
+
         return true;
+    }
+
+    /// <summary>True unless the window is so small in both dimensions that it can
+    /// only be a background/helper window rather than a real application window.
+    /// Minimized windows report a placeholder rect, so their restored
+    /// (normal-position) size is measured instead.</summary>
+    private static bool HasRealWindowSize(IntPtr hWnd)
+    {
+        int w, h;
+        if (IsIconic(hWnd))
+        {
+            var pl = new WINDOWPLACEMENT { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
+            if (!GetWindowPlacement(hWnd, ref pl))
+                return true;   // can't measure — don't exclude
+            w = pl.rcNormalPosition.Right - pl.rcNormalPosition.Left;
+            h = pl.rcNormalPosition.Bottom - pl.rcNormalPosition.Top;
+        }
+        else
+        {
+            if (!GetWindowRect(hWnd, out RECT r))
+                return true;
+            w = r.Right - r.Left;
+            h = r.Bottom - r.Top;
+        }
+        return w >= 200 || h >= 200;
     }
 
     private static string GetWindowTitle(IntPtr hWnd)
