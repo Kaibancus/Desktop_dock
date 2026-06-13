@@ -24,13 +24,14 @@ namespace Polaris.Views;
 public partial class LeftDockWindow : Window
 {
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
-    private const double HoverScale = 1.7;
+    private const double HoverScale = 1.6;
     private const double DragThreshold = 6.0;
-    private const int RunningMaxComplete = 4;     // at most 4 full running-app icons
-    // Left dock icon scale relative to the main dock. The Saturn theme uses a
-    // smaller side dock (60%); every other theme uses 50%.
-    private double LeftDockScale =>
-        ThemeRegistry.Get(_config.Settings.Theme).IsSaturn ? 0.60 : 0.50;
+    private const int RunningMaxComplete = 6;     // at most 6 full running-app icons
+    // Left dock icon scale relative to the main dock. Kept identical for every
+    // theme so the side dock's icon size, cell pitch and gaps are consistent no
+    // matter which theme is active (previously Saturn used a larger 0.60 scale,
+    // which made its side-dock spacing differ from the glass theme's).
+    private const double LeftDockScale = 0.50;
 
     private readonly AppConfig _config;
     private readonly Action _persist;
@@ -150,7 +151,9 @@ public partial class LeftDockWindow : Window
 
     private double EffectiveIconSize => _config.Settings.IconSize * _uiScale * LeftDockScale;
     private double GIcon => EffectiveIconSize * GlassIconScale;
-    private double DefaultCellH => EffectiveIconSize * 1.58;
+    // Cell pitch along the column. Tightened from 1.58 so icons sit closer
+    // together (smaller gaps); identical for every theme via LeftDockScale.
+    private double DefaultCellH => EffectiveIconSize * 1.46;
     private double CellH => _cellH > 0 ? _cellH : DefaultCellH;
     // Running-strip tiles use the SAME vertical step as the pinned cells so the
     // icon spacing is identical above and below the divider.
@@ -482,9 +485,13 @@ public partial class LeftDockWindow : Window
         if (main < _slabMain - icon || main > _slabMain + _slabMainLen + icon)
             return false;
 
-        // Land the icon at the pointer's position along the column.
+        // Land the icon at the pointer's position along the column. Use the
+        // insertion-GAP index (round to the nearest boundary between icons), not
+        // the nearest icon centre — the latter biases every drop half a cell
+        // toward the leading end, so an icon dropped on a slot's lower half would
+        // land one position too early.
         double contentMain = main + _pinnedScroll;
-        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
+        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain) / CellH);
         AddFromMainDock(entry, dropIdx);
         return true;
     }
@@ -640,6 +647,7 @@ public partial class LeftDockWindow : Window
         // reserved running area blank).
         _runTiles.Clear();
         _runSignature = null;
+        ClearRunPopups();
         PruneIconCache();
 
         double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
@@ -713,11 +721,7 @@ public partial class LeftDockWindow : Window
 
     private RadialIcon CreateIcon(AppEntry entry, double size)
     {
-        if (!_iconCache.TryGetValue(entry.EffectiveIconSource, out var bmp))
-        {
-            bmp = IconExtractor.GetIcon(entry.EffectiveIconSource);
-            _iconCache[entry.EffectiveIconSource] = bmp;
-        }
+        var bmp = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
         var icon = new RadialIcon(entry, bmp, size, AccentColor, LabelBrush, dropletHover: true, leftDockStyle: true);
         icon.ApplyDockEdge(_side);
         icon.ExternalMagnify = true;   // the dock drives a coordinated macOS-style wave
@@ -752,11 +756,11 @@ public partial class LeftDockWindow : Window
         // A soft cool glow plus a bright glassy highlight form the divider. The
         // old near-black groove line is omitted so the seam reads as a light
         // split with no dark edge.
-        double glowThk   = isSaturn ? 5.0  : 10.0;
-        byte   glowA     = isSaturn ? (byte)0x3A : (byte)0x99;
-        int    glowBlur  = isSaturn ? 5    : 6;
-        double shineThk  = isSaturn ? 1.0  : 2.2;
-        byte   shineA    = isSaturn ? (byte)0x55 : (byte)0xFF;
+        double glowThk   = isSaturn ? 2.2  : 4.0;
+        byte   glowA     = isSaturn ? (byte)0x55 : (byte)0xB0;
+        int    glowBlur  = isSaturn ? 4    : 5;
+        double shineThk  = isSaturn ? 0.5  : 0.9;
+        byte   shineA    = isSaturn ? (byte)0x80 : (byte)0xDD;
 
         var glow = new System.Windows.Shapes.Line
         {
@@ -788,6 +792,26 @@ public partial class LeftDockWindow : Window
     // ---- Running-but-unpinned strip --------------------------------------
 
     private readonly List<FrameworkElement> _runTiles = new();
+    // Hover-thumbnail popups for the running-strip tiles, torn down whenever the
+    // strip is rebuilt so they never leak or linger over a stale tile.
+    private readonly List<WindowPreviewPopup> _runPopups = new();
+
+    /// <summary>Direction a hover preview opens for this dock edge: toward the
+    /// screen interior (Left dock → right, Right dock → left, Top dock → down).</summary>
+    private PreviewPlacement PreviewPlacementForSide() => _side switch
+    {
+        DockSide.Top => PreviewPlacement.Below,
+        DockSide.Left => PreviewPlacement.Right,
+        DockSide.Right => PreviewPlacement.Left,
+        _ => PreviewPlacement.Above,
+    };
+
+    private void ClearRunPopups()
+    {
+        foreach (var p in _runPopups)
+            p.Close();
+        _runPopups.Clear();
+    }
 
     private void RefreshRunning()
     {
@@ -797,6 +821,24 @@ public partial class LeftDockWindow : Window
         var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var excludeFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Directories of pinned executables. A multi-process app (e.g. Steam) owns
+        // its taskbar window from a HELPER process that lives in a SUBdirectory of
+        // the pinned exe's folder (steamwebhelper.exe under ...\Steam\bin\cef\…),
+        // so its window can't be matched to the pinned exe by path or name. Any
+        // running exe sitting in a strict subdirectory of a pinned app's folder is
+        // treated as that same app and kept out of the running strip. Same-folder
+        // siblings (e.g. Word/Excel/Outlook under …\Office16) are NOT excluded.
+        var excludeDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddExcludeDir(string exePath)
+        {
+            try
+            {
+                string dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(exePath)) ?? "";
+                if (!string.IsNullOrWhiteSpace(dir) && System.IO.Path.IsPathRooted(dir))
+                    excludeDirs.Add(dir);
+            }
+            catch { /* not a real file-system path */ }
+        }
         // Same logic as the main dock's running strip: hide any app that is
         // pinned in EITHER dock, so both strips show the identical set of
         // "running but not pinned anywhere" apps.
@@ -826,6 +868,7 @@ public partial class LeftDockWindow : Window
                             excludeFileNames.Add(fn);
                     }
                     catch { /* ignore */ }
+                    AddExcludeDir(exe);
                 }
             }
             else
@@ -839,6 +882,7 @@ public partial class LeftDockWindow : Window
                         excludeFileNames.Add(fn);
                 }
                 catch { /* ignore */ }
+                AddExcludeDir(a.Path);
             }
         }
 
@@ -894,6 +938,29 @@ public partial class LeftDockWindow : Window
                         continue;
                 }
                 catch { /* ignore */ }
+                // Helper process living in a strict subdirectory of a pinned app's
+                // folder (e.g. Steam's steamwebhelper.exe) — treat as that app.
+                if (excludeDirs.Count > 0)
+                {
+                    string? taDir = null;
+                    try { taDir = System.IO.Path.GetDirectoryName(full); }
+                    catch { /* ignore */ }
+                    if (!string.IsNullOrEmpty(taDir))
+                    {
+                        bool underPinned = false;
+                        foreach (var dir in excludeDirs)
+                        {
+                            if (taDir.StartsWith(dir + System.IO.Path.DirectorySeparatorChar,
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                underPinned = true;
+                                break;
+                            }
+                        }
+                        if (underPinned)
+                            continue;
+                    }
+                }
                 filtered.Add(ta);
             }
 
@@ -914,21 +981,8 @@ public partial class LeftDockWindow : Window
     {
         foreach (var icon in _pinnedIcons)
         {
-            try
-            {
-                // Packaged apps (UWP / Store, launched via shell:AppsFolder) own
-                // no exe-path process we can match, so detect them by AUMID first.
-                string? aumid = WindowPreviewService.TryGetLauncherAumid(icon.Entry.Path, icon.Entry.Arguments);
-                // Non-packaged AppsFolder launchers (VS Code, File Explorer…)
-                // carry no window AUMID; match their resolved exe in the process
-                // snapshot so the running glow lights up for them too.
-                string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
-                icon.IsRunning = WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
-                    || (!string.IsNullOrEmpty(aumidExe) && RunningAppTracker.IsRunningInSnapshot(aumidExe, snapshot))
-                    || RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, snapshot)
-                    || RunningAppTracker.IsShellItemRunning(icon.Entry.Name, icon.Entry.Path, explorerTitles);
-            }
-            catch { icon.IsRunning = false; }
+            icon.IsRunning = RunningAppTracker.IsEntryRunning(
+                icon.Entry, snapshot, explorerTitles, runningAumids);
         }
     }
 
@@ -979,6 +1033,7 @@ public partial class LeftDockWindow : Window
         foreach (var t in _runTiles)
             PanelCanvas.Children.Remove(t);
         _runTiles.Clear();
+        ClearRunPopups();
 
         if (slots == 0)
             return;
@@ -1115,6 +1170,23 @@ public partial class LeftDockWindow : Window
         var dur = new Duration(TimeSpan.FromMilliseconds(110));
         IntPtr win = app.Window;
         string label = System.IO.Path.GetFileNameWithoutExtension(app.Path);
+
+        // Hover-thumbnail preview, opening toward the screen interior like the
+        // pinned icons. Shows even for a single open window.
+        string? taAumid = app.Aumid;
+        string taPath = app.Path;
+        var preview = new WindowPreviewPopup(
+            root,
+            () => taAumid != null
+                ? WindowPreviewService.GetWindowsByAumid(taAumid)
+                : WindowPreviewService.GetWindowsForEntry(taPath, null),
+            minWindows: 1,
+            onActivated: () => SetEdgeShown(false))
+        {
+            Placement = PreviewPlacementForSide(),
+        };
+        _runPopups.Add(preview);
+
         root.MouseEnter += (_, _) =>
         {
             Panel.SetZIndex(root, 100);
@@ -1126,6 +1198,7 @@ public partial class LeftDockWindow : Window
             double mainC = MainOf(new Point(Canvas.GetLeft(root), Canvas.GetTop(root))) + size / 2.0;
             _runLabelShown = true;
             ShowHoverLabelCore(label, mainC, size / 2.0 * HoverScale);
+            preview.OnPointerEnter();
         };
         root.MouseLeave += (_, _) =>
         {
@@ -1134,6 +1207,7 @@ public partial class LeftDockWindow : Window
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, dur));
             _runLabelShown = false;
             HideHoverLabel();
+            preview.OnPointerLeave();
         };
         root.MouseLeftButtonUp += (_, e) =>
         {
@@ -1856,10 +1930,12 @@ public partial class LeftDockWindow : Window
             entries.AddRange(ShellNamespace.CreateEntries(e.Data));
 
         // Insertion index from the pointer's main-axis position, so the dropped
-        // icon lands where the cursor is rather than always at the end.
+        // icon lands where the cursor is rather than always at the end. Use the
+        // insertion-GAP index (nearest boundary between icons) so a drop on a
+        // slot's lower half lands after it, not half a cell too early.
         var drop = e.GetPosition(PanelCanvas);
         double contentMain = MainOf(drop) + _pinnedScroll;
-        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain - CellH / 2.0) / CellH);
+        int dropIdx = (int)Math.Round((contentMain - _pinnedAreaMain) / CellH);
         dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
 
         bool changed = false;
@@ -1897,69 +1973,7 @@ public partial class LeftDockWindow : Window
 
     private void Launch(AppEntry entry)
     {
-        SetEdgeShown(false);
-
-        if (entry.IsShellItem)
-        {
-            // Packaged apps (UWP / Store) are stored as "shell:AppsFolder\<AUMID>"
-            // — also a shell item, but unlike This PC / Recycle Bin they own real
-            // app windows, so bring an existing one forward instead of always
-            // spawning a new instance.
-            try
-            {
-                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
-                    return;
-            }
-            catch { /* fall through to a fresh launch */ }
-
-            try { ShellNamespace.Launch(entry.Path); }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"无法打开 {entry.Name}:\n{ex.Message}", "Polaris",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-            return;
-        }
-
-        if (!IsFileExplorer(entry.Path, entry.Arguments))
-        {
-            try
-            {
-                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
-                    return;
-            }
-            catch { /* fall through */ }
-        }
-
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = entry.Path,
-                Arguments = entry.Arguments,
-                WorkingDirectory = string.IsNullOrWhiteSpace(entry.WorkingDirectory)
-                    ? System.IO.Path.GetDirectoryName(entry.Path) ?? ""
-                    : entry.WorkingDirectory,
-                UseShellExecute = true,
-            };
-            var started = Process.Start(psi);
-            RunningAppTracker.EnsureRestoredWhenReady(started);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"无法启动 {entry.Name}:\n{ex.Message}", "Polaris",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
-
-    private static bool IsFileExplorer(string path, string args)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return false;
-        bool isExplorer = path.EndsWith("explorer.exe", StringComparison.OrdinalIgnoreCase);
-        bool hasShellArg = !string.IsNullOrWhiteSpace(args) &&
-            args.Contains("shell:AppsFolder", StringComparison.OrdinalIgnoreCase);
-        return isExplorer && !hasShellArg;
+        AppLauncher.Launch(entry, () => SetEdgeShown(false));
     }
 
     private static Color ParseColor(string hex, Color fallback)

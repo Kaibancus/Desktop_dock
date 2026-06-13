@@ -12,6 +12,9 @@ using Polaris.Services;
 
 namespace Polaris.Views;
 
+/// <summary>Side of the target a <see cref="WindowPreviewPopup"/> opens toward.</summary>
+internal enum PreviewPlacement { Above, Below, Right, Left }
+
 /// <summary>
 /// Reusable hover-thumbnail popup. Attach it to any <see cref="FrameworkElement"/>
 /// (a ring icon or a taskbar tile); when the pointer dwells over the target it
@@ -37,10 +40,11 @@ internal sealed class WindowPreviewPopup
     private bool _pointerInPopup;
     private int _previewToken;
 
-    /// <summary>When true the popup opens BELOW the target instead of above it
-    /// (used by a Top-anchored side dock, whose icons sit at the screen's top
-    /// edge with no room overhead).</summary>
-    public bool PlaceBelow { get; set; }
+    /// <summary>Which side of the target the popup opens toward. Defaults to
+    /// Above (the main radial dock). A side dock sets this so the preview opens
+    /// toward the screen interior: Below for a Top dock, Right for a Left dock,
+    /// Left for a Right dock.</summary>
+    public PreviewPlacement Placement { get; set; } = PreviewPlacement.Above;
 
     // Maps a window handle to its tile's thumbnail host so a background capture
     // can swap in the fresh image once it finishes.
@@ -186,12 +190,36 @@ internal sealed class WindowPreviewPopup
             Placement = PlacementMode.Custom,
             CustomPopupPlacementCallback = (popupSize, targetSize, _) =>
             {
-                // Centre the popup horizontally over the target and sit it just
-                // above the target's top edge — or just below it when the dock
-                // is anchored to the top of the screen.
-                double x = (targetSize.Width - popupSize.Width) / 2.0;
-                double y = PlaceBelow ? targetSize.Height + 6 : -popupSize.Height - 6;
-                return new[] { new CustomPopupPlacement(new Point(x, y), PopupPrimaryAxis.Horizontal) };
+                // Open the popup toward the screen interior relative to the dock
+                // edge: centred above/below for a horizontal dock, or centred to
+                // the right/left for a vertical (Left/Right) side dock.
+                const double gap = 6;
+                double x, y;
+                PopupPrimaryAxis axis;
+                switch (Placement)
+                {
+                    case PreviewPlacement.Below:
+                        x = (targetSize.Width - popupSize.Width) / 2.0;
+                        y = targetSize.Height + gap;
+                        axis = PopupPrimaryAxis.Horizontal;
+                        break;
+                    case PreviewPlacement.Right:
+                        x = targetSize.Width + gap;
+                        y = (targetSize.Height - popupSize.Height) / 2.0;
+                        axis = PopupPrimaryAxis.Vertical;
+                        break;
+                    case PreviewPlacement.Left:
+                        x = -popupSize.Width - gap;
+                        y = (targetSize.Height - popupSize.Height) / 2.0;
+                        axis = PopupPrimaryAxis.Vertical;
+                        break;
+                    default: // Above
+                        x = (targetSize.Width - popupSize.Width) / 2.0;
+                        y = -popupSize.Height - gap;
+                        axis = PopupPrimaryAxis.Horizontal;
+                        break;
+                }
+                return new[] { new CustomPopupPlacement(new Point(x, y), axis) };
             },
             AllowsTransparency = true,
             PopupAnimation = PopupAnimation.Fade,
@@ -229,14 +257,49 @@ internal sealed class WindowPreviewPopup
         }
         else
         {
-            thumbHost.Child = new TextBlock
+            // No live thumbnail. A genuinely minimized window can't be captured,
+            // so label it as such; otherwise (e.g. Windows Terminal and other
+            // GPU/DirectX-composited windows that render nothing to PrintWindow's
+            // GDI surface) fall back to the app's icon rather than a misleading
+            // "minimized" label.
+            if (WindowPreviewService.IsWindowMinimized(w.Handle))
             {
-                Text = "最小化",
-                Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                FontSize = 12,
-            };
+                thumbHost.Child = new TextBlock
+                {
+                    Text = "已最小化",
+                    Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontSize = 12,
+                };
+            }
+            else
+            {
+                var appIcon = WindowPreviewService.GetWindowAppIcon(w.Handle);
+                if (appIcon != null)
+                {
+                    thumbHost.Child = new Image
+                    {
+                        Source = appIcon,
+                        Width = 56,
+                        Height = 56,
+                        Stretch = Stretch.Uniform,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                    };
+                }
+                else
+                {
+                    thumbHost.Child = new TextBlock
+                    {
+                        Text = "无预览",
+                        Foreground = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        FontSize = 12,
+                    };
+                }
+            }
         }
 
         // A close ("×") button in the thumbnail's top-right corner, shown only

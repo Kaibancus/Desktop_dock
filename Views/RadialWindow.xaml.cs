@@ -23,8 +23,8 @@ public partial class RadialWindow : Window
     private const double DragThreshold = 6.0;
     private const double BaseInnerRadius = 140.0;
     private const double BaseRingStep = 88.0;
-    private const int Ring0Cap = 12;
-    private const int Ring1Cap = 24;
+    private const int Ring0Cap = 14;
+    private const int Ring1Cap = 22;
 
     // Reference screen height (DIPs) the layout was tuned for. On taller
     // displays everything is scaled up proportionally so the panel does not
@@ -63,7 +63,11 @@ public partial class RadialWindow : Window
     private double PlanetDiameter => PlanetIconBase * _uiScale * _themeScale * _diskScale * 2.5;
 
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
-    private const double OuterIconScale = 1.18;
+    private const double OuterIconScale = 0.96;
+
+    // Inner-ring (resident) icons are drawn 10% smaller than the base icon size,
+    // so the dense inner ring reads as a tidy "pinned" cluster.
+    private const double InnerIconScale = 0.80;
 
     // Liquid-glass (grid) icons are drawn larger than the base icon size so they
     // fill the roomy grid cells more comfortably.
@@ -331,6 +335,17 @@ public partial class RadialWindow : Window
     private Canvas? _innerOrbitLayer;
     private Canvas? _outerOrbitLayer;
     private Canvas? _ringLayer;
+
+    // Static ring-band layers (the foreshortened ellipse bands, rims and speckle).
+    // Split out from the rotating feature layer so the many band strokes can be
+    // BitmapCached into a single bitmap — composited once per present instead of
+    // re-drawing hundreds of vector strokes every frame. The bands never rotate,
+    // so the cache is never resampled (no softening). The rotating features
+    // (shimmer/spoke/blob/moon) stay vector on the orbit layer so their small,
+    // sharp highlights are not blurred by a rotated cache.
+    private Canvas? _innerBandLayer;
+    private Canvas? _outerBandLayer;
+    private Canvas? _ringBandLayer;
 
     // Current per-ring vertical radius factor used by StackCentered so a band
     // can be stacked as an ellipse (height = width * factor). 1.0 = circle.
@@ -777,7 +792,9 @@ public partial class RadialWindow : Window
     /// inner band leading and the outer band following, for a "summon" feel.</summary>
     private void AnimateRingsExpand()
     {
+        ExpandLayer(_innerBandLayer, 0.0);
         ExpandLayer(_innerOrbitLayer, 0.0);
+        ExpandLayer(_outerBandLayer, 0.11);
         ExpandLayer(_outerOrbitLayer, 0.11);
         // The expand burst runs ~110ms delay + 280ms grow; pop a bit after.
         Polaris.Services.FpsProfiler.Push("RingsExpand");
@@ -993,21 +1010,26 @@ public partial class RadialWindow : Window
             // placed on these layers.
             double pw = _center.X * 2.0;
             double ph = _center.Y * 2.0;
-            _innerOrbitLayer = new Canvas
+            Canvas MakeRingLayer(bool cached) => new Canvas
             {
                 Width = pw,
                 Height = ph,
                 IsHitTestVisible = false,
                 Opacity = 0.78,                   // match the planet's translucency
+                CacheMode = cached ? new System.Windows.Media.BitmapCache() : null,
             };
-            _outerOrbitLayer = new Canvas
-            {
-                Width = pw,
-                Height = ph,
-                IsHitTestVisible = false,
-                Opacity = 0.78,                   // match the planet's translucency
-            };
+            // Static band layers are BitmapCached (hundreds of strokes -> one
+            // bitmap, composited once per present); the rotating feature layers
+            // stay vector so the moving highlights remain crisp.
+            _innerBandLayer = MakeRingLayer(cached: true);
+            _outerBandLayer = MakeRingLayer(cached: true);
+            _innerOrbitLayer = MakeRingLayer(cached: false);
+            _outerOrbitLayer = MakeRingLayer(cached: false);
+            // z order: each group's static band sits just below its moving
+            // features; the inner group sits below the outer group.
+            PanelCanvas.Children.Add(_innerBandLayer);
             PanelCanvas.Children.Add(_innerOrbitLayer);
+            PanelCanvas.Children.Add(_outerBandLayer);
             PanelCanvas.Children.Add(_outerOrbitLayer);
 
             DrawBackingDisc();
@@ -1016,6 +1038,8 @@ public partial class RadialWindow : Window
         {
             _innerOrbitLayer = null;
             _outerOrbitLayer = null;
+            _innerBandLayer = null;
+            _outerBandLayer = null;
             if (_theme.ShowGlassPanel)
             {
                 DrawGlassPanel();
@@ -1045,8 +1069,9 @@ public partial class RadialWindow : Window
         for (int i = 0; i < _config.Apps.Count && i < _slotPositions.Count; i++)
         {
             var entry = _config.Apps[i];
-            double size = (_theme.IsSaturn && i >= r0)
-                ? EffectiveIconSize * OuterIconScale
+            double size = _theme.IsSaturn
+                ? (i >= r0 ? EffectiveIconSize * OuterIconScale
+                           : EffectiveIconSize * InnerIconScale)
                 : _theme.ShowGlassPanel
                     ? EffectiveIconSize * GlassIconScale
                     : EffectiveIconSize;
@@ -1114,24 +1139,8 @@ public partial class RadialWindow : Window
             {
                 foreach (var icon in icons)
                 {
-                    try
-                    {
-                        // Packaged apps (UWP / Store, launched via shell:AppsFolder)
-                        // own no exe-path process to match, so detect by AUMID first.
-                        string? aumid = WindowPreviewService.TryGetLauncherAumid(icon.Entry.Path, icon.Entry.Arguments);
-                        // Non-packaged AppsFolder launchers (VS Code, File Explorer…)
-                        // carry no window AUMID; match their resolved exe in the
-                        // process snapshot so the running glow lights up too.
-                        string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
-                        icon.IsRunning = WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
-                            || (!string.IsNullOrEmpty(aumidExe) && RunningAppTracker.IsRunningInSnapshot(aumidExe, running))
-                            || RunningAppTracker.IsRunningInSnapshot(icon.Entry.Path, running)
-                            || RunningAppTracker.IsShellItemRunning(icon.Entry.Name, icon.Entry.Path, explorerTitles);
-                    }
-                    catch
-                    {
-                        icon.IsRunning = false;
-                    }
+                    icon.IsRunning = RunningAppTracker.IsEntryRunning(
+                        icon.Entry, running, explorerTitles, runningAumids);
                 }
             });
         });
@@ -1153,19 +1162,19 @@ public partial class RadialWindow : Window
         {
             RepeatBehavior = RepeatBehavior.Forever,
         };
-        // Slow perpetual revolution: tick at the oversampled rate so the orbit
-        // stays smooth and does not beat against the 59.94 Hz present.
-        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(anim, App.AnimationFrameRate);
+        // Slow perpetual revolution: tick at the display's NATIVE rate, not the
+        // 2x-oversampled rate used for short interactive transitions. The ring
+        // layer re-rasterises its (many) vector features every tick, so on a 60 Hz
+        // panel this halves the idle revolve cost (120 -> 60). At the tiny angular
+        // step per frame of this slow turn, the un-oversampled beat against
+        // 59.94 Hz is imperceptible, so the motion looks unchanged.
+        System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(anim, App.AmbientFrameRate);
         rt.BeginAnimation(RotateTransform.AngleProperty, anim);
     }
 
     private RadialIcon CreateIcon(AppEntry entry, double iconSize)
     {
-        if (!_iconCache.TryGetValue(entry.EffectiveIconSource, out var bmp))
-        {
-            bmp = IconExtractor.GetIcon(entry.EffectiveIconSource);
-            _iconCache[entry.EffectiveIconSource] = bmp;
-        }
+        var bmp = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
         // Saturn icons bloom with a very faint, high-transparency black halo
         // (so it reads as a soft shadow on the dark disc) instead of the accent
         // blue used by the glass theme.
@@ -2207,88 +2216,7 @@ public partial class RadialWindow : Window
 
     private void Launch(AppEntry entry)
     {
-        HidePanel();
-
-        // Shell-namespace objects (This PC, Recycle Bin…) open through explorer.
-        if (entry.IsShellItem)
-        {
-            // Packaged apps (UWP / Store) are stored as "shell:AppsFolder\<AUMID>"
-            // — also a shell item, but they own real app windows, so activate an
-            // existing one instead of always launching a second instance.
-            try
-            {
-                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
-                    return;
-            }
-            catch { /* fall through to a fresh launch */ }
-
-            try
-            {
-                ShellNamespace.Launch(entry.Path);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"无法打开 {entry.Name}:\n{ex.Message}", "Polaris",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-            return;
-        }
-
-        // If the program is already running, bring its existing window to the
-        // foreground instead of starting a second instance. File Explorer is an
-        // exception: explorer.exe is also the desktop shell process, so its
-        // MainWindowHandle is usually the desktop/taskbar rather than a file
-        // window — activating that does nothing visible. Always launch instead,
-        // which opens a fresh Explorer window.
-        if (!IsFileExplorer(entry.Path, entry.Arguments))
-        {
-            try
-            {
-                if (RunningAppTracker.ActivateExisting(entry.Path, entry.Arguments))
-                    return;
-            }
-            catch
-            {
-                // Fall through to a normal launch if activation fails.
-            }
-        }
-
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = entry.Path,
-                Arguments = entry.Arguments,
-                UseShellExecute = true,
-            };
-            if (!string.IsNullOrWhiteSpace(entry.WorkingDirectory))
-                psi.WorkingDirectory = entry.WorkingDirectory;
-            var started = Process.Start(psi);
-            RunningAppTracker.EnsureRestoredWhenReady(started);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"无法启动 {entry.Name}:\n{ex.Message}", "Polaris",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
-    /// <summary>True when the entry is the genuine Windows File Explorer
-    /// (explorer.exe with no shell:AppsFolder launcher argument). explorer.exe is
-    /// also the desktop shell, so we never try to "activate its existing window"
-    /// — we always launch a fresh Explorer window instead.</summary>
-    private static bool IsFileExplorer(string path, string? arguments)
-    {
-        try
-        {
-            if (!string.Equals(System.IO.Path.GetFileName(path), "explorer.exe",
-                    StringComparison.OrdinalIgnoreCase))
-                return false;
-            return WindowPreviewService.TryGetLauncherAumid(path, arguments) == null;
-        }
-        catch
-        {
-            return false;
-        }
+        AppLauncher.Launch(entry, HidePanel);
     }
 
     private static Color ParseColor(string hex, Color fallback)

@@ -145,10 +145,9 @@ public partial class RadialIcon : UserControl
         Canvas.SetLeft(LabelChrome, (iconSize - LabelWidth) / 2.0);
         Canvas.SetTop(LabelChrome, iconSize + 8);
 
-        // Multi-window hover-thumbnail popup. File Explorer is worth previewing
-        // even with a single window (the user often has just one Explorer window
-        // with several tabs); every other app needs at least two.
-        int minWindows = IsFileExplorer(entry.Path, entry.Arguments) ? 1 : 2;
+        // Multi-window hover-thumbnail popup. Show a live thumbnail even with a
+        // single open window so the user can preview/peek any running app.
+        int minWindows = 1;
         _preview = new WindowPreviewPopup(
             this,
             () => WindowPreviewService.GetWindowsForEntry(Entry.Path, Entry.Arguments),
@@ -180,7 +179,13 @@ public partial class RadialIcon : UserControl
         if (_leftDockStyle)
             PositionRunDot();
         if (_preview != null)
-            _preview.PlaceBelow = side == DockSide.Top;
+            _preview.Placement = side switch
+            {
+                DockSide.Top => PreviewPlacement.Below,
+                DockSide.Left => PreviewPlacement.Right,
+                DockSide.Right => PreviewPlacement.Left,
+                _ => PreviewPlacement.Above,   // Bottom dock → above the icon
+            };
     }
 
     /// <summary>Positions the breathing green "running" dot against the dock's
@@ -271,7 +276,14 @@ public partial class RadialIcon : UserControl
         }
         if (_isRunning)
         {
-            int loopFps = App.AmbientFrameRate;
+            // In the liquid-glass theme the whole panel is a fullscreen per-pixel-
+            // alpha layered window, so EVERY glow tick re-uploads the entire screen.
+            // Throttle the slow running glow there to GlassLoopFrameRate (the value
+            // designed for exactly this) instead of the higher ambient rate — the
+            // sweep/breathe are slow enough that 30 fps is indistinguishable, and it
+            // halves the per-tick full-screen upload. Saturn (not a layered window)
+            // keeps the ambient rate.
+            int loopFps = _dropletHover ? App.GlassLoopFrameRate : App.AmbientFrameRate;
             RunningBorder.Visibility = Visibility.Visible;
             RunningGlowBorder.Visibility = Visibility.Visible;
             // Sweep the bright spot continuously around the border. A linear
@@ -392,26 +404,6 @@ public partial class RadialIcon : UserControl
     // ---- Multi-window preview popup --------------------------------------
 
     private readonly WindowPreviewPopup _preview;
-
-    /// <summary>True when the app entry points at the genuine Windows File
-    /// Explorer (explorer.exe with NO shell:AppsFolder launcher argument), which
-    /// we preview even with a single open window. Packaged apps such as the new
-    /// Teams / Outlook are also launched via explorer.exe but with a
-    /// shell:AppsFolder argument — those are NOT File Explorer.</summary>
-    private static bool IsFileExplorer(string path, string? arguments)
-    {
-        try
-        {
-            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
-                    StringComparison.OrdinalIgnoreCase))
-                return false;
-            return WindowPreviewService.TryGetLauncherAumid(path, arguments) == null;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     /// <summary>Closes the preview popup if it is open (called by the host panel
     /// when it hides).</summary>

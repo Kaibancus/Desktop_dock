@@ -75,12 +75,12 @@ public sealed class AppSettings
     public int TriggerKey { get; set; } = 0xA5;
 
     /// <summary>Screen edge the quick-launch (side) dock is anchored to.
-    /// Defaults to the left edge (the original behavior).</summary>
-    public DockSide DockPosition { get; set; } = DockSide.Left;
+    /// Defaults to the bottom edge.</summary>
+    public DockSide DockPosition { get; set; } = DockSide.Bottom;
 
     /// <summary>Whether the quick-launch dock is shown on every monitor.
-    /// Reserved for a future release; currently has no effect.</summary>
-    public bool DockOnAllMonitors { get; set; } = false;
+    /// Defaults to on.</summary>
+    public bool DockOnAllMonitors { get; set; } = true;
 
     /// <summary>Per-theme remembered appearance (transparency + icon size),
     /// keyed by theme id. Lets each theme restore its own look when re-selected;

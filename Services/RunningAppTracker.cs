@@ -175,7 +175,13 @@ public static class RunningAppTracker
                 return true;
 
             // Tray-minimized (windowless) processes: exact path match only.
-            if (snapshot.PathsNoWindow.Contains(full))
+            // Exception: Chromium browsers (Edge, Chrome…) keep background
+            // processes alive with no window (startup boost / background
+            // extensions / "continue running background apps") even after every
+            // browser window is closed. Matching those windowless processes would
+            // falsely light the "running" glow, so a browser must own a real
+            // window (the Paths set checked above) to count as running.
+            if (snapshot.PathsNoWindow.Contains(full) && !IsBackgroundPersistentBrowser(full))
                 return true;
 
             if (snapshot.NamesWithoutPath.Count == 0)
@@ -189,6 +195,53 @@ public static class RunningAppTracker
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Best-effort fallback for AppsFolder launchers (e.g. iQiyi) whose pinned
+    /// target exe differs in PATH from the process that actually owns the app
+    /// window: true when some process owning a VISIBLE window runs an executable
+    /// with the same file NAME as <paramref name="exePath"/>. Window-only (it
+    /// never consults the windowless set) so it can't light up on background
+    /// helpers, and matching by name keeps version/install-folder differences
+    /// between the launcher target and the live process from hiding the glow.
+    /// </summary>
+    public static bool IsRunningByFileNameWithWindow(string exePath, RunningSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(exePath) || snapshot == null)
+            return false;
+        string name;
+        try { name = Path.GetFileName(exePath); }
+        catch { return false; }
+        if (string.IsNullOrEmpty(name))
+            return false;
+        foreach (var p in snapshot.Paths)
+        {
+            try
+            {
+                if (string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            catch { /* ignore a malformed path */ }
+        }
+        return false;
+    }
+
+    /// <summary>Executables that keep persistent background processes alive with
+    /// no window (Chromium "startup boost" / background extensions). A windowless
+    /// instance of these must NOT be treated as "running"; they only count when
+    /// they own a real window.</summary>
+    private static readonly HashSet<string> BackgroundPersistentBrowsers =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "msedge.exe", "chrome.exe", "brave.exe", "opera.exe",
+            "opera_gx.exe", "vivaldi.exe", "msedgewebview2.exe",
+        };
+
+    private static bool IsBackgroundPersistentBrowser(string exePath)
+    {
+        try { return BackgroundPersistentBrowsers.Contains(Path.GetFileName(exePath)); }
+        catch { return false; }
     }
 
     /// <summary>
@@ -214,6 +267,42 @@ public static class RunningAppTracker
                 return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// THE single "is this pinned app running?" test, shared by both docks so the
+    /// green-light logic can never drift between them. Combines every detection
+    /// path: packaged-app AUMID windows, the resolved AppsFolder target exe (by
+    /// exact path AND, as a fallback for launcher/version-folder mismatches, by
+    /// visible-window file name), the entry's own exe path, and shell-namespace
+    /// (This PC / Recycle Bin…) windows matched by title.
+    /// </summary>
+    public static bool IsEntryRunning(
+        Models.AppEntry entry,
+        RunningSnapshot snapshot,
+        IReadOnlyList<string> explorerTitles,
+        HashSet<string> runningAumids)
+    {
+        if (entry == null)
+            return false;
+        try
+        {
+            // Packaged apps (UWP / Store, launched via shell:AppsFolder) own no
+            // exe-path process to match, so detect them by AUMID first.
+            string? aumid = WindowPreviewService.TryGetLauncherAumid(entry.Path, entry.Arguments);
+            // Non-packaged AppsFolder launchers (VS Code, iQiyi…) carry no window
+            // AUMID; match their resolved exe in the process snapshot instead.
+            string? aumidExe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+            return WindowPreviewService.IsAumidInSnapshot(aumid, runningAumids)
+                || (!string.IsNullOrEmpty(aumidExe) && IsRunningInSnapshot(aumidExe, snapshot))
+                || (!string.IsNullOrEmpty(aumidExe) && IsRunningByFileNameWithWindow(aumidExe, snapshot))
+                || IsRunningInSnapshot(entry.Path, snapshot)
+                || IsShellItemRunning(entry.Name, entry.Path, explorerTitles);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -254,11 +343,19 @@ public static class RunningAppTracker
                 return true;
             }
 
-            // Non-packaged AppsFolder launchers (VS Code, File Explorer…) have no
-            // window carrying the AUMID; fall back to the resolved exe.
+            // Non-packaged AppsFolder launchers (VS Code, iQiyi…) have no window
+            // carrying the AUMID. Prefer activating the actual VISIBLE alt-tab
+            // window owned by a process with the resolved exe's file name — this
+            // skips hidden launcher/helper windows (e.g. iQiyi's QyClient.exe
+            // updater) that FindWindowProcess might otherwise pick. Fall back to
+            // the resolved exe by process otherwise.
             string? exe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
             if (!string.IsNullOrEmpty(exe))
+            {
+                if (WindowPreviewService.ActivateWindowByExeName(exe))
+                    return true;
                 return ActivateExisting(exe);
+            }
 
             return false;
         }
@@ -268,7 +365,7 @@ public static class RunningAppTracker
 
     /// <summary>Restores (preserving the maximized state) and foregrounds the
     /// window <paramref name="h"/>.</summary>
-    private static void ActivateWindow(IntPtr h)
+    public static void ActivateWindow(IntPtr h)
     {
         if (h == IntPtr.Zero)
             return;

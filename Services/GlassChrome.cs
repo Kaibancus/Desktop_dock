@@ -54,18 +54,20 @@ internal static class GlassChrome
                     new GradientStop(Color.FromArgb(0x72, 0xDD, 0xE6, 0xF6), 1.0),
                 },
             }
-            : new LinearGradientBrush
+            : new RadialGradientBrush
             {
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(0, 1),
+                // Clear glass lit from its geometric centre: a bright core melting
+                // outward into a cooler, dimmer rim (centre-bright, edge-dark).
+                GradientOrigin = new Point(0.5, 0.5),
+                Center = new Point(0.5, 0.5),
+                RadiusX = 0.72,
+                RadiusY = 0.72,
                 GradientStops =
                 {
-                    // Wetter, glossier clear glass: bright crown melting into a
-                    // cool mid-body and a more saturated refractive base.
-                    new GradientStop(Color.FromArgb(0x3A, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x20, 0xEA, 0xF2, 0xFF), 0.46),
-                    new GradientStop(Color.FromArgb(0x1A, 0xD6, 0xE6, 0xFF), 0.7),
-                    new GradientStop(Color.FromArgb(0x36, 0xC6, 0xD8, 0xF4), 1.0),
+                    new GradientStop(Color.FromArgb(0x3E, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x26, 0xEA, 0xF2, 0xFF), 0.48),
+                    new GradientStop(Color.FromArgb(0x1C, 0xCE, 0xDE, 0xF2), 0.8),
+                    new GradientStop(Color.FromArgb(0x12, 0xAE, 0xC2, 0xDC), 1.0),
                 },
             };
         var glass = new Border
@@ -141,39 +143,42 @@ internal static class GlassChrome
             track?.Add(veil);
         }
 
-        // Base shade: soft dark pool at the bottom for volume. Skipped in dark
-        // mode — on the near-black Saturn slab it only darkens the bottom 40%,
-        // making the panel look bottom-heavy / asymmetric against the top.
+        // Edge shade: a soft dark vignette around the rim (centre stays clear) so
+        // the slab reads as brightest at its geometric centre, fading to a darker
+        // edge. Skipped in dark mode (the Saturn slab is near-black already).
         if (!dark)
         {
-            var baseShade = new Border
+            var edgeShade = new Border
             {
                 Width = w,
-                Height = h * 0.4,
-                CornerRadius = new CornerRadius(0, 0, radius, radius),
+                Height = h,
+                CornerRadius = new CornerRadius(radius),
                 Opacity = opacity,
                 IsHitTestVisible = false,
-                Background = new LinearGradientBrush
+                Background = new RadialGradientBrush
                 {
-                    StartPoint = new Point(0, 0),
-                    EndPoint = new Point(0, 1),
+                    GradientOrigin = new Point(0.5, 0.5),
+                    Center = new Point(0.5, 0.5),
+                    RadiusX = 0.72,
+                    RadiusY = 0.72,
                     GradientStops =
                     {
                         new GradientStop(Color.FromArgb(0x00, 0x0A, 0x12, 0x20), 0.0),
-                        new GradientStop(Color.FromArgb(0x30, 0x0A, 0x12, 0x20), 1.0),
+                        new GradientStop(Color.FromArgb(0x00, 0x0A, 0x12, 0x20), 0.6),
+                        new GradientStop(Color.FromArgb(0x20, 0x0A, 0x12, 0x20), 1.0),
                     },
                 },
             };
-            Canvas.SetLeft(baseShade, left);
-            Canvas.SetTop(baseShade, top + h * 0.6);
-            Panel.SetZIndex(baseShade, -11);
-            target.Children.Add(baseShade);
-            track?.Add(baseShade);
+            Canvas.SetLeft(edgeShade, left);
+            Canvas.SetTop(edgeShade, top);
+            Panel.SetZIndex(edgeShade, -11);
+            target.Children.Add(edgeShade);
+            track?.Add(edgeShade);
         }
 
-        // Top specular dome: blurred bright highlight along the upper edge.
-        // Skipped in dark mode so the slab reads as the flat near-black material
-        // of the Saturn main-dock disc (no glossy white sheen).
+        // Centre specular bloom: blurred bright highlight pooled at the slab's
+        // centre (reinforcing the centre-bright, edge-dark look). Skipped in dark
+        // mode so the slab reads as the flat near-black Saturn disc material.
         if (!dark)
         {
             var topCap = new Border
@@ -187,21 +192,22 @@ internal static class GlassChrome
                 CacheMode = new System.Windows.Media.BitmapCache(),
                 Background = new RadialGradientBrush
                 {
-                    GradientOrigin = new Point(0.5, 0.10),
-                    Center = new Point(0.5, 0.12),
-                    RadiusX = 0.62,
-                    RadiusY = 0.95,
+                    GradientOrigin = new Point(0.5, 0.5),
+                    Center = new Point(0.5, 0.5),
+                    RadiusX = 0.58,
+                    RadiusY = 0.72,
                     GradientStops =
                     {
-                        // Brighter, tighter wet sheen across the crown.
-                        new GradientStop(Color.FromArgb(0x46, 0xFF, 0xFF, 0xFF), 0.0),
-                        new GradientStop(Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF), 0.5),
+                        // Centred bloom: brightest at the geometric centre, fading
+                        // out toward the rim.
+                        new GradientStop(Color.FromArgb(0x32, 0xFF, 0xFF, 0xFF), 0.0),
+                        new GradientStop(Color.FromArgb(0x12, 0xFF, 0xFF, 0xFF), 0.5),
                         new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
                     },
                 },
             };
             Canvas.SetLeft(topCap, left + w * 0.07);
-            Canvas.SetTop(topCap, top + 2);
+            Canvas.SetTop(topCap, top + (h - h * 0.55) / 2.0);
             Panel.SetZIndex(topCap, -9);
             target.Children.Add(topCap);
             track?.Add(topCap);

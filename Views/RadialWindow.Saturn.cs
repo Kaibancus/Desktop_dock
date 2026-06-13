@@ -49,7 +49,11 @@ public partial class RadialWindow
                 {
                     new GradientStop(Color.FromArgb(0xFF, 0x05, 0x06, 0x0C), 0.0),
                     new GradientStop(Color.FromArgb(0xFF, 0x02, 0x03, 0x07), 0.72),
-                    new GradientStop(Color.FromArgb(0xFF, 0, 0, 0), 1.0),
+                    // Very light rim softening: hold the near-black fill almost to
+                    // the edge, then ease it down only slightly (NOT to transparent)
+                    // so the disc edge reads a touch softer without a visible fade.
+                    new GradientStop(Color.FromArgb(0xFF, 0x00, 0x00, 0x00), 0.96),
+                    new GradientStop(Color.FromArgb(0xE4, 0x00, 0x00, 0x00), 1.0),
                 },
             },
         };
@@ -107,7 +111,8 @@ public partial class RadialWindow
         // --- Inner group: D, C, B (icons land on the B ring) -----------------
         // Drawn into the inner rotating layer so the inner bands revolve.
         _ringLayer = _innerOrbitLayer;
-        DrawRingZone(MapR(RDin), MapR(RDout), faintD, 0.07, 0.14, icon);   // D ring (faint dust)
+        _ringBandLayer = _innerBandLayer;
+        DrawRingZone(MapR(RDin), MapR(RDout), faintD, 0.12, 0.20, icon);   // D ring (dim, brighter than E)
         DrawRingZone(MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);     // C ring (crepe)
         DrawRingZone(MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);    // B ring (bright, widest)
 
@@ -115,6 +120,7 @@ public partial class RadialWindow
         {
             // Outer group drawn into the outer rotating layer (slower revolution).
             _ringLayer = _outerOrbitLayer;
+            _ringBandLayer = _outerBandLayer;
 
             // Cassini Division: the prominent dark gap between B and A. Drawn
             // only as a barely-there dust hint so it reads as empty space; it
@@ -127,20 +133,20 @@ public partial class RadialWindow
 
             // Roche Division then the narrow, bright F ringlet centred on rF.
             DrawRingZone(MapR(RRoche), MapR(RF) - icon * 0.06, faintD, 0.03, 0.05, icon); // Roche gap
-            DrawRingZone(rF - icon * 0.09, rF + icon * 0.09, paleB, 0.62, 0.70, icon * 0.42); // F ring
+            DrawRingZone(rF - icon * 0.09, rF + icon * 0.09, paleB, 0.09, 0.12, icon * 0.42); // F ring (brighter, still < E)
 
             // --- Faint outer rings: a modest gap, then the narrow G ring,
             // then the very broad, diffuse E ring fading to the disc edge.
             // (G/E are radially compressed to sit close to F inside the disc.) --
             double gIn = rF + outerIcon * 0.34;            // tighter Roche-to-G gap
-            DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.18, 0.25, icon * 0.5); // G ring (narrow)
+            DrawRingZone(gIn, gIn + icon * 0.06, icyG, 0.05, 0.08, icon * 0.5); // G ring (brighter, still < F)
             double eIn = gIn + outerIcon * 0.18;
             double eOut = r - icon * 0.04;
-            DrawRingZone(eIn, eOut, icyG, 0.147, 0.012, icon, crispRim: false);     // E ring (broad halo, fades out)
+            DrawRingZone(eIn, eOut, icyG, 0.14, 0.012, icon, crispRim: false);     // E ring (broad halo, dimmer than D, fades out)
 
             // Soft outer bloom: a blurred icy halo over the faint G/E rings so
             // they glow and fade out rather than ending abruptly.
-            AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.06);
+            AddBloomRing((gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.078);
         }
 
         // --- Ring-revolution cues ------------------------------------------
@@ -221,8 +227,9 @@ public partial class RadialWindow
                     RepeatBehavior = RepeatBehavior.Forever,
                     BeginTime = TimeSpan.FromSeconds(2.0 * Hash01(i * 6.2)),
                 };
-                // Perpetual twinkle: tick at the oversampled rate for smooth fades.
-                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(tw, App.AnimationFrameRate);
+                // Perpetual twinkle: native rate is plenty for these slow opacity
+                // fades and halves the per-star tick cost on a 60 Hz panel.
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(tw, App.AmbientFrameRate);
                 star.BeginAnimation(OpacityProperty, tw);
             }
         }
@@ -509,7 +516,7 @@ public partial class RadialWindow
             };
             Canvas.SetLeft(dot, px - sz / 2);
             Canvas.SetTop(dot, py - sz / 2);
-            (_ringLayer ?? PanelCanvas).Children.Add(dot);
+            (_ringBandLayer ?? _ringLayer ?? PanelCanvas).Children.Add(dot);
         }
     }
 
@@ -539,7 +546,7 @@ public partial class RadialWindow
             el.Height = ry * 2;
         Canvas.SetLeft(el, _center.X - r);
         Canvas.SetTop(el, _center.Y - ry);
-        (_ringLayer ?? PanelCanvas).Children.Add(el);
+        (_ringBandLayer ?? _ringLayer ?? PanelCanvas).Children.Add(el);
     }
 
     private static Color WithAlpha(Color c, double opacity)

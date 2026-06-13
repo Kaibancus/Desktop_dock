@@ -519,6 +519,11 @@ public partial class App : Application
             // shared positioning target so the refresh below lands the docks on
             // the right monitor (the cursor's when enabled, the primary when not).
             SetActiveMonitorFromCursor();
+            // A theme switch can change the resident count (Ring0Count is stored
+            // per theme), so re-mirror the resident region into the side dock
+            // before relaying it — otherwise the side dock keeps the old theme's
+            // icon count.
+            DockSync.MirrorResidentToLeft(_config);
             // Re-anchor / re-lay the side dock FIRST so a changed dock position
             // (or any geometry-affecting setting) takes effect immediately and
             // its new bounds are available to the main dock below.

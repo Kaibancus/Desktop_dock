@@ -188,6 +188,35 @@ public static class WindowPreviewService
     /// cannot render a minimized window). Values are frozen, so cross-thread safe.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, BitmapSource> _thumbCache = new();
 
+    /// <summary>Cache of app icons keyed by the owning process's exe path, used
+    /// as a preview fallback for windows that cannot be captured by PrintWindow
+    /// (GPU/DirectX-composited windows such as Windows Terminal render nothing to
+    /// a GDI device, so their thumbnail is always blank).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, BitmapSource?> _winIconCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True when the window is currently minimized (iconic).</summary>
+    public static bool IsWindowMinimized(IntPtr hWnd) => hWnd != IntPtr.Zero && IsIconic(hWnd);
+
+    /// <summary>Returns the application icon of the process that owns
+    /// <paramref name="hWnd"/>, or null when it cannot be resolved. Used as a
+    /// preview placeholder when a live thumbnail cannot be captured.</summary>
+    public static BitmapSource? GetWindowAppIcon(IntPtr hWnd)
+    {
+        try
+        {
+            if (hWnd == IntPtr.Zero || GetWindowThreadProcessId(hWnd, out uint pid) == 0)
+                return null;
+            string? path = GetProcessInfo(pid, out string? _ignore);
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+            return _winIconCache.GetOrAdd(path, p => IconExtractor.GetIcon(p));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Returns the visible, alt-tab-style top-level windows owned by the
     /// running process(es) launched from <paramref name="exePath"/>.
@@ -239,12 +268,20 @@ public static class WindowPreviewService
                 return byAumid;
 
             // The AUMID matched no window. Many shell:AppsFolder entries are not
-            // genuine packaged apps (e.g. VS Code, File Explorer): they launch a
-            // plain Win32 exe whose windows carry no AUMID. Resolve the real
-            // target executable and match those windows by process instead.
+            // genuine packaged apps (e.g. VS Code, iQiyi): they launch a plain
+            // Win32 exe whose windows carry no AUMID. Resolve the real target
+            // executable and match those windows by process instead.
             string? exe = TryResolveAppsFolderExe(aumid);
             if (!string.IsNullOrEmpty(exe))
-                return GetWindows(exe);
+            {
+                var byExe = GetWindows(exe);
+                if (byExe.Count > 0)
+                    return byExe;
+                // Multi-process apps (e.g. iQiyi) own their visible window from a
+                // sibling/child process in the same install folder, so the exact
+                // exe match finds nothing — fall back to a folder match.
+                return GetWindowsByExeFolder(exe);
+            }
 
             return byAumid;
         }
@@ -258,7 +295,92 @@ public static class WindowPreviewService
         if (IsProtocolLauncher(path, arguments))
             return new List<WindowPreview>();
 
-        return GetWindows(path);
+        var byPath = GetWindows(path);
+        if (byPath.Count > 0)
+            return byPath;
+        // Multi-process apps (Steam's window is owned by steamwebhelper.exe in a
+        // subfolder; Baidu Netdisk and similar spawn a helper that owns the UI)
+        // expose no window from the pinned exe itself. Match any visible window
+        // whose process lives under the pinned exe's install folder.
+        return GetWindowsByExeFolder(path);
+    }
+
+    /// <summary>Visible alt-tab windows whose owning process executable lives in
+    /// (or under) the install folder of <paramref name="exePath"/>. This catches
+    /// multi-process apps whose UI window belongs to a helper/child process with
+    /// a different name or path than the pinned launcher (Steam → steamwebhelper
+    /// in a subfolder, Baidu Netdisk, iQiyi…). Guarded against over-broad folders
+    /// (a drive root, Windows, or a Program Files root) so it never sweeps up
+    /// every program that happens to share a generic parent directory.</summary>
+    private static List<WindowPreview> GetWindowsByExeFolder(string exePath)
+    {
+        var result = new List<WindowPreview>();
+        string dir;
+        try { dir = Path.GetDirectoryName(Path.GetFullPath(exePath)) ?? string.Empty; }
+        catch { return result; }
+        if (string.IsNullOrEmpty(dir) || IsTooBroadFolder(dir))
+            return result;
+
+        string prefix = dir.TrimEnd('\\') + "\\";
+        int ownPid = Environment.ProcessId;
+        try
+        {
+            EnumWindows((hWnd, _) =>
+            {
+                if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                    return true;
+                if (!IsAltTabWindow(hWnd))
+                    return true;
+                string title = GetWindowTitle(hWnd);
+                if (string.IsNullOrWhiteSpace(title))
+                    return true;
+                string? p = GetProcessInfo(pid, out string? _ignore);
+                if (string.IsNullOrWhiteSpace(p))
+                    return true;
+                string full;
+                try { full = Path.GetFullPath(p); }
+                catch { return true; }
+                if (full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    result.Add(new WindowPreview { Handle = hWnd, Title = title });
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            // Best effort; an empty list just means no folder-matched preview.
+        }
+        return result;
+    }
+
+    /// <summary>True when <paramref name="dir"/> is too generic to use for a
+    /// folder match — a drive root, the Windows directory, System32, or a
+    /// Program Files root — where many unrelated programs live side by side.</summary>
+    private static bool IsTooBroadFolder(string dir)
+    {
+        try
+        {
+            string d = dir.TrimEnd('\\');
+            string? root = Path.GetPathRoot(d)?.TrimEnd('\\');
+            if (string.IsNullOrEmpty(d) || string.Equals(d, root, StringComparison.OrdinalIgnoreCase))
+                return true;
+            string[] broad =
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                Environment.GetFolderPath(Environment.SpecialFolder.SystemX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            };
+            foreach (var b in broad)
+                if (!string.IsNullOrEmpty(b) &&
+                    string.Equals(d, b.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -348,6 +470,56 @@ public static class WindowPreviewService
         if (ws > 0)
             aumid = aumid.Substring(0, ws);
         return string.IsNullOrWhiteSpace(aumid) ? null : aumid;
+    }
+
+    /// <summary>
+    /// True when the entry is an AppsFolder launcher whose target is hosted by
+    /// the shell process — its resolved executable is explorer.exe (e.g. File
+    /// Explorer = <c>shell:AppsFolder\Microsoft.Windows.Explorer</c>, whose
+    /// AppsFolder target is a <c>::{CLSID}</c> shell location). "Activating" the
+    /// already-running explorer.exe shell window does nothing visible, so these
+    /// items must always launch a fresh window instead of being brought forward.
+    /// </summary>
+    public static bool IsShellHostedLauncher(string path, string? arguments)
+    {
+        string? aumid = TryGetLauncherAumid(path, arguments);
+        if (string.IsNullOrEmpty(aumid))
+            return false;
+        string? exe = TryResolveAppsFolderExe(aumid);
+        if (string.IsNullOrEmpty(exe))
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFileName(exe), "explorer.exe",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the entry is the genuine Windows File Explorer — explorer.exe
+    /// with NO <c>shell:AppsFolder</c> launcher argument (packaged apps such as
+    /// the new Teams / Outlook are also launched via explorer.exe but carry such
+    /// an argument). explorer.exe is also the desktop shell, so callers treat
+    /// File Explorer specially: always open a fresh window rather than activate.
+    /// Single source of truth for this test across the docks and the preview.
+    /// </summary>
+    public static bool IsFileExplorer(string path, string? arguments)
+    {
+        try
+        {
+            if (!string.Equals(Path.GetFileName(path), "explorer.exe",
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            return TryGetLauncherAumid(path, arguments) == null;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -861,21 +1033,76 @@ public static class WindowPreviewService
     }
 
     /// <summary>Brings a specific window to the foreground, restoring it first
-    /// if it is minimized.</summary>
+    /// if it is minimized. Delegates to the robust activation in
+    /// <see cref="RunningAppTracker.ActivateWindow"/>, which attaches to the
+    /// foreground thread's input queue to defeat Windows' foreground lock — a
+    /// plain SetForegroundWindow from a background/topmost app (like the dock) is
+    /// frequently refused, leaving the target window merely flashing in the
+    /// taskbar instead of coming forward.</summary>
     public static void Activate(IntPtr hWnd)
     {
         if (hWnd == IntPtr.Zero)
             return;
         try
         {
-            if (IsIconic(hWnd))
-                ShowWindow(hWnd, SW_RESTORE);
-            SetForegroundWindow(hWnd);
+            RunningAppTracker.ActivateWindow(hWnd);
         }
         catch
         {
             // Best effort.
         }
+    }
+
+    /// <summary>Finds the first VISIBLE alt-tab window owned by a process whose
+    /// executable FILE NAME matches <paramref name="exePath"/> and brings it to
+    /// the foreground. Used to activate a desktop-bridge app (e.g. iQiyi) whose
+    /// real window is owned by a differently-pathed instance of the launcher exe.
+    /// Returns true when a window was activated.</summary>
+    public static bool ActivateWindowByExeName(string exePath)
+    {
+        string targetName;
+        try { targetName = Path.GetFileName(exePath); }
+        catch { return false; }
+        if (string.IsNullOrEmpty(targetName))
+            return false;
+
+        IntPtr found = IntPtr.Zero;
+        int ownPid = Environment.ProcessId;
+        try
+        {
+            EnumWindows((hWnd, _) =>
+            {
+                if (!IsAltTabWindow(hWnd))
+                    return true;
+                if (GetWindowThreadProcessId(hWnd, out uint pid) == 0 || pid == ownPid)
+                    return true;
+                if (string.IsNullOrWhiteSpace(GetWindowTitle(hWnd)))
+                    return true;
+                string? path = GetProcessInfo(pid, out string? _procAumid);
+                if (string.IsNullOrWhiteSpace(path))
+                    return true;
+                try
+                {
+                    if (string.Equals(Path.GetFileName(path), targetName,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = hWnd;
+                        return false;   // stop enumerating
+                    }
+                }
+                catch { /* ignore a malformed path */ }
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (found == IntPtr.Zero)
+            return false;
+        RunningAppTracker.ActivateWindow(found);
+        return true;
     }
 
     /// <summary>Requests that the window close (posts WM_CLOSE, same as clicking

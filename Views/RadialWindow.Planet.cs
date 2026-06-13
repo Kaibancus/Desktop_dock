@@ -27,7 +27,7 @@ public partial class RadialWindow
             Cursor = Cursors.Hand,
             Background = Brushes.Transparent, // keep the full square hit-testable
             ToolTip = "设置",
-            Opacity = 0.78,                   // planet slightly translucent
+            Opacity = 0.90,                   // planet nearly opaque -> crisper, less diffuse
             RenderTransformOrigin = new Point(0.5, 0.5),
         };
 
@@ -205,8 +205,8 @@ public partial class RadialWindow
         }
         hexGeo.Figures.Add(hexFig);
 
-        // Base hexagon: a brighter blue-grey storm so it stands out from the
-        // amber bands without being a dark hole.
+        // Base hexagon: a blue-grey storm, kept fairly faint so it tints the pole
+        // rather than standing out as a hard cap against the amber bands.
         Color hexBase = Color.FromRgb(0x66, 0x6E, 0x72);
         Color hexLight = Color.FromRgb(0x93, 0x9A, 0x98);
         Color hexDark = Color.FromRgb(0x45, 0x49, 0x4C);
@@ -217,11 +217,12 @@ public partial class RadialWindow
             Fill = new SolidColorBrush(hexBase),
             Data = hexGeo,
             IsHitTestVisible = false,
+            Opacity = 0.62,                    // softened so the amber pole shows through
         };
         disc.Children.Add(hex);
 
         // Turbulence inside the hexagon, clipped to its outline.
-        var hexInner = new Canvas { IsHitTestVisible = false, Clip = hexGeo };
+        var hexInner = new Canvas { IsHitTestVisible = false, Clip = hexGeo, Opacity = 0.62 };
 
         // Wavy concentric bands within the polar storm.
         double HexEdge(double baseR, double theta, double seed)
@@ -435,9 +436,11 @@ public partial class RadialWindow
                 {
                     RepeatBehavior = RepeatBehavior.Forever,
                 };
-                // Perpetual idle spin: tick at the oversampled rate so the slow
-                // rotation stays smooth and doesn't beat against the present.
-                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(loop, App.AnimationFrameRate);
+                // Perpetual idle spin: tick at the display's native rate (not the
+                // 2x oversample) to halve the idle cost on a 60 Hz panel; the slow
+                // step per frame makes the un-oversampled beat imperceptible. The
+                // brief hover ramp below keeps the oversampled rate for crispness.
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(loop, App.AmbientFrameRate);
                 discRotate.BeginAnimation(RotateTransform.AngleProperty, loop);
             }
 
@@ -497,8 +500,8 @@ public partial class RadialWindow
             {
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(120, 0xF2, 0xD4, 0x96), 0.0),
-                    new GradientStop(Color.FromArgb(64, 0xDA, 0xB2, 0x72), 0.46),
+                    new GradientStop(Color.FromArgb(95, 0xF2, 0xD4, 0x96), 0.0),
+                    new GradientStop(Color.FromArgb(48, 0xDA, 0xB2, 0x72), 0.46),
                     new GradientStop(Color.FromArgb(0, 0, 0, 0), 1.0),
                 },
             },

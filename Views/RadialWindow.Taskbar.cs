@@ -450,8 +450,8 @@ public partial class RadialWindow
         var scale = (ScaleTransform)root.RenderTransform;
         var dur = new Duration(TimeSpan.FromMilliseconds(110));
 
-        // Hover-thumbnail popup: show live window previews when this program has
-        // more than one open window (so the user can pick which to bring up).
+        // Hover-thumbnail popup: show a live window preview even with a single
+        // open window so the user can peek/pick any running app.
         string? aumid = app.Aumid;
         string appPath = app.Path;
         var preview = new WindowPreviewPopup(
@@ -459,7 +459,7 @@ public partial class RadialWindow
             () => aumid != null
                 ? WindowPreviewService.GetWindowsByAumid(aumid)
                 : WindowPreviewService.GetWindows(appPath),
-            minWindows: 2,
+            minWindows: 1,
             onActivated: HidePanel);
         _taskbarPopups.Add(preview);
 

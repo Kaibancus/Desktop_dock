@@ -2,7 +2,9 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using Polaris.Models;
 using Polaris.Services;
 
@@ -41,9 +43,66 @@ public partial class SettingsWindow : Window
         _config = config;
         _persist = persist;
         InitializeComponent();
+        ApplyColorMode();
 
         LoadSettingsIntoUi();
         _loaded = true;
+    }
+
+    /// <summary>Fills the window's brush resources from a light or dark palette
+    /// chosen by the current Windows app theme, so the settings window matches
+    /// the system appearance. The XAML references every colour via
+    /// DynamicResource, so overwriting the keys here restyles the whole window
+    /// (background, cards, fields, text, accent) at construction time.</summary>
+    private void ApplyColorMode()
+    {
+        bool light = IsSystemLightTheme();
+        void Set(string key, string hex) =>
+            Resources[key] = new SolidColorBrush(
+                (Color)ColorConverter.ConvertFromString(hex));
+
+        if (light)
+        {
+            Set("WindowBg",        "#FFF3F3F6");
+            Set("CardBrush",       "#FFFFFFFF");
+            Set("FieldBrush",      "#FFECECEF");
+            Set("FieldHoverBrush", "#FFE2E2E8");
+            Set("LineBrush",       "#FFD7D7DE");
+            Set("TextBrush",       "#FF1B1B1F");
+            Set("SubtleBrush",     "#FF6A6A73");
+            Set("AccentBrush",     "#FF3D6FE0");
+            Set("AccentHoverBrush", "#FF2F5FD0");
+        }
+        else
+        {
+            Set("WindowBg",        "#FF1B1B20");
+            Set("CardBrush",       "#FF26262E");
+            Set("FieldBrush",      "#FF32323C");
+            Set("FieldHoverBrush", "#FF3D3D49");
+            Set("LineBrush",       "#FF3A3A46");
+            Set("TextBrush",       "#FFECECEC");
+            Set("SubtleBrush",     "#FF9A9AA6");
+            Set("AccentBrush",     "#FF5B8CFF");
+            Set("AccentHoverBrush", "#FF6F9BFF");
+        }
+    }
+
+    /// <summary>True when Windows is set to the LIGHT app theme. Reads
+    /// HKCU\…\Themes\Personalize\AppsUseLightTheme (1 = light, 0 = dark);
+    /// defaults to dark when the value is missing or unreadable.</summary>
+    private static bool IsSystemLightTheme()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            var v = key?.GetValue("AppsUseLightTheme");
+            return v is int i && i != 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void LoadSettingsIntoUi()

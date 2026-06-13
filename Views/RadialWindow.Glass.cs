@@ -142,16 +142,17 @@ public partial class RadialWindow
             Width = gs,
             Height = gs,
             CornerRadius = new CornerRadius(gs / 2),
-            // A dark glassy bead with a bright rim so the gear is clearly visible
-            // against both the dock and a plain white desktop behind it.
+            // Frosted-glass bead: a translucent milky-white pane (no black fill)
+            // so the gear reads as a piece of the same liquid glass as the dock.
             Background = new LinearGradientBrush
             {
                 StartPoint = new Point(0, 0),
                 EndPoint = new Point(0, 1),
                 GradientStops =
                 {
-                    new GradientStop(Color.FromArgb(0xE6, 0x3C, 0x3C, 0x3C), 0.0),
-                    new GradientStop(Color.FromArgb(0xF2, 0x0A, 0x0A, 0x0A), 1.0),
+                    new GradientStop(Color.FromArgb(0x70, 0xFF, 0xFF, 0xFF), 0.0),
+                    new GradientStop(Color.FromArgb(0x42, 0xEA, 0xF2, 0xFF), 0.5),
+                    new GradientStop(Color.FromArgb(0x5C, 0xD6, 0xE4, 0xF6), 1.0),
                 },
             },
             BorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xEA, 0xF4, 0xFF)),
@@ -170,32 +171,29 @@ public partial class RadialWindow
                 Text = "⚙",
                 FontSize = gs * 0.58,
                 FontWeight = FontWeights.SemiBold,
-                // Brushed-metal gear: a vertical silver gradient (bright top
-                // highlight → mid steel → dark bottom) reads as a polished metal
-                // part sitting inside the glass bezel.
+                // Frosted-glass gear: a soft translucent cool-white glyph (no
+                // metal) so it reads as the same frosted glass as the bead.
                 Foreground = new LinearGradientBrush
                 {
                     StartPoint = new Point(0, 0),
                     EndPoint = new Point(0, 1),
                     GradientStops =
                     {
-                        new GradientStop(Color.FromRgb(0xFF, 0xFF, 0xFF), 0.0),
-                        new GradientStop(Color.FromRgb(0xDC, 0xE3, 0xEC), 0.22),
-                        new GradientStop(Color.FromRgb(0x9A, 0xA6, 0xB4), 0.5),
-                        new GradientStop(Color.FromRgb(0x5C, 0x66, 0x74), 0.78),
-                        new GradientStop(Color.FromRgb(0x30, 0x37, 0x42), 1.0),
+                        new GradientStop(Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF), 0.0),
+                        new GradientStop(Color.FromArgb(0xE2, 0xEA, 0xF2, 0xFF), 0.55),
+                        new GradientStop(Color.FromArgb(0xD2, 0xCF, 0xDF, 0xF0), 1.0),
                     },
                 },
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                // A tight dark bevel under the glyph gives the metal depth.
+                // Soft, even shade (no metallic bevel) so the frosted glyph keeps
+                // a gentle outline on the light bead.
                 Effect = new System.Windows.Media.Effects.DropShadowEffect
                 {
-                    BlurRadius = 2,
-                    ShadowDepth = 1.2,
-                    Direction = 270,
-                    Opacity = 0.85,
-                    Color = Color.FromRgb(0x05, 0x08, 0x0E),
+                    BlurRadius = 3,
+                    ShadowDepth = 0,
+                    Opacity = 0.32,
+                    Color = Color.FromRgb(0x2A, 0x33, 0x40),
                 },
             },
         };

@@ -208,9 +208,57 @@ public static class ShellNamespace
         });
     }
 
+    /// <summary>For a non-packaged AppsFolder launcher (iQiyi, VS Code… stored as
+    /// <c>shell:AppsFolder\&lt;id&gt;</c>) that resolves to a REAL executable,
+    /// launches that exe directly — far more reliable than
+    /// <c>explorer.exe shell:AppsFolder\&lt;id&gt;</c>, which can silently no-op
+    /// for desktop-bridge apps (e.g. iQiyi). A running single-instance app simply
+    /// focuses its existing window. Returns true when it launched the exe.
+    /// Returns false for genuine UWP apps (no file-system target) and shell-hosted
+    /// items (explorer.exe), which the caller then opens via <see cref="Launch"/>.</summary>
+    public static bool TryLaunchAppsFolderTargetExe(string path, string? arguments)
+    {
+        try
+        {
+            string? aumid = WindowPreviewService.TryGetLauncherAumid(path, arguments);
+            if (string.IsNullOrEmpty(aumid))
+                return false;
+            string? exe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+            if (string.IsNullOrEmpty(exe))
+                return false;
+            if (string.Equals(Path.GetFileName(exe), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+                return false;   // shell-hosted (File Explorer…) → caller uses Launch()
+            if (!File.Exists(exe))
+                return false;
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exe,
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? string.Empty,
+                UseShellExecute = true,
+            };
+            var started = System.Diagnostics.Process.Start(psi);
+            RunningAppTracker.EnsureRestoredWhenReady(started);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>Extracts a high-resolution (jumbo) icon for a shell token.</summary>
     public static BitmapSource? GetIcon(string token)
     {
+        // Packaged (UWP) AppsFolder items — e.g. Settings
+        // (shell:AppsFolder\windows.immersivecontrolpanel_…) — have NO usable
+        // entry in the jumbo system image list (it returns a blank placeholder),
+        // so the legacy path below renders them empty. IShellItemImageFactory
+        // asks the shell to compose the actual app tile/logo and works for every
+        // shell item, so try it first and only fall back to the image list.
+        var viaFactory = GetIconViaImageFactory(token);
+        if (viaFactory != null)
+            return viaFactory;
+
         IntPtr pidl = IntPtr.Zero;
         try
         {
@@ -252,6 +300,142 @@ public static class ShellNamespace
         {
             if (pidl != IntPtr.Zero) Marshal.FreeCoTaskMem(pidl);
         }
+    }
+
+    /// <summary>Renders a shell item's icon/tile via IShellItemImageFactory at
+    /// 256×256. Unlike the system image list this composes the real logo for
+    /// packaged (UWP) apps, so items like Settings no longer render blank.
+    /// Returns null when the item has no parsing name or the shell declines.</summary>
+    private static BitmapSource? GetIconViaImageFactory(string token)
+    {
+        IShellItemImageFactory? factory = null;
+        IntPtr hbm = IntPtr.Zero;
+        try
+        {
+            var iid = IID_IShellItemImageFactory;
+            int hr = SHCreateItemFromParsingName(token, IntPtr.Zero, ref iid, out factory);
+            if (hr != 0 || factory == null)
+                return null;
+
+            var size = new SIZE { cx = 256, cy = 256 };
+            // SIIGBF_BIGGERSIZEOK lets the shell hand back its largest available
+            // asset (then we downscale in the UI) for the crispest result.
+            hr = factory.GetImage(size, SIIGBF_BIGGERSIZEOK, out hbm);
+            if (hr != 0 || hbm == IntPtr.Zero)
+                return null;
+
+            var src = HBitmapToBitmapSource(hbm);
+            src?.Freeze();
+            return src;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (hbm != IntPtr.Zero) DeleteObject(hbm);
+            if (factory != null) Marshal.ReleaseComObject(factory);
+        }
+    }
+
+    /// <summary>Converts a 32-bpp top-down/bottom-up HBITMAP (as returned by
+    /// IShellItemImageFactory, with a real alpha channel) into a BGRA32
+    /// <see cref="BitmapSource"/>, preserving transparency. Reading the bits via
+    /// GetDIBits (rather than Imaging.CreateBitmapSourceFromHBitmap) keeps the
+    /// alpha channel, so packaged-app logos don't render on a black box.</summary>
+    private static BitmapSource? HBitmapToBitmapSource(IntPtr hbm)
+    {
+        var bm = new BITMAP();
+        if (GetObject(hbm, Marshal.SizeOf<BITMAP>(), ref bm) == 0)
+            return null;
+        int w = bm.bmWidth, h = bm.bmHeight;
+        if (w <= 0 || h <= 0)
+            return null;
+
+        var bi = new BITMAPINFO
+        {
+            biSize = 40,              // sizeof(BITMAPINFOHEADER)
+            biWidth = w,
+            biHeight = -h,            // negative => top-down rows
+            biPlanes = 1,
+            biBitCount = 32,
+            biCompression = 0,        // BI_RGB
+        };
+
+        int stride = w * 4;
+        byte[] bits = new byte[stride * h];
+        IntPtr hdc = GetDC(IntPtr.Zero);
+        try
+        {
+            if (GetDIBits(hdc, hbm, 0, (uint)h, bits, ref bi, 0) == 0)
+                return null;
+        }
+        finally
+        {
+            ReleaseDC(IntPtr.Zero, hdc);
+        }
+
+        // IShellItemImageFactory returns straight (non-premultiplied) BGRA; WPF's
+        // Bgra32 also expects straight alpha, so the buffer maps directly.
+        var src = System.Windows.Media.Imaging.BitmapSource.Create(
+            w, h, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, bits, stride);
+        return src;
+    }
+
+    private const int SIIGBF_BIGGERSIZEOK = 0x1;
+    private static Guid IID_IShellItemImageFactory = new("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHCreateItemFromParsingName(string pszPath, IntPtr pbc,
+        ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory? ppv);
+
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("gdi32.dll")] private static extern int GetObject(IntPtr hgdiobj, int cbBuffer, ref BITMAP lpvObject);
+    [DllImport("gdi32.dll")]
+    private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint uStartScan, uint cScanLines,
+        byte[] lpvBits, ref BITMAPINFO lpbi, uint uUsage);
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SIZE { public int cx; public int cy; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAP
+    {
+        public int bmType;
+        public int bmWidth;
+        public int bmHeight;
+        public int bmWidthBytes;
+        public ushort bmPlanes;
+        public ushort bmBitsPixel;
+        public IntPtr bmBits;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFO
+    {
+        public int biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public int biCompression;
+        public int biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public int biClrUsed;
+        public int biClrImportant;
+        // Color table (unused for BI_RGB 32bpp), padded so GetDIBits has room.
+        public int colors0;
+    }
+
+    [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItemImageFactory
+    {
+        [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm);
     }
 
     private static string GetName(IntPtr pidl, int sigdn)

@@ -7,9 +7,10 @@
         ResizeMode="NoResize"
         Icon="pack://application:,,,/Assets/app.ico"
         FontFamily="Segoe UI, Microsoft YaHei UI"
-        Background="#FF1B1B20">
+        Background="{DynamicResource WindowBg}">
     <Window.Resources>
-        <!-- Palette -->
+        <!-- Palette (overridden at runtime by ApplyColorMode for light/dark) -->
+        <SolidColorBrush x:Key="WindowBg" Color="#FF1B1B20"/>
         <SolidColorBrush x:Key="CardBrush" Color="#FF26262E"/>
         <SolidColorBrush x:Key="FieldBrush" Color="#FF32323C"/>
         <SolidColorBrush x:Key="FieldHoverBrush" Color="#FF3D3D49"/>
@@ -21,28 +22,28 @@
 
         <!-- Base text -->
         <Style TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="FontSize" Value="13"/>
         </Style>
 
         <Style x:Key="SectionTitle" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource SubtleBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource SubtleBrush}"/>
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Margin" Value="2,0,0,8"/>
         </Style>
 
         <Style x:Key="RowLabel" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="FontSize" Value="13"/>
         </Style>
 
         <!-- Pill button -->
         <Style x:Key="PillButton" TargetType="Button">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
-            <Setter Property="Background" Value="{StaticResource FieldBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource FieldBrush}"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Padding" Value="18,0"/>
             <Setter Property="Cursor" Value="Hand"/>
@@ -51,17 +52,17 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Bd" CornerRadius="8" Background="{TemplateBinding Background}"
-                                BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+                                BorderBrush="{DynamicResource LineBrush}" BorderThickness="1">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
                                               Margin="{TemplateBinding Padding}"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource FieldHoverBrush}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource FieldHoverBrush}"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentBrush}"/>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -71,7 +72,7 @@
 
         <Style x:Key="AccentButton" TargetType="Button">
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FontSize" Value="13"/>
@@ -83,7 +84,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentHoverBrush}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentHoverBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -94,21 +95,21 @@
         <!-- Toggle-switch CheckBox -->
         <Style TargetType="CheckBox">
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="CheckBox">
                         <Border x:Name="Track" Width="42" Height="24" CornerRadius="12"
-                                Background="{StaticResource FieldBrush}"
-                                BorderBrush="{StaticResource LineBrush}" BorderThickness="1"
+                                Background="{DynamicResource FieldBrush}"
+                                BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
                                 HorizontalAlignment="Left">
-                            <Ellipse x:Name="Knob" Width="16" Height="16" Fill="{StaticResource SubtleBrush}"
+                            <Ellipse x:Name="Knob" Width="16" Height="16" Fill="{DynamicResource SubtleBrush}"
                                      HorizontalAlignment="Left" Margin="4,0,0,0"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="Track" Property="Background" Value="{StaticResource AccentBrush}"/>
-                                <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                <Setter TargetName="Track" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                 <Setter TargetName="Knob" Property="Fill" Value="White"/>
                                 <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
                                 <Setter TargetName="Knob" Property="Margin" Value="0,0,4,0"/>
@@ -127,13 +128,13 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
                         <Grid VerticalAlignment="Center">
-                            <Border Height="4" CornerRadius="2" Background="{StaticResource FieldBrush}"/>
+                            <Border Height="4" CornerRadius="2" Background="{DynamicResource FieldBrush}"/>
                             <Track x:Name="PART_Track">
                                 <Track.DecreaseRepeatButton>
                                     <RepeatButton Command="Slider.DecreaseLarge">
                                         <RepeatButton.Template>
                                             <ControlTemplate TargetType="RepeatButton">
-                                                <Border Height="4" CornerRadius="2" Background="{StaticResource AccentBrush}"/>
+                                                <Border Height="4" CornerRadius="2" Background="{DynamicResource AccentBrush}"/>
                                             </ControlTemplate>
                                         </RepeatButton.Template>
                                     </RepeatButton>
@@ -151,7 +152,7 @@
                                     <Thumb>
                                         <Thumb.Template>
                                             <ControlTemplate TargetType="Thumb">
-                                                <Ellipse Width="16" Height="16" Fill="White"/>
+                                                <Ellipse Width="16" Height="16" Fill="{DynamicResource AccentBrush}"/>
                                             </ControlTemplate>
                                         </Thumb.Template>
                                     </Thumb>
@@ -165,7 +166,7 @@
 
         <!-- ComboBox item -->
         <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="Padding" Value="10,7"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="Template">
@@ -177,7 +178,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsHighlighted" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentBrush}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -187,7 +188,7 @@
 
         <!-- Flat ComboBox -->
         <Style TargetType="ComboBox">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="Height" Value="34"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
@@ -199,11 +200,11 @@
                                 IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
                                 <ToggleButton.Template>
                                     <ControlTemplate TargetType="ToggleButton">
-                                        <Border x:Name="Bd" CornerRadius="8" Background="{StaticResource FieldBrush}"
-                                                BorderBrush="{StaticResource LineBrush}" BorderThickness="1"/>
+                                        <Border x:Name="Bd" CornerRadius="8" Background="{DynamicResource FieldBrush}"
+                                                BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"/>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource FieldHoverBrush}"/>
+                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource FieldHoverBrush}"/>
                                             </Trigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>
@@ -215,14 +216,14 @@
                                 ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
                                 Margin="12,0,32,0" VerticalAlignment="Center" HorizontalAlignment="Left"/>
                             <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,14,0"
-                                  Data="M0,0 L8,0 L4,5 Z" Fill="{StaticResource SubtleBrush}"/>
+                                  Data="M0,0 L8,0 L4,5 Z" Fill="{DynamicResource SubtleBrush}"/>
                             <Popup Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
                                    AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
                                 <Grid SnapsToDevicePixels="True"
                                       MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
                                       MaxHeight="{TemplateBinding MaxDropDownHeight}">
-                                    <Border Background="{StaticResource CardBrush}"
-                                            BorderBrush="{StaticResource LineBrush}" BorderThickness="1"
+                                    <Border Background="{DynamicResource CardBrush}"
+                                            BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
                                             CornerRadius="8" Margin="0,4,0,0"/>
                                     <ScrollViewer Margin="6,10,6,10" SnapsToDevicePixels="True">
                                         <StackPanel IsItemsHost="True"
@@ -250,20 +251,20 @@
         <StackPanel Grid.Row="0" Margin="2,0,0,16">
             <TextBlock Text="Polaris 设置" FontSize="20" FontWeight="SemiBold"/>
             <TextBlock x:Name="HintText" Text="提示：长按呼出键在屏幕中心呼出圆盘"
-                       Foreground="{StaticResource SubtleBrush}" FontSize="12" Margin="0,4,0,0"/>
+                       Foreground="{DynamicResource SubtleBrush}" FontSize="12" Margin="0,4,0,0"/>
         </StackPanel>
 
         <!-- 外观 -->
-        <Border Grid.Row="1" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,12">
+        <Border Grid.Row="1" Background="{DynamicResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,12">
             <StackPanel>
-                <TextBlock Text="外观" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="外观" Style="{DynamicResource SectionTitle}"/>
 
                 <Grid Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="主题" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="主题" Style="{DynamicResource RowLabel}"/>
                     <ComboBox Grid.Column="1" x:Name="ThemeCombo" SelectionChanged="OnThemeChanged"/>
                 </Grid>
 
@@ -272,7 +273,7 @@
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" x:Name="TransparencyLabel" Text="面板透明度" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" x:Name="TransparencyLabel" Text="面板透明度" Style="{DynamicResource RowLabel}"/>
                     <Slider Grid.Column="1" x:Name="TransparencySlider" Minimum="0.0" Maximum="0.95"
                             VerticalAlignment="Center" ValueChanged="OnSettingChanged"/>
                 </Grid>
@@ -282,7 +283,7 @@
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" x:Name="IconSizeLabel" Text="图标大小" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" x:Name="IconSizeLabel" Text="图标大小" Style="{DynamicResource RowLabel}"/>
                     <Slider Grid.Column="1" x:Name="IconSizeSlider" Minimum="40" Maximum="96"
                             VerticalAlignment="Center" ValueChanged="OnSettingChanged"/>
                 </Grid>
@@ -290,16 +291,16 @@
         </Border>
 
         <!-- 交互 -->
-        <Border Grid.Row="2" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,12">
+        <Border Grid.Row="2" Background="{DynamicResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,12">
             <StackPanel>
-                <TextBlock Text="交互" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="交互" Style="{DynamicResource SectionTitle}"/>
 
                 <Grid Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="呼出按键" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="呼出按键" Style="{DynamicResource RowLabel}"/>
                     <ComboBox Grid.Column="1" x:Name="TriggerKeyCombo" SelectionChanged="OnTriggerKeyChanged"/>
                 </Grid>
 
@@ -308,7 +309,7 @@
                         <ColumnDefinition Width="150"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="快捷程序坞位置" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="快捷程序坞位置" Style="{DynamicResource RowLabel}"/>
                     <ComboBox Grid.Column="1" x:Name="DockPositionCombo" SelectionChanged="OnDockPositionChanged"/>
                 </Grid>
 
@@ -317,7 +318,7 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="在多个显示器上显示" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="在所有显示器上显示" Style="{DynamicResource RowLabel}"/>
                     <CheckBox Grid.Column="1" x:Name="MultiMonitorCheck" VerticalAlignment="Center"
                               Checked="OnMultiMonitorChanged" Unchecked="OnMultiMonitorChanged"/>
                 </Grid>
@@ -325,16 +326,16 @@
         </Border>
 
         <!-- 系统 -->
-        <Border Grid.Row="3" Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,16">
+        <Border Grid.Row="3" Background="{DynamicResource CardBrush}" CornerRadius="12" Padding="16,14" Margin="0,0,0,16">
             <StackPanel>
-                <TextBlock Text="系统" Style="{StaticResource SectionTitle}"/>
+                <TextBlock Text="系统" Style="{DynamicResource SectionTitle}"/>
 
                 <Grid Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="开机自动启动" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="开机自动启动" Style="{DynamicResource RowLabel}"/>
                     <CheckBox Grid.Column="1" x:Name="StartupCheck" VerticalAlignment="Center"
                               Checked="OnStartupChanged" Unchecked="OnStartupChanged"/>
                 </Grid>
@@ -344,9 +345,9 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="软件更新" Style="{StaticResource RowLabel}"/>
+                    <TextBlock Grid.Column="0" Text="软件更新" Style="{DynamicResource RowLabel}"/>
                     <Button Grid.Column="1" x:Name="CheckUpdateButton" Content="检查更新"
-                            Style="{StaticResource PillButton}" Height="38" Padding="36,0"
+                            Style="{DynamicResource PillButton}" Height="38" Padding="36,0"
                             Click="OnCheckUpdate"/>
                 </Grid>
             </StackPanel>
@@ -354,7 +355,7 @@
 
         <!-- Footer -->
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="关闭" Width="96" Style="{StaticResource AccentButton}" Click="OnClose"/>
+            <Button Content="关闭" Width="96" Style="{DynamicResource AccentButton}" Click="OnClose"/>
         </StackPanel>
     </Grid>
 </Window>

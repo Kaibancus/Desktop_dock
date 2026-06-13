@@ -23,7 +23,6 @@ public static class IconExtractor
         // Virtual shell objects (This PC, Recycle Bin…) have no file path.
         if (ShellNamespace.IsShellToken(path))
             return ShellNamespace.GetIcon(path);
-
         Drawing.Icon? icon = null;
         try
         {
@@ -46,6 +45,25 @@ public static class IconExtractor
         {
             icon?.Dispose();
         }
+    }
+
+    /// <summary>Resolves an icon through a per-dock cache. Crucially it NEVER
+    /// caches a null result, so a transient cold-boot failure (the shell icon
+    /// services aren't ready yet when Polaris auto-starts, which made packaged-app
+    /// icons such as Settings render blank) is retried on the next rebuild instead
+    /// of being frozen blank for the whole session. Both docks share this so the
+    /// caching policy can't diverge.</summary>
+    public static BitmapSource? GetCached(string iconSource,
+        System.Collections.Generic.IDictionary<string, BitmapSource?> cache)
+    {
+        if (string.IsNullOrEmpty(iconSource))
+            return null;
+        if (cache.TryGetValue(iconSource, out var cached))
+            return cached;
+        var bmp = GetIcon(iconSource);
+        if (bmp != null)
+            cache[iconSource] = bmp;
+        return bmp;
     }
 
     private static Drawing.Icon? GetAssociatedIcon(string path)
