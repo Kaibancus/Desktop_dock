@@ -27,6 +27,17 @@ public partial class LeftDockWindow
         return _side == DockSide.Top ? (0.0, amp) : (0.0, -amp);
     }
 
+    /// <summary>Cancels every open or pending hover thumbnail preview the instant a
+    /// launch is committed, so no preview can pop while the dock plays its bounce and
+    /// dismiss fade (the cursor is still parked over the clicked icon).</summary>
+    private void SuppressHoverForLaunch()
+    {
+        HideHoverLabel();
+        ClearRunPopups();
+        foreach (var ic in _pinnedIcons)
+            ic.ClosePreview();
+    }
+
     private void Launch(AppEntry entry, RadialIcon? icon = null)
     {
         if (icon != null)
@@ -35,6 +46,7 @@ public partial class LeftDockWindow
             // launch + dismiss when it finishes. Launching first would bring the
             // target window to the foreground over the dock, hiding the bounce.
             ResetWave();   // settle the wave so it can't fight the bounce transform
+            SuppressHoverForLaunch();   // kill any open/pending thumbnail preview
             _bounceHold = true;
             Panel.SetZIndex(icon, 5000);   // hop above its neighbours
             var (lx, ly) = BounceLift();
@@ -47,6 +59,7 @@ public partial class LeftDockWindow
             icon.PlayLaunchBounce(lx, ly, () =>
             {
                 _bounceHold = false;
+                _dismissing = true;   // block hover from re-magnifying during the fade
                 Panel.SetZIndex(icon, 0);
                 StopBounceFlame();
                 AppLauncher.Launch(entry, null);
@@ -81,6 +94,7 @@ public partial class LeftDockWindow
             return;
         }
         ResetWave();   // settle the wave so it can't fight the bounce transform
+        SuppressHoverForLaunch();   // kill any open/pending thumbnail preview
         scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
         scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
         trans.BeginAnimation(TranslateTransform.XProperty, null);
@@ -104,6 +118,7 @@ public partial class LeftDockWindow
         sy.Completed += (_, _) =>
         {
             _bounceHold = false;
+            _dismissing = true;   // block hover from re-magnifying during the fade
             Panel.SetZIndex(tileRoot, 60);
             StopBounceFlame();
             onDone();
@@ -180,7 +195,7 @@ public partial class LeftDockWindow
         PanelCanvas.Children.Add(layer);
 
         var rng = new Random(0x2B17F3);
-        int count = Math.Max(12, (int)(mainSpan / (22.0 * s)));
+        int count = Math.Max(14, (int)(mainSpan / (19.0 * s)));
         for (int i = 0; i < count; i++)
         {
             double main = mainLo + rng.NextDouble() * mainSpan;
@@ -259,15 +274,15 @@ public partial class LeftDockWindow
         // Two populations: a dense rubble BELT straddling the interior edge, and a
         // sparser scattering of grains spread through the whole dock body so the
         // centre and the screen-edge side aren't bare.
-        int beltCount = Math.Max(14, (int)(span / (9.0 * s)));
-        int bodyCount = Math.Max(14, (int)(span / (9.0 * s)));
+        int beltCount = Math.Max(16, (int)(span / (8.0 * s)));
+        int bodyCount = Math.Max(16, (int)(span / (8.0 * s)));
 
         for (int i = 0; i < beltCount; i++)
         {
             double main = mainLo + rng.NextDouble() * span;
             double g = (rng.NextDouble() + rng.NextDouble() + rng.NextDouble()) / 3.0 - 0.5;
             double cross = beltCross + g * GIcon * 1.05 - GIcon * 0.05;
-            double r = (1.2 + rng.NextDouble() * rng.NextDouble() * 5.2) * s;
+            double r = (1.4 + rng.NextDouble() * rng.NextDouble() * 5.9) * s;
             double alpha = 0.16 + rng.NextDouble() * 0.44;
             AddDebrisRock(layer, main, cross, r, alpha, rng);
         }
@@ -276,7 +291,7 @@ public partial class LeftDockWindow
             double main = mainLo + rng.NextDouble() * span;
             // Uniform across the body, from the screen-edge side out to the belt.
             double cross = innerCross + rng.NextDouble() * Math.Max(1.0, beltCross - innerCross);
-            double r = (1.0 + rng.NextDouble() * rng.NextDouble() * 3.6) * s;
+            double r = (1.2 + rng.NextDouble() * rng.NextDouble() * 4.1) * s;
             double alpha = 0.12 + rng.NextDouble() * 0.34;
             AddDebrisRock(layer, main, cross, r, alpha, rng);
         }

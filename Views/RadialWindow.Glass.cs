@@ -135,6 +135,10 @@ public partial class RadialWindow
             PanelCanvas.Children.Add(r);
         }
 
+        // Cool light source orbiting the dock centre, lighting the glass from a
+        // slowly drifting direction (one revolution per minute).
+        BuildGlassOrbitLight(left, top, w, totalH, radius);
+
         // Settings gear in the panel's top-right corner.
         double gs = Math.Max(40, icon * 0.72);
         var gear = new Border
@@ -297,8 +301,7 @@ public partial class RadialWindow
 
     /// <summary>Draws a soft, glass-friendly rounded border around the resident
     /// region — the top two rows of the grid — so it reads as a distinct
-    /// "always-pinned" zone that mirrors the left dock. Added to the supplied
-    /// scroll layer (behind the icons) so it tracks the grid as it scrolls.</summary>
+    /// "always-pinned" zone that mirrors the left dock.</summary>
     private void DrawResidentRegionBorder(Canvas layer)
     {
         if (_config.Apps.Count == 0)

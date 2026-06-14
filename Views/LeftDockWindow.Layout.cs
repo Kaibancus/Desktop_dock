@@ -214,7 +214,7 @@ public partial class LeftDockWindow
             // flame's edge softness identical to the dock's — they are literally the
             // same blurred silhouette — and fuses them into one black mass instead
             // of two stacked semi-transparent layers.
-            double slabFeather = Math.Max(12.0, Math.Min(_slabMainLen, _bodyCrossLen) * 0.19);
+            double slabFeather = Math.Max(16.0, Math.Min(_slabMainLen, _bodyCrossLen) * 0.24);
             _flameFeather = slabFeather;
             var darkGroup = new Canvas
             {
@@ -222,7 +222,7 @@ public partial class LeftDockWindow
                 IsHitTestVisible = false,
                 Effect = new System.Windows.Media.Effects.BlurEffect
                 {
-                    Radius = Math.Max(8.0, slabFeather),
+                    Radius = Math.Max(12.0, slabFeather),
                     KernelType = System.Windows.Media.Effects.KernelType.Gaussian,
                 },
             };
@@ -287,6 +287,8 @@ public partial class LeftDockWindow
             // Give the clear-glass side dock a raised, chiselled edge so it reads
             // as a 3-D slab rather than a flat sheet.
             DrawGlassBevel(r.X, r.Y, r.Width, r.Height, trayRadius, opacity);
+            // Cool light source orbiting the slab centre (one revolution / minute).
+            BuildGlassOrbitLight(r, trayRadius);
         }
         if (_hasRunningArea)
             DrawSeam(_seamMain, opacity);

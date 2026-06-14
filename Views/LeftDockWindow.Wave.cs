@@ -25,9 +25,11 @@ public partial class LeftDockWindow
     /// loop. That loop was the source of the hover flicker/jump.</summary>
     private void UpdateWaveFromPointer(Point p)
     {
-        // While a launch bounce is playing, keep the wave fully quiescent — a
-        // wave restart would call SetMagnify and cancel the bounce animation.
-        if (_bounceHold)
+        // While a launch bounce is playing, or while the dock is dismissing after a
+        // launch, keep the wave fully quiescent — a wave restart would call
+        // SetMagnify (re-magnifying the icon under the still-stationary cursor) and
+        // could cancel the bounce animation.
+        if (_bounceHold || _dismissing)
             return;
 
         bool valid = !double.IsNaN(p.X) && !double.IsNaN(p.Y);

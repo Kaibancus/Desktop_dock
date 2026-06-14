@@ -133,6 +133,11 @@ public partial class LeftDockWindow : Window
     // Held true while a clicked icon plays its launch bounce, so the dock can't
     // dismiss out from under the animation before it finishes.
     private bool _bounceHold;
+    // Held true from the moment a launch is committed through to the dock being
+    // fully hidden. While set, all hover interaction (wave magnify, hover label,
+    // thumbnail preview) is suppressed so the only post-launch motion is the dock
+    // dismiss fade — the icon must not re-magnify under a still-stationary cursor.
+    private bool _dismissing;
     // Held true while a right-click context menu is open, so the dock stays put
     // even when the pointer moves off it onto the menu.
     private bool _menuHold;
@@ -451,6 +456,8 @@ public partial class LeftDockWindow : Window
     private void UpdateVisibility()
     {
         bool want = _shownByMain || _shownByEdge || _shownByDrag || _shownByPinned || _bounceHold || _menuHold;
+        if (want)
+            _dismissing = false;   // any reason to stay/become visible ends a launch dismiss
         if (want == _shown)
             return;
         if (want)
@@ -501,7 +508,10 @@ public partial class LeftDockWindow : Window
         fade.Completed += (_, _) =>
         {
             if (!_shown)
+            {
                 PanelCanvas.Visibility = Visibility.Collapsed;
+                _dismissing = false;
+            }
         };
         RootGrid.BeginAnimation(OpacityProperty, fade);
     }
