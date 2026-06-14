@@ -18,9 +18,9 @@
 
 
 
-![演示一](docs/demo1.gif)
+[![演示一 — 点击播放](docs/demo1_poster.jpg)](docs/demo1.mp4)
 
-![演示二](docs/demo2.gif)
+[![演示二 — 点击播放](docs/demo2_poster.jpg)](docs/demo2.mp4)
 
 
 
