@@ -46,6 +46,9 @@ public static class RunningAppTracker
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
     {
@@ -73,6 +76,9 @@ public static class RunningAppTracker
     private const int SM_YVIRTUALSCREEN = 77;
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
+
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
 
     /// <summary>
     /// True when <paramref name="h"/> is a non-iconic window that has no real,
@@ -108,6 +114,23 @@ public static class RunningAppTracker
         int vb = vy + GetSystemMetrics(SM_CYVIRTUALSCREEN);
         bool intersects = r.Left < vr && r.Right > vx && r.Top < vb && r.Bottom > vy;
         return !intersects;
+    }
+
+    /// <summary>
+    /// True when <paramref name="h"/> carries the <c>WS_EX_TOOLWINDOW</c> extended
+    /// style. Such windows are floating palettes / background helpers that never
+    /// appear in Alt-Tab and are never an app's real, user-facing main window.
+    /// Apps that "minimize to the tray" (Tencent Video/QQLive, …) can keep a tiny
+    /// always-visible tool window alive while hiding their real frame; .NET then
+    /// reports that tool window as <see cref="Process.MainWindowHandle"/>.
+    /// Foregrounding it shows nothing, so callers treat it as not-activatable and
+    /// re-launch the app (which triggers the app's own restore).
+    /// </summary>
+    private static bool IsToolWindow(IntPtr h)
+    {
+        if (h == IntPtr.Zero)
+            return false;
+        return (GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
     }
 
     /// <summary>
@@ -386,10 +409,11 @@ public static class RunningAppTracker
         if (h == IntPtr.Zero)
             return false;
 
-        // An app "minimized to the tray" by parking its window off-screen still
-        // exposes a MainWindowHandle; foregrounding it shows nothing. Report
-        // failure so the caller re-launches and triggers the app's restore.
-        if (!IsIconic(h) && IsWindowParkedOffscreen(h))
+        // An app "minimized to the tray" by parking its window off-screen, or by
+        // keeping only a tiny WS_EX_TOOLWINDOW helper visible, still exposes a
+        // MainWindowHandle; foregrounding it shows nothing. Report failure so the
+        // caller re-launches and triggers the app's restore.
+        if (!IsIconic(h) && (IsToolWindow(h) || IsWindowParkedOffscreen(h)))
             return false;
 
         ActivateWindow(h);
