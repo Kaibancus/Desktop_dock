@@ -21,6 +21,51 @@ public partial class RadialIcon : UserControl
     private const double HoverScale = 1.7;
     private const double LabelWidth = 150;
 
+    // The icon plate's decorative brushes / shadow are identical for every icon
+    // of a theme and are never mutated or animated (animations target element
+    // Opacity / transforms, not these objects). Building them once as frozen,
+    // shared resources skips per-icon allocation + change-notification plumbing
+    // and lets WPF reuse a single GPU resource across all icons.
+    private static T Frozen<T>(T f) where T : Freezable { f.Freeze(); return f; }
+
+    private static readonly Brush GlassPlateBg =
+        Frozen(new SolidColorBrush(Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF)));
+    private static readonly Brush SaturnPlateBg =
+        Frozen(new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF)));
+    private static readonly Brush GlassRimBrush = Frozen(new LinearGradientBrush
+    {
+        StartPoint = new Point(0, 0),
+        EndPoint = new Point(1, 1),
+        GradientStops =
+        {
+            new GradientStop(Color.FromArgb(0xC8, 0xFF, 0xFF, 0xFF), 0.0),
+            new GradientStop(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF), 0.45),
+            new GradientStop(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF), 0.6),
+            new GradientStop(Color.FromArgb(0x70, 0xD8, 0xEC, 0xFF), 1.0),
+        },
+    });
+    private static readonly Brush GlassSheenBrush = Frozen(new LinearGradientBrush
+    {
+        StartPoint = new Point(0, 0),
+        EndPoint = new Point(0.85, 1),
+        GradientStops =
+        {
+            new GradientStop(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF), 0.0),
+            new GradientStop(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF), 0.22),
+            new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.5),
+            new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
+        },
+    });
+    private static readonly System.Windows.Media.Effects.DropShadowEffect GlassPlateShadow =
+        Frozen(new System.Windows.Media.Effects.DropShadowEffect
+        {
+            BlurRadius = 12,
+            ShadowDepth = 2,
+            Direction = 270,
+            Opacity = 0.42,
+            Color = Color.FromRgb(0x05, 0x0A, 0x14),
+        });
+
     public AppEntry Entry { get; }
 
     /// <summary>Raised when the pointer enters / leaves so the parent ring can
@@ -54,28 +99,10 @@ public partial class RadialIcon : UserControl
             // (alpha ≈ 5% = 0x0D) so the icon floats on a barely-there sliver of
             // glass, lifted by a bright luminous rim, a diagonal sheen and a soft
             // drop shadow.
-            IconPlate.Background = new SolidColorBrush(Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF));
+            IconPlate.Background = GlassPlateBg;
             IconPlate.BorderThickness = new Thickness(1.2);
-            IconPlate.BorderBrush = new LinearGradientBrush
-            {
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(1, 1),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(0xC8, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF), 0.45),
-                    new GradientStop(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF), 0.6),
-                    new GradientStop(Color.FromArgb(0x70, 0xD8, 0xEC, 0xFF), 1.0),
-                },
-            };
-            IconPlate.Effect = new System.Windows.Media.Effects.DropShadowEffect
-            {
-                BlurRadius = 12,
-                ShadowDepth = 2,
-                Direction = 270,
-                Opacity = 0.42,
-                Color = Color.FromRgb(0x05, 0x0A, 0x14),
-            };
+            IconPlate.BorderBrush = GlassRimBrush;
+            IconPlate.Effect = GlassPlateShadow;
             // Bake the plate (icon image + drop shadow) into a GPU bitmap cache
             // rendered at 2x so the 1.7x hover zoom upscales a cached texture
             // instead of re-rasterising the drop shadow on the CPU every frame.
@@ -86,18 +113,7 @@ public partial class RadialIcon : UserControl
             };
             // Diagonal glossy sheen across the top-left — the crystal highlight.
             PlateSheen.Visibility = Visibility.Visible;
-            PlateSheen.Background = new LinearGradientBrush
-            {
-                StartPoint = new Point(0, 0),
-                EndPoint = new Point(0.85, 1),
-                GradientStops =
-                {
-                    new GradientStop(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF), 0.0),
-                    new GradientStop(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF), 0.22),
-                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.5),
-                    new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.0),
-                },
-            };
+            PlateSheen.Background = GlassSheenBrush;
         }
         else
         {
@@ -109,13 +125,13 @@ public partial class RadialIcon : UserControl
             // alpha is honoured, so themes can request a softer bloom.
             BlueGlow.Visibility = Visibility.Visible;
             byte glowAlpha = glowColor.A < 0xFF ? glowColor.A : (byte)0x5A;
-            BlueGlow.Background = new SolidColorBrush(
-                Color.FromArgb(glowAlpha, glowColor.R, glowColor.G, glowColor.B));
+            BlueGlow.Background = Frozen(new SolidColorBrush(
+                Color.FromArgb(glowAlpha, glowColor.R, glowColor.G, glowColor.B)));
 
             // Saturn tray: reduce the icon plate to an almost-fully-transparent
             // sliver (alpha ≈ 1%) so the icons appear to rest directly on the
             // black disc with virtually no visible tray.
-            IconPlate.Background = new SolidColorBrush(Color.FromArgb(0x03, 0xFF, 0xFF, 0xFF));
+            IconPlate.Background = SaturnPlateBg;
         }
 
         // Left dock: no tray. Strip the glass plate (background / rim / shadow /

@@ -63,7 +63,6 @@ public partial class App : Application
     // Hot-path state, refreshed on the UI thread (edge poll) so the hook proc only
     // reads simple volatile fields and never touches WPF objects across threads.
     private volatile bool _guardActive;       // taskbar auto-hide AND bottom dock
-    private volatile bool _guardAllMonitors;  // dock summons on every monitor
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -351,7 +350,6 @@ public partial class App : Application
                     ((long)SHAppBarMessage(ABM_GETSTATE, ref abd) & ABS_AUTOHIDE) != 0;
                 _guardActive = autoHide
                     && _leftDock.DockSidePosition == DockSide.Bottom;
-                _guardAllMonitors = _config.Settings.DockOnAllMonitors;
             }
             catch { _guardActive = false; }
             // Suppress the left-edge auto-summon while the settings window is
@@ -394,7 +392,7 @@ public partial class App : Application
                     SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
             }
 
-            const double Reach = 20.0;       // edge sensitivity in DIPs
+            const double Reach = 8.0;        // edge sensitivity in DIPs
             const double Band = 0.25;        // exclude the outer 25% at each end
             double bandV = mon.Height * Band;
             double bandH = mon.Width * Band;
@@ -504,7 +502,10 @@ public partial class App : Application
                     if (GetMonitorInfo(hMon, ref mi))
                     {
                         bool isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-                        if (_guardAllMonitors || isPrimary)
+                        // Only ever guard the PRIMARY monitor's bottom edge. The
+                        // taskbar-reveal mask must never block the bottom edge of a
+                        // secondary display, even when the dock shows on all monitors.
+                        if (isPrimary)
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
                             double bandStart = mi.rcMonitor.Left + w * 0.25;
@@ -523,12 +524,22 @@ public partial class App : Application
                             // bottom is cut) so horizontal motion stays free, and it
                             // is released the moment the cursor leaves the band so
                             // the outer 50% can still summon the taskbar.
+                            //
+                            // The clip's TOP is the virtual-screen top, not this
+                            // monitor's top: a single ClipCursor rect would otherwise
+                            // trap the cursor against the primary monitor's top edge
+                            // in the centre band, blocking it from crossing UP into a
+                            // monitor positioned above the primary. Extending the top
+                            // to the whole virtual desktop leaves the upward path free
+                            // (the cursor is still kept on real display surface) while
+                            // only the bottom edge stays clamped.
                             if (pt.X >= bandStart && pt.X <= bandEnd)
                             {
+                                const int SM_YVIRTUALSCREEN = 77;
                                 var clip = new RECT
                                 {
                                     Left = mi.rcMonitor.Left,
-                                    Top = mi.rcMonitor.Top,
+                                    Top = GetSystemMetrics(SM_YVIRTUALSCREEN),
                                     Right = mi.rcMonitor.Right,
                                     Bottom = floor,
                                 };
@@ -595,10 +606,10 @@ public partial class App : Application
                     if (GetMonitorInfo(hMon, ref mi))
                     {
                         bool isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-                        // The bottom dock summons on every monitor when "show on
-                        // all monitors" is on, else only the primary — match that
-                        // so we never block the taskbar on a monitor with no dock.
-                        if (_guardAllMonitors || isPrimary)
+                        // Only ever mask the taskbar reveal on the PRIMARY monitor.
+                        // Secondary displays' bottom edges are never blocked, so their
+                        // auto-hide taskbar stays fully reachable.
+                        if (isPrimary)
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
                             double bandStart = mi.rcMonitor.Left + w * 0.25;
@@ -644,8 +655,8 @@ public partial class App : Application
     private const int WH_MOUSE_LL = 14;
     // Pixel rows above the monitor's bottom edge that the cursor is held clear of
     // inside the centre band, so the auto-hide taskbar's reveal tolerance never
-    // fires there. Stays below the dock's 20px edge reach so the dock still pops.
-    private const int TaskbarGuardRows = 5;
+    // fires there. Stays below the dock's edge reach so the dock still pops.
+    private const int TaskbarGuardRows = 3;
     private const int WM_MOUSEMOVE = 0x0200;
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
@@ -704,6 +715,9 @@ public partial class App : Application
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -831,13 +845,17 @@ public partial class App : Application
     /// suppressed and the dock never pops over it, exactly like the auto-hide
     /// taskbar. Mirrors the taskbar's two checks:
     ///   1. <c>SHQueryUserNotificationState</c> — the shell's authoritative
-    ///      "busy / full-screen / presentation" state (normal apps such as a
-    ///      browser or Explorer, even maximised, report ACCEPTS_NOTIFICATIONS and
-    ///      do NOT suppress).
+    ///      signal, but ONLY for the two unambiguous true-full-screen states:
+    ///      an exclusive-mode D3D game (RUNNING_D3D_FULL_SCREEN) or presentation
+    ///      mode (PRESENTATION_MODE). The BUSY and APP states are deliberately NOT
+    ///      treated as full-screen: a merely MAXIMISED window — especially a
+    ///      maximised Store / immersive (UWP) app — also reports APP/BUSY, and the
+    ///      dock must still be summonable over those.
     ///   2. The "rude window" geometry test — foreground window covers the WHOLE
-    ///      monitor rectangle (not just the work area), which is how the shell flags
-    ///      a borderless full-screen window. A maximised window stops at the work
-    ///      area (leaving room for the taskbar) and so is excluded.
+    ///      monitor rectangle (not just the work area) AND has no caption / sizing
+    ///      frame, which is how the shell flags a borderless full-screen window. A
+    ///      maximised window keeps its caption / frame (and, with a visible taskbar,
+    ///      stops at the work area), so it is excluded.
     /// Our own windows, the desktop and the shell are always excluded.</summary>
     private static bool IsFullscreenForeground()
     {
@@ -848,12 +866,16 @@ public partial class App : Application
         if (pid == (uint)Environment.ProcessId)
             return false;   // our own dock / overlay windows
 
-        // 1. Shell notification state — the taskbar's authoritative signal.
+        // 1. Shell notification state — but ONLY the unambiguous true-full-screen
+        // states. BUSY and APP are intentionally excluded: a maximised window
+        // (notably a maximised Store/immersive app) reports those too, and a
+        // maximised window must NOT suppress the dock — only a real full-screen /
+        // borderless one should. Borderless full-screen is caught by the geometry
+        // test below instead.
         try
         {
             if (SHQueryUserNotificationState(out QUNS s) == 0 &&
-                (s == QUNS.BUSY || s == QUNS.RUNNING_D3D_FULL_SCREEN ||
-                 s == QUNS.PRESENTATION_MODE || s == QUNS.APP))
+                (s == QUNS.RUNNING_D3D_FULL_SCREEN || s == QUNS.PRESENTATION_MODE))
                 return true;
         }
         catch { /* fall through to the geometry test */ }

@@ -257,8 +257,9 @@ public partial class LeftDockWindow
             _waveBulge = new System.Windows.Shapes.Path
             {
                 // Pure black to match the slab body's rim colour; fully opaque and
-                // hard-edged — feathering is done once by the group blur.
-                Fill = new SolidColorBrush(Color.FromRgb(0x00, 0x00, 0x00)),
+                // hard-edged — feathering is done once by the group blur. Brushes.Black
+                // is a shared frozen system brush (no per-rebuild allocation).
+                Fill = Brushes.Black,
                 Opacity = 1.0,
                 IsHitTestVisible = false,
                 Clip = clipGeo,

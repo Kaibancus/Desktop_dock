@@ -166,6 +166,11 @@ public partial class LeftDockWindow : Window
     // the magnification wave, so the dark dock background "breathes" with the
     // icons instead of staying a rigid rectangle. Rebuilt each wave frame.
     private System.Windows.Shapes.Path? _waveBulge;
+    // Reusable per-frame scratch for the dark-dock flame silhouette so the wave
+    // render loop allocates nothing each frame (no GC churn during a magnify
+    // wave). The geometry is kept unfrozen and re-Open()ed in place every frame.
+    private Point[]? _flameSilhouette;
+    private StreamGeometry? _flameGeo;
     private bool _darkDock;
     private double _bulgeOpacity = 1.0;
     private double _flameFeather = 10.0;   // flame outline feather, matched to the slab edge fade

@@ -12,6 +12,12 @@ namespace Polaris.Views;
 // RadialWindow.Planet.cs; ring/orbit animation lives in the main file.
 public partial class RadialWindow
 {
+    // Build-once decorative brushes / effects (disc, starfield, bloom) are never
+    // mutated or animated — the twinkle/rotation animate element Opacity/transforms,
+    // not these objects — so freezing them skips change-notification plumbing and
+    // lets WPF share a single immutable GPU resource.
+    private static T Frozen<T>(T f) where T : Freezable { f.Freeze(); return f; }
+
     private void DrawBackingDisc()
     {
         double icon = EffectiveIconSize;
@@ -39,7 +45,7 @@ public partial class RadialWindow
             Width = d,
             Height = d * RingTiltY,
             Opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0),
-            Fill = new RadialGradientBrush
+            Fill = Frozen(new RadialGradientBrush
             {
                 GradientOrigin = new Point(0.5, 0.46),
                 Center = new Point(0.5, 0.5),
@@ -55,7 +61,7 @@ public partial class RadialWindow
                     new GradientStop(Color.FromArgb(0xFF, 0x00, 0x00, 0x00), 0.96),
                     new GradientStop(Color.FromArgb(0xE4, 0x00, 0x00, 0x00), 1.0),
                 },
-            },
+            }),
         };
         // Place the disc at the very bottom so the rotating ring layers (already
         // added to PanelCanvas) render on top of it rather than being hidden.
@@ -210,7 +216,7 @@ public partial class RadialWindow
             {
                 Width = sz,
                 Height = sz,
-                Fill = new SolidColorBrush(Color.FromArgb(br, 255, 255, 250)),
+                Fill = Frozen(new SolidColorBrush(Color.FromArgb(br, 255, 255, 250))),
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(star, px - sz / 2);
@@ -242,13 +248,13 @@ public partial class RadialWindow
         {
             Width = rMid * 2,
             Height = rMid * 2 * _stackTiltY,
-            Stroke = new SolidColorBrush(WithAlpha(color, alpha)),
+            Stroke = Frozen(new SolidColorBrush(WithAlpha(color, alpha))),
             StrokeThickness = Math.Max(2, thickness),
             IsHitTestVisible = false,
-            Effect = new System.Windows.Media.Effects.BlurEffect
+            Effect = Frozen(new System.Windows.Media.Effects.BlurEffect
             {
                 Radius = Math.Max(8, thickness * 0.6),
-            },
+            }),
         };
         Canvas.SetLeft(glow, _center.X - rMid);
         Canvas.SetTop(glow, _center.Y - rMid * _stackTiltY);
@@ -297,6 +303,7 @@ public partial class RadialWindow
                 new GradientStop(WithAlpha(fadeColor ?? coreColor, 0.0), 1.0),
             },
         };
+        brush.Freeze();
         var glow = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
@@ -361,6 +368,7 @@ public partial class RadialWindow
                 new GradientStop(WithAlpha(spokeCol, 0.0), 1.0),
             },
         };
+        spokeBrush.Freeze();
         var spoke = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
@@ -403,14 +411,14 @@ public partial class RadialWindow
         var halo = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
-            Fill = new RadialGradientBrush
+            Fill = Frozen(new RadialGradientBrush
             {
                 GradientStops =
                 {
                     new GradientStop(Color.FromArgb(95, 0xFF, 0xF6, 0xE2), 0.0),
                     new GradientStop(Color.FromArgb(0, 0xFF, 0xF6, 0xE2), 1.0),
                 },
-            },
+            }),
             Data = new EllipseGeometry(center, dia * 1.9, dia * 1.9),
         };
         halo.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
@@ -420,7 +428,7 @@ public partial class RadialWindow
         var core = new System.Windows.Shapes.Path
         {
             IsHitTestVisible = false,
-            Fill = new SolidColorBrush(Color.FromArgb(200, 0xFF, 0xFB, 0xF0)),
+            Fill = Frozen(new SolidColorBrush(Color.FromArgb(200, 0xFF, 0xFB, 0xF0))),
             Data = new EllipseGeometry(center, dia * 0.5, dia * 0.5),
         };
         core.RenderTransform = RingRevolveTransform(orbit, phaseDeg);
@@ -470,7 +478,7 @@ public partial class RadialWindow
             {
                 Width = rr * 2,
                 Height = rr * 2,
-                Stroke = new SolidColorBrush(WithAlpha(shade, alpha)),
+                Stroke = Frozen(new SolidColorBrush(WithAlpha(shade, alpha))),
                 StrokeThickness = thickness,
                 IsHitTestVisible = false,
             };
@@ -486,7 +494,7 @@ public partial class RadialWindow
             {
                 Width = rOuter * 2,
                 Height = rOuter * 2,
-                Stroke = new SolidColorBrush(WithAlpha(Lighten(color, 0.25), aOuter * 0.5)),
+                Stroke = Frozen(new SolidColorBrush(WithAlpha(Lighten(color, 0.25), aOuter * 0.5))),
                 StrokeThickness = 1.0,
                 IsHitTestVisible = false,
             };
@@ -511,7 +519,7 @@ public partial class RadialWindow
             {
                 Width = sz,
                 Height = sz,
-                Fill = new SolidColorBrush(Color.FromArgb(sa, sc.R, sc.G, sc.B)),
+                Fill = Frozen(new SolidColorBrush(Color.FromArgb(sa, sc.R, sc.G, sc.B))),
                 IsHitTestVisible = false,
             };
             Canvas.SetLeft(dot, px - sz / 2);

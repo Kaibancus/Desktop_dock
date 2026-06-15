@@ -343,7 +343,7 @@ public partial class LeftDockWindow
         double mainLo = _slabMain, mainHi = _slabMain + _slabMainLen;
         double endPad = GIcon * 0.45, endRamp = GIcon * 1.00;
         static double SS(double e) { e = Math.Clamp(e, 0.0, 1.0); return e * e * (3.0 - 2.0 * e); }
-        var q = new Point[M + 1];   // logical (main, cross) silhouette points
+        var q = _flameSilhouette ??= new Point[M + 1];   // reused silhouette buffer
         for (int k = 0; k <= M; k++)
         {
             double x = -1.0 + 2.0 * k / M;
@@ -367,7 +367,10 @@ public partial class LeftDockWindow
             q[i + 1].X - (q[Math.Min(M, i + 2)].X - q[i].X) / 6.0,
             q[i + 1].Y - (q[Math.Min(M, i + 2)].Y - q[i].Y) / 6.0);
 
-        var geo = new StreamGeometry();
+        // Reuse a single unfrozen StreamGeometry, rewriting it in place each
+        // frame, instead of allocating + freezing a fresh geometry per frame.
+        // Output is pixel-identical; it just removes the per-frame allocation.
+        var geo = _flameGeo ??= new StreamGeometry();
         using (var ctx = geo.Open())
         {
             ctx.BeginFigure(ToLocal(cm - half, rootC), true, true);
@@ -380,8 +383,8 @@ public partial class LeftDockWindow
                     false, true);
             ctx.LineTo(ToLocal(cm + half, rootC), false, false);
         }
-        geo.Freeze();
-        path.Data = geo;
+        if (!ReferenceEquals(path.Data, geo))
+            path.Data = geo;
     }
 
     /// <summary>Hard, immediate reset of the wave (used on rebuild / drag start).</summary>
