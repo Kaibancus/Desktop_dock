@@ -79,6 +79,7 @@ public partial class RadialWindow
         double top = gridTop - topInset;                // actual slab top (includes clock band)
 
         double opacity = 1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0);
+        double frostStrength = GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
         const double radius = 28;
 
         // One continuous clear-glass panel that reaches the bottom screen edge.
@@ -86,7 +87,7 @@ public partial class RadialWindow
         // covers down past the system taskbar while the lowest icon row stays
         // above it. (The running-app taskbar strip + its seam were removed.)
         double totalH = h + topInset + GlassBottomReserve;
-        DrawGlassSlab(left, top, w, totalH, radius, opacity, frosted: false);
+        DrawGlassSlab(left, top, w, totalH, radius, opacity, frosted: false, frostStrength: frostStrength);
 
         // A pronounced "stereoscopic" rim around the whole slab (mirrors the
         // resident-region border) so the dock stays clearly visible even on a
@@ -391,9 +392,10 @@ public partial class RadialWindow
     /// so the caller can remove the slab later. Delegates to the shared
     /// <see cref="GlassChrome.DrawSlab"/> so the left dock matches exactly.</summary>
     internal void DrawGlassSlab(double left, double top, double w, double h, double radius, double opacity,
-        System.Collections.Generic.List<FrameworkElement>? track = null, bool frosted = false)
+        System.Collections.Generic.List<FrameworkElement>? track = null, bool frosted = false,
+        double frostStrength = 0.0)
     {
-        GlassChrome.DrawSlab(PanelCanvas, left, top, w, h, radius, opacity, track, frosted);
+        GlassChrome.DrawSlab(PanelCanvas, left, top, w, h, radius, opacity, track, frosted, frostStrength: frostStrength);
     }
 
     /// <summary>

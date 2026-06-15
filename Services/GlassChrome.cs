@@ -14,12 +14,30 @@ namespace Polaris.Services;
 /// </summary>
 internal static class GlassChrome
 {
+    /// <summary>Transparency at/above which the panel is perfectly clear glass.
+    /// The frosted (ground-glass) diffusion ramps in linearly across the whole
+    /// slider, reaching full strength at transparency 0, so moving the slider
+    /// scrubs evenly from frosted glass to fully clear.</summary>
+    public const double FrostThreshold = 1.0;
+
+    /// <summary>Maps the user's panel-transparency (0 = opaque, 1 = clear) to a
+    /// frost strength (1 = fully ground glass at transparency 0, 0 = clear once
+    /// transparency reaches <see cref="FrostThreshold"/>).</summary>
+    public static double FrostStrengthFor(double transparency)
+    {
+        if (FrostThreshold <= 0)
+            return 0;
+        double t = Math.Clamp(transparency, 0.0, 1.0);
+        return Math.Clamp((FrostThreshold - t) / FrostThreshold, 0.0, 1.0);
+    }
+
     /// <summary>Draws an Apple-style "Liquid Glass" slab (translucent body, edge
     /// rim, specular dome, glare and base shade) onto <paramref name="target"/>.
     /// When <paramref name="track"/> is supplied, every created element is added
     /// to it so the caller can remove the slab later.</summary>
     public static void DrawSlab(Canvas target, double left, double top, double w, double h, double radius, double opacity,
-        List<FrameworkElement>? track = null, bool frosted = false, bool dark = false, bool featherMask = true)
+        List<FrameworkElement>? track = null, bool frosted = false, bool dark = false, bool featherMask = true,
+        double frostStrength = 0.0)
     {
         // Body: clear, lightly cool-tinted glass sheet with a soft floating shadow.
         // When frosted, the fill is milkier (higher white alpha) to read as
@@ -108,6 +126,47 @@ internal static class GlassChrome
         Panel.SetZIndex(glass, -12);
         target.Children.Add(glass);
         track?.Add(glass);
+
+        // Continuous "ground / frosted glass" diffusion. Unlike the binary
+        // `frosted` body brush above, this is a milky white sheet whose strength
+        // is driven by <paramref name="frostStrength"/> (0 = perfectly clear glass,
+        // 1 = fully ground glass), letting the panel-transparency setting scrub
+        // smoothly from frosted (at transparency 0) to clear. A near-uniform fill
+        // (high alpha edge-to-edge, only a gentle centre lift) scatters light like
+        // real frosted glass; it sits above the body but below the specular
+        // highlights so the liquid-glass glints still read on top.
+        if (!dark && frostStrength > 0.001)
+        {
+            double fs = Math.Clamp(frostStrength, 0.0, 1.0);
+            byte Peak(double mul) => (byte)Math.Clamp(fs * 0xC8 * mul, 0, 255);
+            var frost = new Border
+            {
+                Width = w,
+                Height = h,
+                CornerRadius = new CornerRadius(radius),
+                Opacity = opacity,
+                IsHitTestVisible = false,
+                CacheMode = new System.Windows.Media.BitmapCache(),
+                Background = new RadialGradientBrush
+                {
+                    GradientOrigin = new Point(0.5, 0.34),
+                    Center = new Point(0.5, 0.34),
+                    RadiusX = 0.95,
+                    RadiusY = 1.05,
+                    GradientStops =
+                    {
+                        new GradientStop(Color.FromArgb(Peak(1.0), 0xFF, 0xFF, 0xFF), 0.0),
+                        new GradientStop(Color.FromArgb(Peak(0.92), 0xF2, 0xF6, 0xFF), 0.55),
+                        new GradientStop(Color.FromArgb(Peak(0.86), 0xE4, 0xEC, 0xF8), 1.0),
+                    },
+                },
+            };
+            Canvas.SetLeft(frost, left);
+            Canvas.SetTop(frost, top);
+            Panel.SetZIndex(frost, -11);
+            target.Children.Add(frost);
+            track?.Add(frost);
+        }
 
         // Frosted diffusion veil: an extra soft milky sheet that lifts the
         // body's luminosity uniformly, mimicking the way frosted glass scatters

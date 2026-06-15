@@ -274,7 +274,7 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" x:Name="TransparencyLabel" Text="面板透明度" Style="{DynamicResource RowLabel}"/>
-                    <Slider Grid.Column="1" x:Name="TransparencySlider" Minimum="0.0" Maximum="0.95"
+                    <Slider Grid.Column="1" x:Name="TransparencySlider" Minimum="0.0" Maximum="1.0"
                             VerticalAlignment="Center" ValueChanged="OnSettingChanged"/>
                 </Grid>
 

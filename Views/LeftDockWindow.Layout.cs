@@ -284,7 +284,7 @@ public partial class LeftDockWindow
             _bodyCross = _slabCross;
             _bodyCrossLen = (_colCenterCross - _bodyCross) + GIcon / 2.0 + glassPad;
             var r = LogicalRect(_slabMain, _bodyCross, _slabMainLen, _bodyCrossLen);
-            GlassChrome.DrawSlab(PanelCanvas, r.X, r.Y, r.Width, r.Height, trayRadius, opacity, track: null, frosted: false, dark: false);
+            GlassChrome.DrawSlab(PanelCanvas, r.X, r.Y, r.Width, r.Height, trayRadius, opacity, track: null, frosted: false, dark: false, frostStrength: GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency));
             // Give the clear-glass side dock a raised, chiselled edge so it reads
             // as a 3-D slab rather than a flat sheet.
             DrawGlassBevel(r.X, r.Y, r.Width, r.Height, trayRadius, opacity);
