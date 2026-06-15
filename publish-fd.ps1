@@ -10,6 +10,20 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# Derive the assembly version from the release tag (e.g. v1.7.8 -> 1.7.8) so the
+# in-app updater's CurrentVersion always matches the published release. Without
+# this the build falls back to csproj <Version>, which is easy to forget to bump.
+$verArg = @()
+if ($Release) {
+    $ver = $Release -replace '^[vV]', ''
+    if ($ver -match '^\d+(\.\d+){1,3}$') {
+        $verArg = @("-p:Version=$ver")
+        Write-Host "Stamping assembly version $ver from tag $Release" -ForegroundColor Cyan
+    } else {
+        Write-Warning "Release tag '$Release' is not a plain version; assembly version not stamped."
+    }
+}
+
 # Stop any running instance so the output file is not locked
 Get-Process Polaris -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
@@ -18,6 +32,7 @@ dotnet publish -c Release -r win-x64 `
   --self-contained false `
   -p:PublishSingleFile=true `
   -p:PublishReadyToRun=true `
+  @verArg `
   -o publish-fd
 
 $exe = Join-Path $PSScriptRoot 'publish-fd\Polaris.exe'
