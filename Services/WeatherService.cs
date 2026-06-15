@@ -3,16 +3,19 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Windows.Devices.Geolocation;
 
 namespace Polaris.Services;
 
 /// <summary>
 /// Fetches the current weather + city for the dock's clock line, key-free:
-/// location is resolved by IP (ip-api, localized to Chinese city names) and the
-/// weather comes from Open-Meteo. The result is cached and refreshed at most
-/// every <see cref="RefreshInterval"/>; callers poll <see cref="Summary"/> and
-/// subscribe to <see cref="Updated"/>. All failures are swallowed so an offline
-/// machine simply keeps showing the clock without weather.
+/// the position comes from the native Windows location service
+/// (<see cref="Geolocator"/>, no third-party geo-IP lookup), the Chinese city
+/// label from a best-effort reverse geocode, and the weather from Open-Meteo.
+/// The result is cached and refreshed at most every <see cref="RefreshInterval"/>;
+/// callers poll <see cref="Summary"/> and subscribe to <see cref="Updated"/>. All
+/// failures are swallowed so a machine with location disabled or no network simply
+/// keeps showing the clock without weather.
 /// </summary>
 public sealed class WeatherService
 {
@@ -41,19 +44,12 @@ public sealed class WeatherService
         _busy = true;
         try
         {
-            // 1. Locate by IP (no key); lang=zh-CN gives Chinese place names.
-            var locJson = await Http.GetStringAsync(
-                "http://ip-api.com/json/?lang=zh-CN&fields=status,city,regionName,lat,lon")
-                .ConfigureAwait(false);
-            using var locDoc = JsonDocument.Parse(locJson);
-            var loc = locDoc.RootElement;
-            if (!loc.TryGetProperty("status", out var st) || st.GetString() != "success")
+            // 1. Locate via the native Windows location service (no third-party
+            //    geo-IP). Yields lat/lon locally; the city label is then filled
+            //    in by a best-effort reverse geocode.
+            var location = await ResolveLocationAsync().ConfigureAwait(false);
+            if (location is not (double lat, double lon, string city))
                 return;
-            double lat = loc.GetProperty("lat").GetDouble();
-            double lon = loc.GetProperty("lon").GetDouble();
-            string city = loc.TryGetProperty("city", out var c) ? c.GetString() ?? "" : "";
-            if (string.IsNullOrWhiteSpace(city) && loc.TryGetProperty("regionName", out var rn))
-                city = rn.GetString() ?? "";
 
             // 2. Current weather (Open-Meteo, no key). Invariant culture so the
             //    decimal point in the coordinates is a dot, not a comma.
@@ -83,6 +79,67 @@ public sealed class WeatherService
         {
             _busy = false;
         }
+    }
+
+    /// <summary>Resolves the current position from the native Windows location
+    /// service and pairs it with a best-effort Chinese city label. Returns null
+    /// (so the caller silently keeps the previous weather) when location access is
+    /// off / unavailable. Never throws.</summary>
+    private async Task<(double lat, double lon, string city)?> ResolveLocationAsync()
+    {
+        double lat, lon;
+        try
+        {
+            // Ask the OS for permission first; harmless if already granted. Some
+            // environments only allow this from a UI thread, so a failure here is
+            // tolerated and we still attempt the position read below.
+            try { await Geolocator.RequestAccessAsync(); } catch { }
+
+            var geo = new Geolocator { DesiredAccuracy = PositionAccuracy.Default };
+            // Accept a cached fix up to 10 min old; cap the wait so a stalled
+            // provider can't hang the refresh.
+            var pos = await geo.GetGeopositionAsync(
+                    TimeSpan.FromMinutes(10), TimeSpan.FromSeconds(8))
+                .AsTask().ConfigureAwait(false);
+            var point = pos.Coordinate.Point.Position;
+            lat = point.Latitude;
+            lon = point.Longitude;
+        }
+        catch
+        {
+            // Location services disabled, denied, or no fix available.
+            return null;
+        }
+
+        string city = await ReverseGeocodeCityAsync(lat, lon).ConfigureAwait(false);
+        return (lat, lon, city);
+    }
+
+    /// <summary>Best-effort reverse geocode of the given coordinates to a short
+    /// Chinese city name (key-free, via BigDataCloud). Returns an empty string on
+    /// any failure — the weather still shows, just without the place label.</summary>
+    private static async Task<string> ReverseGeocodeCityAsync(double lat, double lon)
+    {
+        try
+        {
+            string url = string.Format(CultureInfo.InvariantCulture,
+                "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={0:0.0000}&longitude={1:0.0000}&localityLanguage=zh",
+                lat, lon);
+            var json = await Http.GetStringAsync(url).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            foreach (var field in new[] { "city", "locality", "principalSubdivision" })
+            {
+                if (root.TryGetProperty(field, out var v) &&
+                    v.GetString() is { Length: > 0 } name)
+                    return name;
+            }
+        }
+        catch
+        {
+            // No network / blocked — fall back to no city label.
+        }
+        return "";
     }
 
     /// <summary>Maps a WMO weather-interpretation code (as used by Open-Meteo) to a

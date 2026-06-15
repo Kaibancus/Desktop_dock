@@ -48,7 +48,7 @@
   <circle cx="120" cy="120" r="44" fill="url(#core)"/>
 
   <!-- small companion star, upper-right -->
-  <g stroke="none">
+  <g stroke="none" transform="translate(198,52) scale(0.9) translate(-198,-52)">
     <polygon points="198,52 193.8,47.8 198,26"   fill="#ffffff"/>
     <polygon points="198,52 198,26 202.2,47.8"   fill="#cfe0f7"/>
     <polygon points="198,52 202.2,47.8 224,52"   fill="#bcd2f2"/>

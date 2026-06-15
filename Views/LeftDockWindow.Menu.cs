@@ -102,6 +102,13 @@ public partial class LeftDockWindow
             return;
         }
 
+        // Match the system app appearance (light/dark), like the settings window.
+        bool light = Polaris.Services.SystemTheme.IsLight;
+        Color textColor   = light ? Color.FromArgb(0xF0, 0x1B, 0x1B, 0x1F) : Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF);
+        Color hoverColor  = light ? Color.FromArgb(0x14, 0x00, 0x00, 0x00) : Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF);
+        Color shellColor  = light ? Color.FromArgb(0xF4, 0xF3, 0xF3, 0xF6) : Color.FromArgb(0xF2, 0x1E, 0x1E, 0x22);
+        Color borderColor = light ? Color.FromArgb(0x22, 0x00, 0x00, 0x00) : Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+
         var panel = new StackPanel();
         foreach (var (text, action) in items)
         {
@@ -110,7 +117,7 @@ public partial class LeftDockWindow
                 Text = text,
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 FontSize = 13,
-                Foreground = new SolidColorBrush(Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF)),
+                Foreground = new SolidColorBrush(textColor),
             };
             var row = new Border
             {
@@ -121,7 +128,7 @@ public partial class LeftDockWindow
                 Child = label,
             };
             row.MouseEnter += (_, _) =>
-                row.Background = new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+                row.Background = new SolidColorBrush(hoverColor);
             row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
             var act = action;
             row.MouseLeftButtonUp += (_, e) =>
@@ -135,9 +142,9 @@ public partial class LeftDockWindow
 
         var shell = new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x1E, 0x1E, 0x22)),
+            Background = new SolidColorBrush(shellColor),
             CornerRadius = new CornerRadius(10),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)),
+            BorderBrush = new SolidColorBrush(borderColor),
             BorderThickness = new Thickness(1),
             Padding = new Thickness(5),
             Effect = new System.Windows.Media.Effects.DropShadowEffect
@@ -145,7 +152,7 @@ public partial class LeftDockWindow
                 BlurRadius = 20,
                 ShadowDepth = 3,
                 Direction = 270,
-                Opacity = 0.5,
+                Opacity = light ? 0.28 : 0.5,
                 Color = Colors.Black,
             },
             Child = panel,

@@ -4,7 +4,6 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Runtime.InteropServices;
-using Microsoft.Win32;
 using Polaris.Models;
 using Polaris.Services;
 
@@ -56,7 +55,7 @@ public partial class SettingsWindow : Window
     /// (background, cards, fields, text, accent) at construction time.</summary>
     private void ApplyColorMode()
     {
-        bool light = IsSystemLightTheme();
+        bool light = Polaris.Services.SystemTheme.IsLight;
         void Set(string key, string hex) =>
             Resources[key] = new SolidColorBrush(
                 (Color)ColorConverter.ConvertFromString(hex));
@@ -84,24 +83,6 @@ public partial class SettingsWindow : Window
             Set("SubtleBrush",     "#FF9A9AA6");
             Set("AccentBrush",     "#FF5B8CFF");
             Set("AccentHoverBrush", "#FF6F9BFF");
-        }
-    }
-
-    /// <summary>True when Windows is set to the LIGHT app theme. Reads
-    /// HKCU\…\Themes\Personalize\AppsUseLightTheme (1 = light, 0 = dark);
-    /// defaults to dark when the value is missing or unreadable.</summary>
-    private static bool IsSystemLightTheme()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            var v = key?.GetValue("AppsUseLightTheme");
-            return v is int i && i != 0;
-        }
-        catch
-        {
-            return false;
         }
     }
 
