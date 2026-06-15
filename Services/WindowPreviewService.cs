@@ -394,6 +394,17 @@ public static class WindowPreviewService
         if (string.IsNullOrEmpty(dir) || IsTooBroadFolder(dir))
             return result;
 
+        // Only fold in sibling-process windows when the pinned executable is
+        // actually running. Genuine multi-process apps (Steam → steam.exe, iQiyi
+        // → QyClient.exe) keep their main process alive even though a helper owns
+        // the visible window, so this gate passes. But when the pinned app is NOT
+        // running, the folder match would wrongly sweep up unrelated apps that
+        // merely share its install folder — e.g. all of Microsoft Office lives in
+        // …\Office16\, so hovering a closed Word/PowerPoint/OneNote would surface
+        // an open Excel window. Requiring the pinned exe to be running prevents that.
+        if (GetPidsForExe(exePath).Count == 0)
+            return result;
+
         string prefix = dir.TrimEnd('\\') + "\\";
         int ownPid = Environment.ProcessId;
         try

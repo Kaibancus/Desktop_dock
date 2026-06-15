@@ -145,6 +145,7 @@ public partial class LeftDockWindow
         if (!_bounceFlameActive)
         {
             _bounceFlameActive = true;
+            _bounceFlameLastTick = TimeSpan.Zero;
             CompositionTarget.Rendering += OnBounceFlameTick;
         }
     }
@@ -167,6 +168,19 @@ public partial class LeftDockWindow
         {
             StopBounceFlame();
             return;
+        }
+        // Cap the bulge updates at the active profile's frame rate; this render
+        // loop otherwise fires once per composited frame (the monitor refresh).
+        if (e is RenderingEventArgs rea)
+        {
+            if (_bounceFlameLastTick > TimeSpan.Zero)
+            {
+                double since = (rea.RenderingTime - _bounceFlameLastTick).TotalSeconds;
+                double budget = 1.0 / Math.Max(1, App.AnimationFrameRate) - 0.0008;
+                if (since < budget)
+                    return;
+            }
+            _bounceFlameLastTick = rea.RenderingTime;
         }
         double cur = _bounceFlameAxisY ? trans.Y : trans.X;
         _bounceFlameAmp = Math.Clamp(Math.Abs(cur) / _bounceFlameMaxLift, 0.0, 1.0);

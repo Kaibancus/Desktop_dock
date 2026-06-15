@@ -41,31 +41,39 @@ public partial class App : Application
     /// three static rate fields (read whenever an animation is created) and, on
     /// the first call, the global timeline default frame rate.
     ///
-    /// High: follows the display refresh. The default metadata under-samples short
-    /// transitions and the display's ACTUAL refresh is never an exact integer (a
-    /// "60 Hz" panel runs at 59.94 Hz); ticking at exactly 60 beats against it and
-    /// drops/doubles frames -> visible judder. Over-sampling ~2x on 60 Hz panels
-    /// masks that beat; high-refresh panels (>=90 Hz) present fast enough to run at
-    /// their native rate. Loop animations run at 60 fps.
+    /// Interactive animations (hover/magnify, summon, drag) are beat-masked in
+    /// BOTH modes: the display's ACTUAL refresh is never an exact integer (a
+    /// "60 Hz" panel runs at ~59 Hz), so ticking interactive motion at exactly 60
+    /// beats against the present and drops/doubles frames -> visible judder, which
+    /// is most obvious on the expensive fullscreen liquid-glass dock. Over-sampling
+    /// ~2x on <=60 Hz panels masks that beat so interaction presents a smooth 60;
+    /// high-refresh panels present fast enough to use their native rate.
     ///
-    /// Low: caps everything for minimal resource use — 60 fps motion, slow/loop
-    /// animations throttled to 30 fps.</summary>
+    /// The two modes differ in the LOOP rates — the always-on background motion
+    /// (planet/Saturn spin, running pulses, glass shimmer) that dominates the
+    /// continuous cost: High runs loops at 60 fps for the smoothest backdrop, Low
+    /// throttles them to 30 fps to save resources while interaction stays smooth.</summary>
     internal static void ApplyPerformanceMode(Models.PerformanceMode mode)
     {
         int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
         int animHz;
         if (mode == Models.PerformanceMode.High)
         {
-            animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 60->120, 144->144
+            // Follow the display: oversample <=60 Hz to mask the beat, native on
+            // high-refresh. Loop animations at 60 fps (capped to the refresh).
+            animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 59->118, 144->144
             AnimationFrameRate = animHz;
-            AmbientFrameRate = 60;                 // full loop animations at 60 fps
+            AmbientFrameRate = 60;
             GlassLoopFrameRate = Math.Min(60, hz);
         }
         else
         {
-            animHz = 60;
-            AnimationFrameRate = 60;
-            AmbientFrameRate = 30;                 // slow loop animations at 30 fps
+            // Low: keep interaction smooth (oversample the beat on <=60 Hz panels,
+            // cap high-refresh at 60 to stay light) but throttle the always-on
+            // loops hard to 30 fps — that is where the resource saving comes from.
+            animHz = hz < 90 ? Math.Min(hz * 2, 120) : 60;  // 59->118, 144->60
+            AnimationFrameRate = animHz;
+            AmbientFrameRate = 30;
             GlassLoopFrameRate = 30;
         }
 

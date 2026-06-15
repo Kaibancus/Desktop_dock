@@ -185,6 +185,7 @@ public partial class LeftDockWindow : Window
     private TranslateTransform? _bounceFlameTrans; // live transform we read the hop from
     private bool _bounceFlameAxisY = true; // read the hop from Y (Left/Right) or X (Top/Bottom)
     private double _bounceFlameMaxLift = 1.0;
+    private TimeSpan _bounceFlameLastTick = TimeSpan.Zero; // render-clock throttle
 
     // Saturn debris belt: scattered rocks rendered across the dark slab. Each rock
     // keeps its resting (main, cross) and a live TranslateTransform so the wave can

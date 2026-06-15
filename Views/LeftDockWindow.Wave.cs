@@ -151,7 +151,18 @@ public partial class LeftDockWindow
         if (e is RenderingEventArgs rea)
         {
             if (_waveLastTick > TimeSpan.Zero)
-                dt = Math.Clamp((rea.RenderingTime - _waveLastTick).TotalSeconds, 0.001, 0.05);
+            {
+                double since = (rea.RenderingTime - _waveLastTick).TotalSeconds;
+                // Throttle to the active performance profile's frame rate. This
+                // render loop fires once per composited frame (the monitor refresh),
+                // so without this cap a high-refresh panel ticks the wave far above
+                // the profile target — the reason low-performance mode didn't appear
+                // to limit the frame rate. Skip frames until the budget elapses.
+                double budget = 1.0 / Math.Max(1, App.AnimationFrameRate) - 0.0008;
+                if (since < budget)
+                    return;
+                dt = Math.Clamp(since, 0.001, 0.05);
+            }
             _waveLastTick = rea.RenderingTime;
         }
         double k = 1.0 - Math.Exp(-dt / 0.045);
