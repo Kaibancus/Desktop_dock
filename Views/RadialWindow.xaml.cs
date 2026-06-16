@@ -494,11 +494,27 @@ public partial class RadialWindow : Window
             _ = _weather.RefreshAsync();
         };
         // Repaint the clock line as soon as fresh weather arrives.
-        _weather.Updated += () => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
+        _weather.Updated += OnWeatherUpdated;
 
         // Refresh badges promptly when an app starts/stops flashing for attention
         // (instead of waiting up to 1.5s for the next poll). Only while shown.
         AttentionService.Changed += OnAttentionChanged;
+    }
+
+    private void OnWeatherUpdated() => Dispatcher.BeginInvoke(new Action(UpdateGlassClock));
+
+    protected override void OnClosed(EventArgs e)
+    {
+        // The window lives for the whole app session, but tear its subscriptions
+        // down cleanly on close: the static AttentionService.Changed event would
+        // otherwise root this instance, and the timers have no reason to keep
+        // ticking once the dock is gone.
+        AttentionService.Changed -= OnAttentionChanged;
+        _weather.Updated -= OnWeatherUpdated;
+        _runningTimer.Stop();
+        _previewWarmTimer.Stop();
+        _clockTimer.Stop();
+        base.OnClosed(e);
     }
 
     private void OnAttentionChanged()

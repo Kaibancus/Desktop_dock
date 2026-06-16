@@ -262,12 +262,23 @@ public partial class LeftDockWindow : Window
         _runningTimer.Tick += (_, _) => RefreshRunning();
 
         // Refresh badges promptly when an app starts/stops flashing for attention.
-        AttentionService.Changed += () =>
-        {
-            if (!_shown)
-                return;
-            Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
-        };
+        AttentionService.Changed += OnAttentionChanged;
+    }
+
+    private void OnAttentionChanged()
+    {
+        if (!_shown)
+            return;
+        Dispatcher.BeginInvoke(new Action(RefreshAttentionOnly));
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        // Lives for the whole app session, but drop the static-event subscription
+        // (which would otherwise root this instance) and stop the timer on close.
+        AttentionService.Changed -= OnAttentionChanged;
+        _runningTimer.Stop();
+        base.OnClosed(e);
     }
 
     /// <summary>Lightweight badge-only refresh for the prompt flash event: resolves
