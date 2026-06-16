@@ -24,7 +24,7 @@ public partial class RadialWindow : Window
     private const double BaseInnerRadius = 140.0;
     private const double BaseRingStep = 88.0;
     private const int Ring0Cap = 14;
-    private const int Ring1Cap = 22;
+    private const int Ring1Cap = 28;
 
     // Reference screen height (DIPs) the layout was tuned for. On taller
     // displays everything is scaled up proportionally so the panel does not
@@ -66,9 +66,10 @@ public partial class RadialWindow : Window
     // Outer-ring icons are drawn slightly larger than inner-ring icons.
     private const double OuterIconScale = 1.0;
 
-    // Inner-ring (resident) icons are drawn 10% smaller than the base icon size,
-    // so the dense inner ring reads as a tidy "pinned" cluster.
-    private const double InnerIconScale = 0.80;
+    // Inner-ring (resident) icons are drawn a touch smaller than the base icon
+    // size, so the dense inner ring reads as a tidy "pinned" cluster. Sized so
+    // the EFFECTIVE inner-icon scale (SaturnEnlarge * InnerIconScale) is 0.85.
+    private const double InnerIconScale = 0.85 / SaturnEnlarge;
 
     // Liquid-glass (grid) icons are drawn larger than the base icon size so they
     // fill the roomy grid cells more comfortably.

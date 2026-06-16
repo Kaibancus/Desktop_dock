@@ -107,6 +107,16 @@ public static class IconExtractor
 
     private static Drawing.Icon? GetShellIcon(string path)
     {
+        // Files that carry their own embedded icon resources (exe/dll/ico…) are
+        // read DIRECTLY from the file via PrivateExtractIcons. This bypasses the
+        // Windows shell icon cache, which otherwise keeps serving a stale icon
+        // after an application's embedded icon has been updated (e.g. a dev build
+        // whose icon you just changed). The shell image-list path below is kept
+        // for everything else (documents, folders, file associations).
+        var embedded = GetEmbeddedIcon(path);
+        if (embedded != null)
+            return embedded;
+
         // Prefer the jumbo (256x256) system image list for crisp icons.
         var jumbo = GetJumboIcon(path);
         if (jumbo != null)
@@ -129,6 +139,64 @@ public static class IconExtractor
         finally
         {
             DestroyIcon(shinfo.hIcon);
+        }
+    }
+
+    /// <summary>File extensions that embed their own icon resources, so the icon
+    /// can be pulled straight from the file (bypassing the shell icon cache).</summary>
+    private static readonly string[] IconBearingExts =
+        { ".exe", ".dll", ".ico", ".ocx", ".cpl", ".scr", ".icl" };
+
+    /// <summary>
+    /// Extracts the icon directly from a file's embedded resources via
+    /// PrivateExtractIcons. Unlike the shell image-list, this reads the file's
+    /// CURRENT icon every time and never consults Windows' (often stale) icon
+    /// cache. Returns null for files that don't embed icons so the caller can
+    /// fall back to the shell-association icon.
+    /// </summary>
+    private static Drawing.Icon? GetEmbeddedIcon(string rawPath)
+    {
+        try
+        {
+            string path = rawPath;
+            int index = 0;
+            // A .lnk icon location can be "file,index"; honour that form.
+            int comma = rawPath.LastIndexOf(',');
+            if (comma > 1 && int.TryParse(rawPath.AsSpan(comma + 1), out int idx))
+            {
+                path = rawPath.Substring(0, comma);
+                index = idx;
+            }
+
+            string ext = Path.GetExtension(path);
+            bool bearing = false;
+            foreach (var e in IconBearingExts)
+                if (string.Equals(ext, e, StringComparison.OrdinalIgnoreCase)) { bearing = true; break; }
+            if (!bearing || !File.Exists(path))
+                return null;
+
+            var handles = new IntPtr[1];
+            // Ask for a crisp 256px frame; fall back to 48px for files that have
+            // no large frame, so small-icon-only executables still resolve.
+            int got = PrivateExtractIcons(path, index, 256, 256, handles, null, 1, 0);
+            if (got <= 0 || handles[0] == IntPtr.Zero)
+                got = PrivateExtractIcons(path, index, 48, 48, handles, null, 1, 0);
+            if (got <= 0 || handles[0] == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                using var tmp = Drawing.Icon.FromHandle(handles[0]);
+                return (Drawing.Icon)tmp.Clone();
+            }
+            finally
+            {
+                DestroyIcon(handles[0]);
+            }
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -307,6 +375,10 @@ public static class IconExtractor
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int PrivateExtractIcons(string szFileName, int nIconIndex,
+        int cxIcon, int cyIcon, IntPtr[] phicon, int[]? piconid, int nIcons, uint flags);
 
     [ComImport]
     [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]

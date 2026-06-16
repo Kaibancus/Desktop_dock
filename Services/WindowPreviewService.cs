@@ -920,18 +920,31 @@ public static class WindowPreviewService
             string? path = GetProcessInfo(pid, out string? procAumid);
             bool accessible = !string.IsNullOrWhiteSpace(path);
 
-            // ApplicationFrameHost.exe merely hosts UWP windows (Settings, some
-            // Store apps); its window exposes no usable AUMID, so it would show
-            // up as a generic host tile that duplicates the real (often pinned)
-            // app. Skip it so the running strip never lists the host process.
-            if (accessible && string.Equals(Path.GetFileName(path), "ApplicationFrameHost.exe",
-                    StringComparison.OrdinalIgnoreCase))
-                return true;
+            // ApplicationFrameHost.exe merely HOSTS UWP windows (Calculator,
+            // Settings, some Store apps); its own process identity is useless. The
+            // frame window's property store, however, carries the HOSTED app's
+            // AUMID — recover that and treat the window as the real packaged app.
+            // Only skip the host window when no hosted AUMID can be read (then it
+            // would only show as a generic duplicate of the real app).
+            bool isFrameHost = accessible && string.Equals(
+                Path.GetFileName(path), "ApplicationFrameHost.exe",
+                StringComparison.OrdinalIgnoreCase);
+            if (isFrameHost)
+            {
+                string? hosted = GetWindowAumid(hWnd);
+                if (string.IsNullOrWhiteSpace(hosted))
+                    return true;
+                // The host exe path doesn't represent the hosted app — drop it so
+                // the icon is resolved from the AUMID instead.
+                path = null;
+                accessible = false;
+                procAumid = hosted;
+            }
 
             // Prefer the process's packaged identity (reliable for Win32-hosted
             // packaged apps like new Teams/Outlook, whose windows do not expose
             // an AUMID via the window property store), then the window AUMID.
-            string? aumid = accessible ? procAumid : null;
+            string? aumid = procAumid;
             if (string.IsNullOrWhiteSpace(aumid))
                 aumid = GetWindowAumid(hWnd);
             if (string.IsNullOrWhiteSpace(aumid))

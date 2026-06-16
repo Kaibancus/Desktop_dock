@@ -407,13 +407,33 @@ public partial class LeftDockWindow
         // no readable executable path. Fall back to the window's own icon and
         // title — exactly how the taskbar represents such windows.
         bool pathless = string.IsNullOrEmpty(app.Path);
-        string iconKey = pathless ? "win:" + app.Window : app.Path;
+        // Packaged (UWP) apps such as the system Calculator either expose no
+        // readable WindowsApps exe path, or one whose .exe carries no embedded
+        // icon — so a path-based extract yields nothing. Resolve their icon from
+        // the shell AppsFolder via the window's AUMID instead.
+        string iconKey = !string.IsNullOrEmpty(app.Aumid)
+            ? "aumid:" + app.Aumid
+            : (pathless ? "win:" + app.Window : app.Path);
         if (!_runIconCache.TryGetValue(iconKey, out var bmp))
         {
-            bmp = pathless
-                ? WindowPreviewService.GetWindowIconImage(app.Window)
-                : IconExtractor.GetIcon(app.Path);
-            _runIconCache[iconKey] = bmp;
+            if (!string.IsNullOrEmpty(app.Aumid))
+            {
+                bmp = IconExtractor.GetIcon(ShellNamespace.NormalizeAppsFolderPath(app.Aumid));
+                // Fall back to the window icon if the AppsFolder lookup misses.
+                if (bmp == null && app.Window != IntPtr.Zero)
+                    bmp = WindowPreviewService.GetWindowIconImage(app.Window);
+            }
+            else
+            {
+                bmp = pathless
+                    ? WindowPreviewService.GetWindowIconImage(app.Window)
+                    : IconExtractor.GetIcon(app.Path);
+            }
+            // Never cache a null result: a transient cold-boot miss (the shell
+            // icon services aren't ready yet) would otherwise be frozen blank for
+            // the whole session. Cache only a real bitmap so the next tick retries.
+            if (bmp != null)
+                _runIconCache[iconKey] = bmp;
         }
 
         var image = new Image { Source = bmp, Stretch = Stretch.Uniform };

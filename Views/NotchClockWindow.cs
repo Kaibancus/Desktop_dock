@@ -29,8 +29,8 @@ public sealed class NotchClockWindow : Window
     private bool _atBottom;
     private bool _shaped;
 
-    private const double PlateWidth = 250;
-    private const double PlateHeight = 32;
+    private const double PlateWidth = 240;
+    private const double PlateHeight = 30;
     private const double Slant = 20;         // horizontal inset of the narrow free edge
     private const double SidePad = 16;       // room each side for the slant-edge blur halo
     private const double FreePad = 14;       // room past the narrow free edge for the halo
@@ -66,16 +66,18 @@ public sealed class NotchClockWindow : Window
         };
 
         // 3-D raised lettering: a dark copy offset down-right sits behind a bright
-        // white copy carrying a faint cool glow, so the text reads as embossed.
+        // copy carrying a faint warm glow, so the text reads as embossed. The
+        // bright copy is tinted the Saturn rings' pale gold (a brightened paleB)
+        // with a tan halo, so the clock reads as part of the ring palette.
         _lineShadow = MakeText(Color.FromArgb(205, 0, 0, 0));
         _lineShadow.Margin = new Thickness(1.3, 1.6, 0, 0);
-        _line = MakeText(Colors.White);
+        _line = MakeText(Color.FromRgb(0xEC, 0xDF, 0xBE));   // pale ring gold
         _line.Effect = new DropShadowEffect
         {
-            Color = Color.FromRgb(150, 185, 255),
+            Color = Color.FromRgb(0xCB, 0xBC, 0x95),         // Saturn ring tan (paleB)
             BlurRadius = 7,
             ShadowDepth = 0,
-            Opacity = 0.40,
+            Opacity = 0.45,
         };
 
         var textHost = new Grid

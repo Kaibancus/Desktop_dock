@@ -100,9 +100,9 @@ public sealed class LiquidGlassTheme : PanelTheme
 
     /// <summary>Maximum number of rows the grid can grow to (scrolling reveals
     /// the rows beyond <see cref="VisibleRows"/>).</summary>
-    public const int MaxRows = 12;
+    public const int MaxRows = 6;
 
-    /// <summary>Maximum icons this theme can display (a full 7×12 grid).</summary>
+    /// <summary>Maximum icons this theme can display (a full 7×6 grid).</summary>
     public const int Capacity = Columns * MaxRows;
 
     /// <summary>Number of grid rows needed to hold <paramref name="count"/> icons,

@@ -26,7 +26,7 @@ public partial class LeftDockWindow : Window
     private const double GlassIconScale = 1.32;   // match the main dock's grid icon size
     private const double HoverScale = 1.5;
     private const double DragThreshold = 6.0;
-    private const int RunningMaxComplete = 6;     // at most 6 full running-app icons
+    private const int RunningMaxComplete = 10;     // at most 10 full running-app icons
     // Left dock icon scale relative to the main dock. Kept identical for every
     // theme so the side dock's icon size, cell pitch and gaps are consistent no
     // matter which theme is active (previously Saturn used a larger 0.60 scale,
