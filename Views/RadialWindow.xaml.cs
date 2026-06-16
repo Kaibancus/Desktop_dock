@@ -1075,7 +1075,7 @@ public partial class RadialWindow : Window
         // blue used by the glass theme.
         Color glow = _theme.IsSaturn ? Color.FromArgb(0x30, 0x00, 0x00, 0x00) : AccentColor;
         var icon = new RadialIcon(entry, bmp, iconSize, glow, LabelBrush, _theme.ShowGlassPanel);
-        icon.ExternalMagnify = MainMagnifyEnabled;   // High mode: dock drives a cursor-distance wave
+        icon.ExternalMagnify = true;   // dock drives a cursor-distance wave
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;
         icon.HoverStarted += OnIconHoverStarted;
         icon.HoverEnded += OnIconHoverEnded;

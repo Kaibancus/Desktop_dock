@@ -122,25 +122,7 @@ public partial class SettingsWindow : Window
         SelectDockPosition(s.DockPosition);
         MultiMonitorCheck.IsChecked = s.DockOnAllMonitors;
 
-        PerformanceModeCombo.Items.Add(new ComboBoxItem { Content = "低性能模式", Tag = PerformanceMode.Low });
-        PerformanceModeCombo.Items.Add(new ComboBoxItem { Content = "高性能模式", Tag = PerformanceMode.High });
-        SelectPerformanceMode(s.PerformanceMode);
-
         UpdateHint();
-    }
-
-    private void SelectPerformanceMode(PerformanceMode mode)
-    {
-        foreach (ComboBoxItem item in PerformanceModeCombo.Items)
-        {
-            if (item.Tag is PerformanceMode m && m == mode)
-            {
-                PerformanceModeCombo.SelectedItem = item;
-                return;
-            }
-        }
-        if (PerformanceModeCombo.Items.Count > 0)
-            PerformanceModeCombo.SelectedIndex = 0;
     }
 
     private void SelectDockPosition(DockSide side)
@@ -313,18 +295,6 @@ public partial class SettingsWindow : Window
         _config.Settings.DockOnAllMonitors = MultiMonitorCheck.IsChecked == true;
         _persist();
         Changed?.Invoke();
-    }
-
-    private void OnPerformanceModeChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_loaded)
-            return;
-        if (PerformanceModeCombo.SelectedItem is ComboBoxItem item && item.Tag is PerformanceMode mode)
-        {
-            _config.Settings.PerformanceMode = mode;
-            _persist();
-            Changed?.Invoke();
-        }
     }
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)

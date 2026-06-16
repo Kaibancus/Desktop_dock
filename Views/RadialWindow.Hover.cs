@@ -41,11 +41,6 @@ public partial class RadialWindow
         // label in the unclipped PanelCanvas positioned under the hovered icon.
         if (_theme.ShowGlassPanel)
             ShowGlassHoverLabel(ic, idx);
-
-        // High mode drives a continuous cursor-distance magnification wave which
-        // owns spacing/scale, so skip the binary "spread neighbours" shove.
-        if (!MainMagnifyEnabled)
-            SpreadNeighbours(idx);
     }
 
     private void OnIconHoverEnded(RadialIcon ic)
@@ -62,11 +57,6 @@ public partial class RadialWindow
 
         if (_hoverIcon == ic)
             _hoverIcon = null;
-
-        // In High mode the magnification wave restores spacing as the cursor
-        // moves away, so the legacy slot-restore (which fights it) is skipped.
-        if (!MainMagnifyEnabled)
-            RestoreSlots();
     }
 
     /// <summary>Floating name label shown under a hovered glass icon, hosted on
@@ -149,37 +139,6 @@ public partial class RadialWindow
     {
         _glassHoverLabel?.BeginAnimation(OpacityProperty,
             new DoubleAnimation(0, new Duration(TimeSpan.FromMilliseconds(110))));
-    }
-
-    /// <summary>
-    /// Pushes icons near <paramref name="hovered"/> away from it, with the shift
-    /// falling off by distance, so closer neighbours move more.
-    /// </summary>
-    private void SpreadNeighbours(int hovered)
-    {
-        double iconSize = _config.Settings.IconSize;
-        double push = iconSize * 0.75;
-        double influence = iconSize * 2.7;
-        Point hp = _slotPositions[hovered];
-
-        for (int i = 0; i < _iconElements.Count; i++)
-        {
-            if (i == hovered)
-                continue;
-
-            Vector v = _slotPositions[i] - hp;
-            double d = v.Length;
-            if (d > 0.01 && d < influence)
-            {
-                double amount = push * (1 - d / influence);
-                Point np = _slotPositions[i] + (v / d) * amount;
-                AnimateTo(_iconElements[i], np);
-            }
-            else
-            {
-                AnimateTo(_iconElements[i], _slotPositions[i]);
-            }
-        }
     }
 
     /// <summary>Animates all icons back to their home ring slots.</summary>

@@ -29,62 +29,50 @@ public partial class App : Application
     /// <summary>Tick rate for always-on loop animations in the liquid-glass
     /// theme. That theme runs as a fullscreen per-pixel-alpha layered window, so
     /// every animation tick re-composites the whole screen — an expensive upload.
-    /// Capping the slow background loops (running-app sweep/glow) low frees the
-    /// composition budget for the interactive hover/zoom to stay fluid.</summary>
-    public static int GlassLoopFrameRate { get; private set; } = 30;
+    /// Set to the display refresh (capped at 60), and throttled by
+    /// <see cref="Services.RenderProfile"/> on weak machines so the background
+    /// loops stay smooth without starving interaction.</summary>
+    public static int GlassLoopFrameRate { get; private set; } = 60;
 
-    /// <summary>Tick rate for VERY slow ambient drifts (e.g. the glass orbit light
-    /// that takes a full minute per revolution). At ~0.1°/frame even 30 fps is
-    /// visually identical to 60, so capping these mode-independently at this rate
-    /// halves the layered window's full-frame upload frequency for them with no
-    /// perceptible difference — regardless of the High/Low loop rate, which is
-    /// meant for faster motion (hover/zoom, running pulses) where it actually
-    /// shows. Kept low enough to matter, high enough to stay perfectly smooth.</summary>
-    public const int SlowDriftFrameRate = 30;
+    /// <summary>Tick rate for slow ambient drifts (e.g. the glass orbit light
+    /// that takes a full minute per revolution). Driven by
+    /// <see cref="Services.RenderProfile"/>: 60 on capable hardware, 30 on weaker
+    /// tiers (visually identical at that speed, half the layered-window uploads).</summary>
+    public static int SlowDriftFrameRate => Services.RenderProfile.SlowDriftFrameRate;
 
     /// <summary>Whether the one-shot global timeline frame-rate metadata override
     /// has been installed (it can only be set once per process).</summary>
     private static bool _frameMetadataApplied;
 
-    /// <summary>Applies the user's frame-rate / animation profile by setting the
-    /// three static rate fields (read whenever an animation is created) and, on
-    /// the first call, the global timeline default frame rate.
+    /// <summary>Applies the display-driven frame-rate / animation profile by
+    /// setting the static rate fields (read whenever an animation is created)
+    /// and, on the first call, the global timeline default frame rate.
     ///
-    /// Interactive animations (hover/magnify, summon, drag) are beat-masked in
-    /// BOTH modes: the display's ACTUAL refresh is never an exact integer (a
-    /// "60 Hz" panel runs at ~59 Hz), so ticking interactive motion at exactly 60
-    /// beats against the present and drops/doubles frames -> visible judder, which
-    /// is most obvious on the expensive fullscreen liquid-glass dock. Over-sampling
-    /// ~2x on <=60 Hz panels masks that beat so interaction presents a smooth 60;
+    /// Interactive animations (hover/magnify, summon, drag) are beat-masked: the
+    /// display's ACTUAL refresh is never an exact integer (a "60 Hz" panel runs
+    /// at ~59 Hz), so ticking interactive motion at exactly 60 beats against the
+    /// present and drops/doubles frames -> visible judder, which is most obvious
+    /// on the expensive fullscreen liquid-glass dock. Over-sampling ~2x on
+    /// &lt;=60 Hz panels masks that beat so interaction presents a smooth 60;
     /// high-refresh panels present fast enough to use their native rate.
     ///
-    /// The two modes differ in the LOOP rates — the always-on background motion
-    /// (planet/Saturn spin, running pulses, glass shimmer) that dominates the
-    /// continuous cost: High runs loops at 60 fps for the smoothest backdrop, Low
-    /// throttles them to 30 fps to save resources while interaction stays smooth.</summary>
-    internal static void ApplyPerformanceMode(Models.PerformanceMode mode)
+    /// The always-on loops (planet/Saturn spin, running pulses, glass shimmer)
+    /// run at 60 fps (capped to the refresh) for the smoothest backdrop.</summary>
+    internal static void ApplyDisplayProfile()
     {
+        Services.RenderProfile.Detect();
         int hz = (int)Math.Clamp(GetPrimaryRefreshRate(), 60, 240);
-        int animHz;
-        if (mode == Models.PerformanceMode.High)
-        {
-            // Follow the display: oversample <=60 Hz to mask the beat, native on
-            // high-refresh. Loop animations at 60 fps (capped to the refresh).
-            animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 59->118, 144->144
-            AnimationFrameRate = animHz;
-            AmbientFrameRate = 60;
-            GlassLoopFrameRate = Math.Min(60, hz);
-        }
-        else
-        {
-            // Low: keep interaction smooth (oversample the beat on <=60 Hz panels,
-            // cap high-refresh at 60 to stay light) but throttle the always-on
-            // loops hard to 30 fps — that is where the resource saving comes from.
-            animHz = hz < 90 ? Math.Min(hz * 2, 120) : 60;  // 59->118, 144->60
-            AnimationFrameRate = animHz;
-            AmbientFrameRate = 30;
-            GlassLoopFrameRate = 30;
-        }
+        // Follow the display for INTERACTIVE motion: oversample <=60 Hz to mask
+        // the beat, native on high-refresh. Interaction is never degraded — weak
+        // machines are helped by throttling the always-on LOOPS and shrinking the
+        // composited-pixel area instead (see RenderProfile).
+        int animHz = hz < 90 ? Math.Min(hz * 2, 240) : hz;  // 59->118, 144->144
+        AnimationFrameRate = animHz;
+        // Background loop rate: 60 on capable hardware, throttled by the quality
+        // tier on weak machines (capped to the real refresh).
+        int loopHz = Math.Min(Services.RenderProfile.LoopFrameRate, hz);
+        AmbientFrameRate = loopHz;
+        GlassLoopFrameRate = loopHz;
 
         if (!_frameMetadataApplied)
         {
@@ -145,8 +133,8 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
-        // Frame-rate / animation profile is applied from config (see
-        // ApplyPerformanceMode) once settings are loaded below.
+        // Frame-rate / animation profile is applied from the display refresh
+        // (see ApplyDisplayProfile) once settings are loaded below.
 
         // Opt-in frame-rate profiler (POLARIS_FPS=1). No-op otherwise.
         FpsProfiler.StartIfRequested();
@@ -167,8 +155,17 @@ public partial class App : Application
 
         _config = ConfigStore.Load();
 
-        // Apply the saved frame-rate / animation profile before any window opens.
-        ApplyPerformanceMode(_config.Settings.PerformanceMode);
+        // Apply the display-driven frame-rate / animation profile before any window opens.
+        ApplyDisplayProfile();
+        // If the live governor later steps the quality tier down on a weak
+        // machine, re-apply the frame-rate fields so newly created loop
+        // animations tick at the throttled rate. Geometry-scaled knobs (Saturn
+        // detail, cache scale) are re-read on the next summon's Rebuild.
+        Services.RenderProfile.Changed += () => Dispatcher.Invoke(() =>
+        {
+            ApplyDisplayProfile();
+            _panel?.RefreshFromConfig();
+        });
 
         // Seed the global dock-text multiplier before any dock renders.
         Polaris.Services.FontScale.SetFromPercent(_config.Settings.FontSizePercent);
@@ -1112,10 +1109,6 @@ public partial class App : Application
             // shared positioning target so the refresh below lands the docks on
             // the right monitor (the cursor's when enabled, the primary when not).
             SetActiveMonitorFromCursor();
-            // The performance profile may have changed; re-apply the frame-rate
-            // fields so loop / transition animations re-created in the refresh
-            // below tick at the new profile's rates.
-            ApplyPerformanceMode(_config.Settings.PerformanceMode);
             // A theme switch can change the resident count (Ring0Count is stored
             // per theme), so re-mirror the resident region into the side dock
             // before relaying it — otherwise the side dock keeps the old theme's
