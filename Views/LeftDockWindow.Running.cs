@@ -231,12 +231,12 @@ public partial class LeftDockWindow
 
     /// <summary>Lights up the flowing blue border on each pinned icon whose
     /// target program is currently running (mirrors the main dock).</summary>
-    private void ApplyPinnedRunning(RunningAppTracker.RunningSnapshot snapshot, List<string> explorerTitles,
+    private void ApplyPinnedRunning(RunningAppTracker.RunningSnapshot? snapshot, List<string> explorerTitles,
         System.Collections.Generic.HashSet<string> runningAumids)
     {
         foreach (var icon in _pinnedIcons)
         {
-            icon.IsRunning = RunningAppTracker.IsEntryRunning(
+            icon.IsRunning = snapshot != null && RunningAppTracker.IsEntryRunning(
                 icon.Entry, snapshot, explorerTitles, runningAumids);
         }
     }
