@@ -18,7 +18,7 @@ namespace Polaris.Views;
 public partial class RadialIcon : UserControl
 {
     private static readonly Duration Anim = new(TimeSpan.FromMilliseconds(110));
-    private const double HoverScale = 1.7;
+    private const double HoverScale = DockTuning.HoverScale;
     private const double LabelWidth = 150;
 
     // The icon plate's decorative brushes / shadow are identical for every icon

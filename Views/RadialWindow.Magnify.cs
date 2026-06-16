@@ -30,7 +30,7 @@ public partial class RadialWindow
 
     /// <summary>Peak magnification directly under the cursor (matches the legacy
     /// hover zoom so High and Low modes reach the same maximum size).</summary>
-    private const double MagnifyPeak = 1.7;
+    private const double MagnifyPeak = DockTuning.HoverScale;
 
     /// <summary>True when the main dock should use the continuous cursor-distance
     /// magnification (High performance mode). Low mode keeps the event-driven
@@ -192,11 +192,11 @@ public partial class RadialWindow
             fp = _slotPositions[focal];
         }
 
-        // Match the low-performance hover spread exactly (SpreadNeighbours):
-        // push = IconSize * 0.75, influence = IconSize * 2.7, in raw icon units.
+        // Match the low-performance hover spread exactly (SpreadNeighbours), in
+        // raw icon units; both read the shared DockTuning spread constants.
         double iconSize = _config.Settings.IconSize;
-        double influence = iconSize * 2.7;
-        double push = iconSize * 0.75;
+        double influence = iconSize * DockTuning.SpreadInfluence;
+        double push = iconSize * DockTuning.SpreadPush;
         double maxDelta = 0.0;
 
         for (int i = 0; i < n; i++)

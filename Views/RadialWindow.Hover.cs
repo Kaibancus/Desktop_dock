@@ -78,7 +78,7 @@ public partial class RadialWindow
     /// <summary>Must match <c>RadialIcon.HoverScale</c> — the hover zoom factor,
     /// used to place the floating label below the zoomed icon and to size its
     /// font to match the (formerly icon-scaled) built-in label.</summary>
-    private const double HoverScaleConst = 1.7;
+    private const double HoverScaleConst = DockTuning.HoverScale;
 
     private void ShowGlassHoverLabel(RadialIcon ic, int idx)
     {
@@ -158,8 +158,8 @@ public partial class RadialWindow
     private void SpreadNeighbours(int hovered)
     {
         double iconSize = _config.Settings.IconSize;
-        double push = iconSize * 0.75;
-        double influence = iconSize * 2.7;
+        double push = iconSize * DockTuning.SpreadPush;
+        double influence = iconSize * DockTuning.SpreadInfluence;
         Point hp = _slotPositions[hovered];
 
         for (int i = 0; i < _iconElements.Count; i++)

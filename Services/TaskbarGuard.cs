@@ -141,8 +141,8 @@ internal sealed class TaskbarGuard
                         if (!HasNeighborBelow(mi.rcMonitor))
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
-                            double bandStart = mi.rcMonitor.Left + w * 0.25;
-                            double bandEnd = mi.rcMonitor.Right - w * 0.25;
+                            double bandStart = mi.rcMonitor.Left + w * CentreBandEdgeFraction;
+                            double bandEnd = mi.rcMonitor.Right - w * CentreBandEdgeFraction;
                             int floor = mi.rcMonitor.Bottom - TaskbarGuardRows;
                             // PROACTIVELY confine the cursor above the bottom edge
                             // whenever it is within the centre band's X range. A
@@ -248,8 +248,8 @@ internal sealed class TaskbarGuard
                         if (!HasNeighborBelow(mi.rcMonitor))
                         {
                             int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
-                            double bandStart = mi.rcMonitor.Left + w * 0.25;
-                            double bandEnd = mi.rcMonitor.Right - w * 0.25;
+                            double bandStart = mi.rcMonitor.Left + w * CentreBandEdgeFraction;
+                            double bandEnd = mi.rcMonitor.Right - w * CentreBandEdgeFraction;
                             // Hold the cursor clear of the very edge across the
                             // centre band, and SWALLOW the original edge event
                             // (return non-zero): on a fast flick a single move
@@ -300,8 +300,8 @@ internal sealed class TaskbarGuard
     private bool HasNeighborBelow(in RECT m)
     {
         int w = m.Right - m.Left;
-        double bandStart = m.Left + w * 0.25;
-        double bandEnd = m.Right - w * 0.25;
+        double bandStart = m.Left + w * CentreBandEdgeFraction;
+        double bandEnd = m.Right - w * CentreBandEdgeFraction;
         const int tol = 2;   // tolerate a 1-2px seam between adjacent monitors
         var rects = _monitorRects;
         foreach (var r in rects)
@@ -316,6 +316,10 @@ internal sealed class TaskbarGuard
     }
 
     private const int WH_MOUSE_LL = 14;
+    // Fraction of a monitor's width excluded at EACH end when defining the guarded
+    // "centre band": 0.25 leaves the central 50% guarded and the outer 50% free to
+    // summon the taskbar. Must mirror the side dock's bottom-edge trigger band.
+    private const double CentreBandEdgeFraction = 0.25;
     // Pixel rows above the monitor's bottom edge that the cursor is held clear of
     // inside the centre band, so the auto-hide taskbar's reveal tolerance never
     // fires there. Stays below the dock's edge reach so the dock still pops.
