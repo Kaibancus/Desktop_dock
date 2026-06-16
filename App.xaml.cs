@@ -793,21 +793,10 @@ public partial class App : Application
     private const int WM_MOUSEMOVE = 0x0200;
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const uint MONITORINFOF_PRIMARY = 1;
     private const uint ABM_GETSTATE = 0x00000004;
     private const long ABS_AUTOHIDE = 0x0000001;
 
     private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSLLHOOKSTRUCT
-    {
-        public POINT pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
