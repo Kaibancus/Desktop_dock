@@ -188,6 +188,11 @@
                 <Ellipse.Effect>
                     <BlurEffect Radius="6"/>
                 </Ellipse.Effect>
+                <!-- The glow only pulses Opacity, so bake the blur once instead of
+                     re-rasterising it every breathing frame (matches RunningGlowBorder). -->
+                <Ellipse.CacheMode>
+                    <BitmapCache/>
+                </Ellipse.CacheMode>
             </Ellipse>
             <Ellipse x:Name="RunDot"
                      Opacity="0"

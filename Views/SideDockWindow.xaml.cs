@@ -554,6 +554,10 @@ public partial class SideDockWindow : Window
         _runningTimer.Stop();
         _pinnedScroll = 0;
         HideHoverLabel();
+        // Let the magnification wave ease back to rest during the fade instead of
+        // holding the last cursor position (which it would, since a collapsed
+        // window receives no more mouse moves to clear it).
+        _waveCursorY = double.NaN;
 
         double from = RootGrid.Opacity;
         var fade = new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(160));
@@ -563,6 +567,11 @@ public partial class SideDockWindow : Window
             {
                 PanelCanvas.Visibility = Visibility.Collapsed;
                 _dismissing = false;
+                // Guarantee the per-frame wave loop is torn down once hidden: if
+                // the dock was dismissed while the cursor sat over it (launch /
+                // click-away), OnWaveTick would otherwise keep ticking every vsync
+                // forever behind the invisible window.
+                ResetWave();
             }
         };
         RootGrid.BeginAnimation(OpacityProperty, fade);

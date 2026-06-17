@@ -550,6 +550,10 @@ public partial class SideDockWindow
             Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 },
             IsHitTestVisible = false,
             Opacity = 0,
+            // The glow only pulses its Opacity (a cheap composite), so bake the
+            // blurred ellipse once instead of re-rasterising the blur every frame
+            // the breathing animation ticks — one cached texture per running tile.
+            CacheMode = new System.Windows.Media.BitmapCache(),
         };
         Canvas.SetLeft(glowEllipse, cx - glow / 2.0);
         Canvas.SetTop(glowEllipse, cy - glow / 2.0);

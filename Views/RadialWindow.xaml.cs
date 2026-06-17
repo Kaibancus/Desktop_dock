@@ -428,6 +428,13 @@ public partial class RadialWindow : Window
     // True while the Saturn continuous-orbit profiling scene is pushed.
     private bool _profilingSaturn;
 
+    // True while the glass-panel idle profiling scene is pushed (the orbit light
+    // + running-app sweeps that tick continuously whenever the glass dock is
+    // shown but not being hovered). Symmetric with _profilingSaturn so a
+    // POLARIS_FPS=1 session can read the glass idle frame rate as its own scene
+    // instead of it being lumped into the generic "Idle" bucket.
+    private bool _profilingGlass;
+
     /// <summary>
     /// When true the panel stays open (opened from the tray) so the user can
     /// drag desktop shortcuts onto it. Key-release will not hide it.

@@ -36,6 +36,9 @@ public partial class RadialWindow
                 Opacity = 0.55,
                 Color = Color.FromRgb(0x0A, 0x10, 0x1C),
             },
+            // Static button — bake its drop shadow so the surrounding dock
+            // animations don't re-rasterise the blur on every recomposite.
+            CacheMode = new System.Windows.Media.BitmapCache(),
             Child = new TextBlock
             {
                 Text = "⚙",

@@ -81,7 +81,14 @@ public partial class RadialWindow
         // The liquid-glass dock no longer frosts the desktop behind it — the
         // panel sits on the clear wallpaper. (Desktop-blur capture removed.)
         if (_theme.ShowGlassPanel)
+        {
             AnimateGlassRise();         // slide the dock up from the screen bottom
+            // The glass dock runs the orbit light + running-app sweeps
+            // continuously while shown; mark it the base profiling scene until
+            // the panel hides (mirrors SaturnIdle).
+            Polaris.Services.FpsProfiler.Push("GlassIdle");
+            _profilingGlass = true;
+        }
         else
         {
             PanelCanvas.RenderTransform = Transform.Identity;  // clear any glass rise
@@ -232,6 +239,12 @@ public partial class RadialWindow
         {
             _profilingSaturn = false;
             Polaris.Services.FpsProfiler.Pop("SaturnIdle");
+        }
+        // End the glass idle profiling scene if it was active.
+        if (_profilingGlass)
+        {
+            _profilingGlass = false;
+            Polaris.Services.FpsProfiler.Pop("GlassIdle");
         }
 
         // Reset the glass grid scroll so the next summon starts at the top row.
