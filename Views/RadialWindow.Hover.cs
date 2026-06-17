@@ -263,6 +263,10 @@ public partial class RadialWindow
             return;
         }
 
+        // Drag finished: dismiss the overlay ghost (a Rebuild below recreates the
+        // real icon on every drop path).
+        EndDragGhost(icon);
+
         // Glass theme: dropping a dragged icon onto the left-edge dock pins it
         // there (the main-dock entry stays). Checked before delete/reorder so a
         // drag toward the left edge adds rather than deletes.
@@ -368,6 +372,7 @@ public partial class RadialWindow
         {
             bool wasDragging = _dragging;
             PanelCanvas.ReleaseMouseCapture();
+            EndDragGhost(_pressedIcon);
             _pressedIcon = null;
             _dragging = false;
             _dragTargetRing = -1;

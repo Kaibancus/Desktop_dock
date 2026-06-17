@@ -144,7 +144,7 @@ public partial class RadialWindow : Window
     /// system taskbar (see <see cref="GlassDockBottomMargin"/>), so the taskbar
     /// height is no longer added here.</summary>
     private double GlassBottomReserve =>
-        EffectiveIconSize * 0.30;
+        EffectiveIconSize * 0.22;
 
     // Current vertical scroll of the grid (device-independent px). 0 = first
     // row aligned to the top of the visible grid block; positive scrolls the
@@ -161,7 +161,7 @@ public partial class RadialWindow : Window
 
     /// <summary>Height (px) of one grid cell — the column pitch's vertical twin,
     /// also the per-row scroll step.</summary>
-    private double GlassCellH => EffectiveIconSize * 2.35;
+    private double GlassCellH => EffectiveIconSize * LiquidGlassTheme.RowPitch;
 
     /// <summary>Height of the glass dock <b>body</b> (the panel that frames the
     /// icon grid), fixed to the <see cref="LiquidGlassTheme.VisibleRows"/> visible
@@ -172,9 +172,11 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double padY = icon * 1.15;
+            double padY = icon * 0.95;
             double gridHVis = (LiquidGlassTheme.VisibleRows - 1) * GlassCellH;
-            return gridHVis + icon + padY * 2;
+            // Reserve the resident gap so the visible rows pushed down below the
+            // frame stay inside the slab and the dock keeps a constant footprint.
+            return gridHVis + icon + padY * 2 + icon * LiquidGlassTheme.ResidentGap;
         }
     }
 
@@ -253,9 +255,9 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
-            // Vertical slack must stay below the row pitch (icon*2.35) so that
+            // Vertical slack must stay below the row pitch (icon*RowPitch) so that
             // rows scrolled out of the visible block remain hidden above/below.
             double vMargin = icon * 1.4;
             // Horizontal slack is generous: it only widens the clip sideways (no
@@ -281,7 +283,7 @@ public partial class RadialWindow : Window
         get
         {
             double icon = EffectiveIconSize;
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
             double padX = icon * 1.15;
             double topInset = icon * 0.55;
@@ -398,6 +400,9 @@ public partial class RadialWindow : Window
     private RadialIcon? _pressedIcon;
     private Point _pressPoint;
     private bool _dragging;
+    // Independent overlay carrying the dragged icon so it stays visible anywhere
+    // on the desktop, past the compact (clipped) main-dock window box.
+    private DragGhostWindow? _dragGhost;
 
     // Icons in current _config.Apps order, parallel to the entries. Used to
     // animate the non-dragged icons aside while reordering.
@@ -480,7 +485,9 @@ public partial class RadialWindow : Window
             Interval = TimeSpan.FromSeconds(2.5),
         };
         _previewWarmTimer.Tick += (_, _) => WarmPreviewCache();
-        _previewWarmTimer.Start();
+        // Started on ShowPanel and stopped on HidePanel — there is no reason to keep
+        // capturing window thumbnails (a BitBlt per running window) while the dock is
+        // hidden, and doing so caused occasional background hitches.
 
         // Ticks once a second to keep the glass dock clock current while shown.
         _clockTimer = new System.Windows.Threading.DispatcherTimer
@@ -671,8 +678,8 @@ public partial class RadialWindow : Window
         {
             // Liquid-glass grid panel extents (mirrors DrawGlassPanel); size to
             // the largest possible 6×5 grid so the window fits when expanded.
-            double cellW = icon * 2.15;
-            double cellH = icon * 2.35;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
+            double cellH = icon * LiquidGlassTheme.RowPitch;
             double gridW = (LiquidGlassTheme.Columns - 1) * cellW;
             double gridH = (LiquidGlassTheme.MaxRows - 1) * cellH;
             double panelHalfW = (gridW + icon + icon * 1.15 * 2) / 2.0;
@@ -700,7 +707,7 @@ public partial class RadialWindow : Window
         // the hover-zoom of the top icon row, and the rise-up summon slide.
         if (glass)
         {
-            double cellW = icon * 2.15;
+            double cellW = icon * LiquidGlassTheme.ColumnPitch;
             double dockW = (LiquidGlassTheme.Columns - 1) * cellW + icon + icon * 1.15 * 2;
             double shadowPad = 72.0 * _uiScale;        // slab drop shadow (blur 48 + depth)
             double scrollPad = icon * 1.6;             // scrollbar parked right of the grid
@@ -714,10 +721,10 @@ public partial class RadialWindow : Window
             // delete it — yet it inflates EVERY frame's upload during the common
             // hover / summon / pulse paths. Deletion only needs the dragged icon
             // to clear the slab edge (IsDeleteDrop = outside GlassSlabRect), so a
-            // tighter glass-specific headroom (still ~2 icon widths past the
+            // tighter glass-specific headroom (still ~1.8 icon widths past the
             // slab) keeps the gesture comfortable while shrinking the composited
-            // area ~30%, which lifts the real glass frame rate.
-            double glassDragHeadroom = _config.Settings.IconSize * _themeScale * 2.5;
+            // area further, which lifts the real glass frame rate.
+            double glassDragHeadroom = _config.Settings.IconSize * _themeScale * 1.8;
             // dragHeadroom is added sideways (both edges) and upward only — the
             // window's bottom stays pinned to the screen edge so the dock keeps
             // its position while drag-out clearance grows above and beside it.
