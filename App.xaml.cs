@@ -144,6 +144,13 @@ public partial class App : Application
             return;
         }
 
+        // GPU-rendering spike — D2D/DirectWrite glass-slab visual-fidelity prototype:
+        // shows a GPU-rendered glass slab + clock alongside normal startup so it can
+        // be eyeballed against the real WPF glass dock.
+        if (Environment.GetEnvironmentVariable("POLARIS_GLASS_PROTO") == "1")
+            Dispatcher.BeginInvoke(new Action(Polaris.Services.Gpu.GlassPrototypeWindow.Show),
+                DispatcherPriority.ApplicationIdle);
+
         // Global safety net: a tray-resident app must survive an unexpected
         // exception on the UI thread instead of vanishing silently. Log the
         // fault, tell the user, and keep running where it is safe to do so.

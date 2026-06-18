@@ -110,6 +110,9 @@ WPF 的硬件加速（Tier-2）只对**普通不透明窗口**生效。`AllowsTr
 
 **结论（实测支撑）**：单个大型动画透明窗口，GPU 合成把 **CPU 降约 6 成、系统内存降约 6 成**（后备缓冲移到 VRAM、消除每帧 CPU 整屏上传）。主 dock 面积更大、永久动画更多（轨道光 + 运行辉光 + 放大波），收益只会更大——这正对应它实测的 60–112% CPU 与数百 MB 占用。**GPU 渲染方向已被实测验证，值得推进主 dock 重写**；代价仍是重写整套 D2D 绘制层（见 §3-A 工作量）。
 
-**Spike 产物（均在本分支，默认关闭、零生产影响）**：`Services/Gpu/CompositionHost.cs`、`Views/DragGhostWindowGpu.cs`（`IDragGhost` 接口 A/B 切换）、`Services/Gpu/GpuBenchmark.cs`；Vortice 包仅在本分支引入。
+**Spike 产物（均在本分支，默认关闭、零生产影响）**：`Services/Gpu/CompositionHost.cs`、`Views/DragGhostWindowGpu.cs`（`IDragGhost` 接口 A/B 切换）、`Services/Gpu/GpuBenchmark.cs`、`Services/Gpu/GlassPrototypeWindow.cs`；Vortice 包仅在本分支引入。
 
-**下一步建议**：① 把 §3-A 的逐窗迁移正式排期（DragGhost 已完成 → NotchClock → SideDock → 主 dock）；② 主 dock 重写时先做 D2D 版玻璃 slab（高斯模糊/阴影/渐变）与文本（DirectWrite）的视觉回调原型，确认观感一致后再整体替换。
+**③ 玻璃材质 + 文本视觉回调（`GlassPrototypeWindow`，`POLARIS_GLASS_PROTO=1`）**
+按建议②做了视觉回调原型：用 Direct2D 复刻液态玻璃 slab 的整套图层（投影、清玻璃径向体、磨砂乳白层、边缘暗角、中心高光、明亮 rim），用 **DirectWrite** 画时钟（Segoe UI + 微软雅黑）。与真实 WPF 玻璃 dock 重叠对比、按真实公式（slab 整体 `opacity = 1 - PanelTransparency`、`frostStrength = 1 - PanelTransparency`、各层 ARGB 与渐变半径逐一对齐）调校后，用户确认 **D2D 能复刻玻璃质感 + 清晰文本**（半透明通透感、磨砂、圆角、rim、文字渲染均到位）。要点经验：① 必须用与真实 slab 相同的**比例**（高大宽条）才能让径向渐变 falloff 一致（薄条会显著偏不均匀）；② 整块要乘 slab 透明度（~0.40），磨砂是**集中而非铺满**的乳白层，真实 dock 以通透为主；③ WPF `Pbgra32` ↔ D2D 预乘 BGRA 直接对应，色彩无明显偏差。**剩余像素级色彩/亮度精调属正式移植时同位置同几何的常规调校**，非 D2D 能力限制。
+
+**下一步建议**：① 把 §3-A 的逐窗迁移正式排期（DragGhost 已完成 → NotchClock → SideDock → 主 dock）；② 主 dock 重写复用本 spike 的 `CompositionHost` + 玻璃绘制原型作为起点；生产投影建议用真正的 D2D `Shadow` 效果（本原型用低透明叠加近似以保稳健）；③ 文本用 DirectWrite，注意字体回退（Segoe UI + 微软雅黑）与 DPI。

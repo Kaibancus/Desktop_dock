@@ -110,6 +110,15 @@ internal sealed class CompositionHost : IDisposable
         finally { handle.Free(); }
     }
 
+    /// <summary>Re-binds the swap-chain back buffer as the device context's target
+    /// (after a temporary target switch — e.g. rendering a shadow silhouette into a
+    /// command list for the D2D <c>Shadow</c> effect).</summary>
+    public void SetDefaultTarget() => _d2d.Target = _targetBitmap;
+
+    /// <summary>Presents the swap chain (for callers that drive BeginDraw/EndDraw
+    /// themselves, e.g. an interleaved command-list shadow pass).</summary>
+    public void Present() => _swapChain.Present(1, PresentFlags.None);
+
     /// <summary>Clears to fully transparent, runs the caller's draw, presents.</summary>
     public void Render(Action<ID2D1DeviceContext> draw)
     {
