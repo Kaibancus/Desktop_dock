@@ -998,6 +998,15 @@ public static class WindowPreviewService
 
     /// <summary>Full executable path and packaged AUMID (null when unpackaged)
     /// of a process id; path is null if the process is inaccessible.</summary>
+    /// <summary>Reads a process's full image path via the low-privilege
+    /// QueryFullProcessImageName query (PROCESS_QUERY_LIMITED_INFORMATION) — the
+    /// same one the Windows shell/taskbar uses. Far more robust than
+    /// Process.MainModule.FileName (which needs PROCESS_VM_READ and fails on
+    /// anti-debug-protected or cross-bitness processes such as UU加速器). Returns
+    /// null on failure.</summary>
+    public static string? TryGetProcessImagePath(uint pid)
+        => pid == 0 ? null : GetProcessInfo(pid, out _);
+
     private static string? GetProcessInfo(uint pid, out string? aumid)
     {
         aumid = null;
@@ -1380,10 +1389,10 @@ public static class WindowPreviewService
         {
             try
             {
-                // Prefer exact module-path match; fall back to name-only when the
-                // module path is inaccessible (elevated / bitness mismatch).
-                string? modulePath = null;
-                try { modulePath = p.MainModule?.FileName; } catch (System.Exception ex) { Log.Debug("WindowPreview", "module path inaccessible (elevated/bitness)", ex); }
+                // Prefer exact module-path match; the robust low-privilege query
+                // reads paths that Process.MainModule can't (elevated / anti-debug
+                // / bitness mismatch). Fall back to name-only when even that fails.
+                string? modulePath = TryGetProcessImagePath((uint)p.Id);
 
                 if (modulePath == null ||
                     string.Equals(Path.GetFullPath(modulePath), fullTarget,

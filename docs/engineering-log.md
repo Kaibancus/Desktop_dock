@@ -39,6 +39,23 @@
 
 ---
 
+## ⚡ 性能优化 / 健壮性
+
+- **统一进程检测到低权限健壮路径读取（参考 Windows 任务栏）**：此前「检测不到运行程序」
+  与「常驻+运行区重复显示」两类 BUG 的共同根因是 **`Process.MainModule.FileName` 读不到
+  路径**——它需要 `PROCESS_VM_READ`，对反调试保护进程（UU加速器）、跨位（32/64）、提权进程
+  都会失败。而 Windows shell/任务栏用的是更低权限的 **`QueryFullProcessImageName`**（只需
+  `PROCESS_QUERY_LIMITED_INFORMATION`）。改进：①`WindowPreviewService` 公开
+  `TryGetProcessImagePath`（封装已有的 `QueryFullProcessImageName`）；②把 `SnapshotRunning`、
+  `FindWindowProcess`、`GetWindowsByExeName` 等所有进程路径读取点从 `MainModule.FileName`
+  统一切到它——实测能读到 UU 主程序真实路径 `…\UU\5224\uu.exe`（之前完全读不到）。这让
+  运行快照与运行区（GetTaskbarApps 早已用此 API）看进程的方式一致，大量受保护/跨位进程的
+  路径匹配得以恢复，减少对脆弱的进程名/标题 fallback 的依赖。③提取共享的
+  `IsSameOrChildInstallFolder`（同目录或一层版本子目录，带系统/共享目录与一层深度保护，避免
+  Steam steamapps 等深层误判），**绿灯检测与运行区去重共用同一套安装目录匹配**，把 launcher
+  （`UU\uu_launcher.exe`）与其版本子目录主程序（`UU\5224\uu.exe`）健壮地关联起来；窗口标题
+  匹配退化为极端兜底。
+
 ## 🐛 BUG 修复
 
 - **进程保护应用（UU加速器）的常驻图标不亮绿色运行灯**：UU加速器固定的是

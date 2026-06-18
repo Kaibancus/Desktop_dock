@@ -201,15 +201,15 @@ public static class RunningAppTracker
             {
                 bool hasWindow = p.MainWindowHandle != IntPtr.Zero;
 
-                string? modulePath = null;
-                try
-                {
-                    modulePath = p.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Access denied / 32-vs-64 — fall back to a name match.
-                }
+                // Robust low-privilege image-path read (QueryFullProcessImageName,
+                // PROCESS_QUERY_LIMITED_INFORMATION) — the same query the Windows
+                // shell/taskbar uses, and the SAME one GetTaskbarApps already uses,
+                // so the running snapshot and the running strip now see processes
+                // identically. Reads anti-debug-protected and cross-bitness
+                // processes (e.g. UU加速器) that Process.MainModule.FileName (which
+                // needs PROCESS_VM_READ) cannot. Only a name match is left when even
+                // this fails.
+                string? modulePath = WindowPreviewService.TryGetProcessImagePath((uint)p.Id);
 
                 if (hasWindow)
                 {
@@ -323,31 +323,50 @@ public static class RunningAppTracker
     }
 
     /// <summary>Fallback for launcher-style pins whose pinned exe (e.g. UU加速器's
-    /// uu_launcher.exe) starts the real app process and then exits: true when some
-    /// process owning a VISIBLE window runs an executable installed in the SAME
-    /// folder as <paramref name="exePath"/>. Window-only so background helpers
-    /// can't light it up; same-folder linking ties a launcher to its sibling main
-    /// executable. Skipped for shared system / Program Files root directories,
-    /// where unrelated apps live side by side and would all falsely light up.</summary>
+    /// uu_launcher.exe in ...\UU\) starts the real app process — which often lives
+    /// in a VERSION SUBFOLDER (...\UU\5224\uu.exe) — and then exits: true when some
+    /// process owning a VISIBLE window runs an executable in the SAME folder as
+    /// <paramref name="exePath"/>, or in a DIRECT child folder of it. Limited to one
+    /// level down so it links a launcher to its sibling/versioned main exe without
+    /// matching unrelated apps installed DEEPER under a launcher's tree (e.g. Steam
+    /// games under ...\Steam\steamapps\common\…). Window-only so background helpers
+    /// can't light it up; skipped for shared system / Program Files root dirs.</summary>
     public static bool IsRunningInSameFolderWithWindow(string exePath, RunningSnapshot snapshot)
     {
-        if (string.IsNullOrWhiteSpace(exePath) || snapshot == null)
+        if (snapshot == null)
+            return false;
+        foreach (var p in snapshot.Paths)
+            if (IsSameOrChildInstallFolder(exePath, p))
+                return true;
+        return false;
+    }
+
+    /// <summary>True when <paramref name="candidateExe"/> sits in the SAME folder
+    /// as <paramref name="pinnedExe"/>, or in a DIRECT child folder of it (one
+    /// level) — linking a launcher (...\UU\uu_launcher.exe) to its versioned main
+    /// exe (...\UU\5224\uu.exe) without matching apps installed DEEPER under a
+    /// launcher's tree (e.g. Steam games under ...\Steam\steamapps\common\…).
+    /// Returns false for shared system / Program Files root dirs. Shared by the
+    /// pinned-running test AND the running-strip de-dup so both treat a
+    /// launcher↔main-exe pair identically.</summary>
+    public static bool IsSameOrChildInstallFolder(string pinnedExe, string candidateExe)
+    {
+        if (string.IsNullOrWhiteSpace(pinnedExe) || string.IsNullOrWhiteSpace(candidateExe))
             return false;
         string dir;
-        try { dir = Path.GetDirectoryName(Path.GetFullPath(exePath)) ?? ""; }
+        try { dir = Path.GetDirectoryName(Path.GetFullPath(pinnedExe)) ?? ""; }
         catch { return false; }
         if (string.IsNullOrEmpty(dir) || IsSharedSystemDir(dir))
             return false;
-        foreach (var p in snapshot.Paths)
+        try
         {
-            try
-            {
-                if (string.Equals(Path.GetDirectoryName(p), dir, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            catch (System.Exception ex) { Log.Debug("RunningApps", "malformed path skipped", ex); }
+            string? cdir = Path.GetDirectoryName(Path.GetFullPath(candidateExe));
+            if (cdir == null)
+                return false;
+            return string.Equals(cdir, dir, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetDirectoryName(cdir), dir, StringComparison.OrdinalIgnoreCase);
         }
-        return false;
+        catch { return false; }
     }
 
     /// <summary>True for shared directories (Windows, System32, SysWOW64, the
@@ -723,18 +742,11 @@ public static class RunningAppTracker
                 if (p.MainWindowHandle == IntPtr.Zero)
                     continue;
 
-                // Prefer an exact path match when the module path is readable;
-                // otherwise fall back to the name-only match (access to
-                // MainModule can be denied for elevated processes).
-                string? modulePath = null;
-                try
-                {
-                    modulePath = p.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Access denied / 32-vs-64 — keep as a name-only fallback.
-                }
+                // Prefer an exact path match; read the path with the robust
+                // low-privilege query (works for anti-debug-protected / cross-
+                // bitness processes that Process.MainModule can't open). Fall back
+                // to the name-only match when even that fails.
+                string? modulePath = WindowPreviewService.TryGetProcessImagePath((uint)p.Id);
 
                 if (modulePath != null &&
                     string.Equals(Path.GetFullPath(modulePath), fullTarget,

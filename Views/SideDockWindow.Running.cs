@@ -185,6 +185,25 @@ public partial class SideDockWindow
                         continue;
                 }
                 catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "running-app exclude filter failed", ex); }
+                // Folder de-dup for launcher pins whose running main exe lives in a
+                // (version) subfolder, e.g. resident UU\uu_launcher.exe vs the
+                // running UU\5224\uu.exe — both robustly read via QueryFullProcess-
+                // ImageName now. Mirrors the green-light IsSameOrChildInstallFolder.
+                bool inPinnedFolder = false;
+                if (!string.IsNullOrWhiteSpace(ta.Path))
+                {
+                    foreach (var a in pinned)
+                    {
+                        if (!string.IsNullOrWhiteSpace(a.Path)
+                            && RunningAppTracker.IsSameOrChildInstallFolder(a.Path, ta.Path))
+                        {
+                            inPinnedFolder = true;
+                            break;
+                        }
+                    }
+                }
+                if (inPinnedFolder)
+                    continue;
                 // Title fallback for path-protected apps (UU加速器): its running
                 // window carries no usable path/AUMID, so exclude it when its title
                 // matches a resident pin's display name.
