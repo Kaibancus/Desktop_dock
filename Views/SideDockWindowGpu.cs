@@ -15,26 +15,33 @@ using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
-/// <summary>GPU side dock — STAGE A (static render) + STAGE B (hover hit-test + a
-/// floating name label). Draws the liquid-glass slab and the pinned icon column in
-/// Direct2D under DirectComposition; a cursor poll hit-tests the icons so a hovered
-/// one shows its name on a small label (the window stays click-through — launch/drag
-/// come in later stages). Shown behind POLARIS_GPU_SIDEDOCK=1. Assumes 100% DPI.</summary>
+/// <summary>GPU side dock (spike) — Stage A static render, Stage B hover hit-test +
+/// floating name label, Stage C macOS-style magnify wave, Stage D running-app strip.
+/// Draws the liquid-glass slab, the pinned icon column, a light-split divider and the
+/// running-but-unpinned strip (Polaris tile first, green running dots, "+N" overflow)
+/// in Direct2D under DirectComposition; a cursor poll drives a continuous magnify wave
+/// across both halves and shows the hovered icon's name. Per-monitor DPI aware (layout
+/// in DIPs, window + swap chain in physical px, D2D target DPI = 96 x scale). The window
+/// stays click-through — launch/drag come in Stage E. Shown behind POLARIS_GPU_SIDEDOCK=1.</summary>
 internal sealed class SideDockWindowGpu : IDisposable
 {
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
     private const float HoverScale = 1.5f;
 
+    private enum SlotKind { Pinned, Run, Overflow }
+
     private readonly struct Slot
     {
         public readonly Vector2 Center;
         public readonly float G;
         public readonly string Name;
-        public readonly AppEntry Entry;
-        public readonly bool Running;
-        public Slot(Vector2 c, float g, string name, AppEntry e, bool run)
-        { Center = c; G = g; Name = name; Entry = e; Running = run; }
+        public readonly bool Running;     // draws the breathing green dot
+        public readonly SlotKind Kind;
+        public readonly string IconKey;   // D2D bitmap cache key
+        public readonly BitmapSource? Image;
+        public Slot(Vector2 c, float g, string name, bool run, SlotKind kind, string iconKey, BitmapSource? img)
+        { Center = c; G = g; Name = name; Running = run; Kind = kind; IconKey = iconKey; Image = img; }
     }
 
     private readonly AppConfig _config;
@@ -53,6 +60,8 @@ internal sealed class SideDockWindowGpu : IDisposable
     private int _hover = -1;
     private float _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost;
     private float _gIcon, _cellH;
+    private float _seamMain, _bodyCross, _bodyCrossLen;
+    private int _pinnedVisible;
     private float[] _waveCur = Array.Empty<float>();
     private const float WaveSupport = 2.3f;
 
@@ -103,19 +112,42 @@ internal sealed class SideDockWindowGpu : IDisposable
         double startReserve = 12 * uiScale, endReserve = vertical ? 56 * uiScale : 12 * uiScale;
         double usableMain = mainExtent - startReserve - endReserve;
 
-        double availForCells = usableMain - (startPad + endPad);
-        if (pinnedCount > 0 && pinnedCount * cellH > availForCells)
-            cellH = Math.Max(gIcon * 1.04, availForCells / pinnedCount);
-        int maxVisible = Math.Max(1, (int)Math.Floor(availForCells / cellH));
+        // ---- Running-but-unpinned strip (Stage D) -------------------------
+        var runItems = CollectRunning(apps, out int overflow);
+        int runSlots = 1 + runItems.Count + (overflow > 0 ? 1 : 0);   // Polaris + apps + overflow
+        double seam = effIcon * 0.55;
+
+        // One uniform cell pitch above and below the divider; shrink only if the
+        // combined column would overflow the usable band (mirrors the real dock).
+        int totalCells = pinnedCount + runSlots;
+        double fixedChrome = startPad + endPad + seam;
+        double availForCells = usableMain - fixedChrome;
+        if (totalCells > 0 && totalCells * cellH > availForCells)
+            cellH = Math.Max(gIcon * 1.04, availForCells / totalCells);
+
+        double runningBlockH = runSlots * cellH;          // RunStep == cellH
+        int maxVisible = Math.Max(1, (int)Math.Floor((availForCells - runningBlockH) / cellH));
         int pinnedVisible = Math.Min(pinnedCount, maxVisible);
         double pinnedBlockH = pinnedVisible * cellH;
-        double slabMainLen = startPad + pinnedBlockH + endPad;
+        double slabMainLen = startPad + pinnedBlockH + seam + runningBlockH + endPad;
 
-        double centroidFromSlab = startPad + (pinnedVisible > 0 ? cellH * pinnedVisible / 2.0 : 0);
+        // Centre the VISIBLE ICON CLUSTER (pinned + running, incl. the seam gap),
+        // not the slab box, on the usable band — same correction as the real dock.
+        int visibleCells = pinnedVisible + runSlots;
+        double centroidFromSlab = startPad
+            + (visibleCells > 0 ? cellH * visibleCells / 2.0 : 0)
+            + (visibleCells > 0 ? seam * runSlots / (double)visibleCells : 0);
         double slabMain = (startReserve + usableMain / 2.0) - centroidFromSlab;
         slabMain = Math.Min(slabMain, mainExtent - endReserve - slabMainLen);
         slabMain = Math.Max(slabMain, startReserve);
         double pinnedAreaMain = slabMain + startPad;
+        double runAreaMain = pinnedAreaMain + pinnedBlockH + seam;
+
+        double lastPinnedEnd = pinnedAreaMain + pinnedBlockH - (cellH - gIcon) / 2.0;
+        double firstRunStart = runAreaMain + (cellH - gIcon) / 2.0;
+        double seamMain = pinnedVisible > 0
+            ? (lastPinnedEnd + firstRunStart) / 2.0
+            : runAreaMain - seam / 2.0;
 
         double glassPad = gIcon * 0.30;
         double bodyCross = slabCross;
@@ -141,14 +173,44 @@ internal sealed class SideDockWindowGpu : IDisposable
         };
 
         var running = RunningAppTracker.SnapshotRunning();
+        var noTitles = new List<string>();
+        var noAumids = new HashSet<string>();
         for (int i = 0; i < pinnedVisible && i < apps.Count; i++)
         {
             var entry = apps[i];
             double mainC = pinnedAreaMain + i * cellH + cellH / 2.0;
             (float cx, float cy) = ToLocal(_side, mainC, colCenterCross, _winW, _winH);
-            bool run = RunningAppTracker.IsEntryRunning(entry, running, new List<string>(), new HashSet<string>());
-            _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, entry, run));
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
+            _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, run,
+                SlotKind.Pinned, entry.EffectiveIconSource, img));
         }
+        for (int k = 0; k < runSlots; k++)
+        {
+            double mainC = runAreaMain + k * cellH + cellH / 2.0;
+            (float cx, float cy) = ToLocal(_side, mainC, colCenterCross, _winW, _winH);
+            if (k == 0)
+            {
+                string exe = Environment.ProcessPath ?? "";
+                _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "Polaris", true,
+                    SlotKind.Run, "polaris:" + exe, SafeIcon(exe)));
+            }
+            else if (overflow > 0 && k == runSlots - 1)
+            {
+                _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, "+" + overflow, false,
+                    SlotKind.Overflow, "", null));
+            }
+            else
+            {
+                var it = runItems[k - 1];
+                _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, it.Name, true,
+                    SlotKind.Run, it.IconKey, it.Image));
+            }
+        }
+        _seamMain = (float)seamMain;
+        _bodyCross = (float)bodyCross;
+        _bodyCrossLen = (float)bodyCrossLen;
+        _pinnedVisible = pinnedVisible;
         _gIcon = (float)gIcon;
         _cellH = (float)cellH;
         _waveCur = new float[_slots.Count];
@@ -246,6 +308,8 @@ internal sealed class SideDockWindowGpu : IDisposable
         ctx.BeginDraw();
         ctx.Clear(Col(0, 0, 0, 0));
         GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
+        if (_pinnedVisible > 0)
+            DrawSeam(ctx);
 
         // Draw smallest-first so the magnified (focal) icon sits on top.
         var order = new int[_slots.Count];
@@ -274,15 +338,25 @@ internal sealed class SideDockWindowGpu : IDisposable
         using (var pb = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 1f, 0x08 / 255f)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = plate, RadiusX = 12f, RadiusY = 12f }, pb);
 
-        var bmp = GetBitmap(ctx, s.Entry);
-        if (bmp != null)
+        if (s.Kind == SlotKind.Overflow)
         {
-            float pad = g * 0.14f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
-            var bs = bmp.Size;
-            ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
-                          * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
-            ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
-            ctx.Transform = wave;
+            // Taskbar-style "+N" overflow marker — no icon, just centred text.
+            if (_labelFormat != null && !string.IsNullOrEmpty(s.Name))
+                using (var ink = ctx.CreateSolidColorBrush(Col(0xE6, 0xFF, 0xFF, 0xFF)))
+                    ctx.DrawText(s.Name, _labelFormat, plate, ink);
+        }
+        else
+        {
+            var bmp = GetBitmap(ctx, s.IconKey, s.Image);
+            if (bmp != null)
+            {
+                float pad = g * 0.14f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
+                var bs = bmp.Size;
+                ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
+                              * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
+                ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
+                ctx.Transform = wave;
+            }
         }
 
         if (s.Running)
@@ -326,15 +400,15 @@ internal sealed class SideDockWindowGpu : IDisposable
             ctx.DrawText(s.Name, _labelFormat, rect, ink);
     }
 
-    private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, AppEntry entry)
+    private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
     {
-        string key = entry.EffectiveIconSource;
+        if (string.IsNullOrEmpty(key))
+            return null;
         if (_bmpCache.TryGetValue(key, out var cached))
             return cached;
         ID2D1Bitmap? d2d = null;
         try
         {
-            var src = IconExtractor.GetCached(key, _iconCache);
             if (src != null)
             {
                 if (src.Format != PixelFormats.Pbgra32)
@@ -348,6 +422,138 @@ internal sealed class SideDockWindowGpu : IDisposable
         catch { d2d = null; }
         _bmpCache[key] = d2d;
         return d2d;
+    }
+
+    /// <summary>Light-split divider between the pinned column and the running strip:
+    /// a soft cool glow plus a bright glassy highlight, drawn across the body at
+    /// <see cref="_seamMain"/> (mirrors the WPF dock's <c>DrawSeam</c>).</summary>
+    private void DrawSeam(ID2D1DeviceContext ctx)
+    {
+        (float ax, float ay) = ToLocal(_side, _seamMain, _bodyCross + 10f, _winW, _winH);
+        (float bx, float by) = ToLocal(_side, _seamMain, _bodyCross + _bodyCrossLen - 10f, _winW, _winH);
+        var p0 = new Vector2(ax, ay);
+        var p1 = new Vector2(bx, by);
+        ctx.Transform = Matrix3x2.Identity;
+        // Approximate the WPF BlurEffect glow with two stacked translucent strokes.
+        using (var glowWide = ctx.CreateSolidColorBrush(Col(0x40, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawLine(p0, p1, glowWide, 7f);
+        using (var glow = ctx.CreateSolidColorBrush(Col(0x90, 0xBF, 0xE0, 0xFF)))
+            ctx.DrawLine(p0, p1, glow, 4f);
+        using (var shine = ctx.CreateSolidColorBrush(Col(0xDD, 0xEA, 0xF4, 0xFF)))
+            ctx.DrawLine(p0, p1, shine, 1f);
+    }
+
+    private readonly struct RunItem
+    {
+        public readonly string Name, IconKey;
+        public readonly BitmapSource? Image;
+        public RunItem(string name, string key, BitmapSource? img) { Name = name; IconKey = key; Image = img; }
+    }
+
+    /// <summary>Collects running-but-unpinned taskbar apps for the running strip.
+    /// A lightweight version of the WPF dock's filter (excludes pinned apps by full
+    /// path / file name) — enough for the spike's visual parity.</summary>
+    private List<RunItem> CollectRunning(IReadOnlyList<AppEntry> pinned, out int overflow)
+    {
+        overflow = 0;
+        var result = new List<RunItem>();
+        try
+        {
+            var excludePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var excludeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var excludeAumids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void AddPathAndName(string p)
+            {
+                try { excludePaths.Add(System.IO.Path.GetFullPath(p)); } catch { excludePaths.Add(p); }
+                try { var fn = System.IO.Path.GetFileName(p); if (!string.IsNullOrWhiteSpace(fn)) excludeNames.Add(fn); }
+                catch { /* unreadable path */ }
+            }
+            foreach (var a in pinned)
+            {
+                if (string.IsNullOrWhiteSpace(a.Path))
+                    continue;
+                // Mirror the WPF dock: resolve each pinned app's launcher AUMID and
+                // its real AppsFolder exe, so AppsFolder-launched pins (Edge, VS Code…)
+                // — whose a.Path is a pseudo-launcher, not the running exe — are still
+                // matched and excluded from the running strip (no duplicate tile).
+                string? aumid = WindowPreviewService.TryGetLauncherAumid(a.Path, a.Arguments);
+                if (aumid != null)
+                {
+                    excludeAumids.Add(aumid);
+                    string? exe = WindowPreviewService.TryResolveAppsFolderExe(aumid);
+                    if (!string.IsNullOrWhiteSpace(exe))
+                        AddPathAndName(exe);
+                }
+                else
+                {
+                    AddPathAndName(a.Path);
+                }
+            }
+
+            var filtered = new List<TaskbarApp>();
+            foreach (var ta in WindowPreviewService.GetTaskbarApps())
+            {
+                string full;
+                try { full = System.IO.Path.GetFullPath(ta.Path); } catch { full = ta.Path; }
+                if (!string.IsNullOrEmpty(full) && excludePaths.Contains(full))
+                    continue;
+                if (ta.Aumid != null)
+                {
+                    bool excluded = excludeAumids.Contains(ta.Aumid);
+                    if (!excluded)
+                        foreach (var ex in excludeAumids)
+                            if (WindowPreviewService.AumidFamilyMatches(ta.Aumid, ex)) { excluded = true; break; }
+                    if (excluded)
+                        continue;
+                }
+                try { var fn = System.IO.Path.GetFileName(ta.Path); if (!string.IsNullOrWhiteSpace(fn) && excludeNames.Contains(fn)) continue; }
+                catch { /* unreadable path */ }
+                filtered.Add(ta);
+            }
+
+            const int max = 10;   // RunningMaxComplete
+            if (filtered.Count > max)
+            {
+                overflow = filtered.Count - max;
+                filtered = filtered.GetRange(0, max);
+            }
+            foreach (var ta in filtered)
+            {
+                bool pathless = string.IsNullOrEmpty(ta.Path);
+                string key = !string.IsNullOrEmpty(ta.Aumid) ? "aumid:" + ta.Aumid
+                           : (pathless ? "win:" + ta.Window : ta.Path);
+                string name = !string.IsNullOrWhiteSpace(ta.Title) ? ta.Title!
+                            : (pathless ? "" : System.IO.Path.GetFileNameWithoutExtension(ta.Path));
+                result.Add(new RunItem(name, key, ResolveRunIcon(ta, pathless)));
+            }
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "running collect failed: " + ex.Message); }
+        return result;
+    }
+
+    private static BitmapSource? ResolveRunIcon(TaskbarApp ta, bool pathless)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(ta.Aumid))
+            {
+                var b = IconExtractor.GetIcon(ShellNamespace.NormalizeAppsFolderPath(ta.Aumid));
+                if (b == null && ta.Window != IntPtr.Zero)
+                    b = WindowPreviewService.GetWindowIconImage(ta.Window);
+                return b;
+            }
+            return pathless
+                ? WindowPreviewService.GetWindowIconImage(ta.Window)
+                : (IconExtractor.GetIcon(ta.Path)
+                   ?? (ta.Window != IntPtr.Zero ? WindowPreviewService.GetWindowIconImage(ta.Window) : null));
+        }
+        catch { return null; }
+    }
+
+    private static BitmapSource? SafeIcon(string path)
+    {
+        try { return string.IsNullOrEmpty(path) ? null : IconExtractor.GetIcon(path); }
+        catch { return null; }
     }
 
     public void Dispose()
