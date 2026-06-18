@@ -41,6 +41,17 @@
 
 ## 🐛 BUG 修复
 
+- **进程保护应用（UU加速器）的常驻图标不亮绿色运行灯**：UU加速器固定的是
+  `uu_launcher.exe`（启动器，拉起主程序后自身无窗口），而真正有窗口的主进程 `uu`
+  开启了反调试保护，**`Process.MainModule.FileName` 读不到其 exe 路径**，导致
+  `SnapshotRunning` 既不把它计入 `Paths` 也无路径可匹配——所有基于路径/文件名/同目录的
+  检测（byPath/byExe/byFolder）全部失败，绿灯不亮；但运行区（窗口枚举）仍能显示它，造成
+  「有图标、无绿灯」的不一致。**修复**：`RunningSnapshot` 新增 `WindowTitles`，只收集
+  「有可见窗口但路径读不到」的受保护进程的主窗口标题；`IsEntryRunning` 增加 `byTitle`
+  fallback——当某受保护窗口标题精确等于固定项的显示名时判定为运行（UU 主窗口标题
+  「UU加速器」正好等于固定项名）。只存受保护进程标题，普通应用标题不入集合，避免误判。
+  顺带新增 `IsRunningInSameFolderWithWindow`（同安装目录有可见窗口的兄弟主程序，带
+  系统/共享目录保护）覆盖「路径可读的启动器（如 iQiyi）」场景。
 - **侧边 Dock 隐藏时放大波循环泄漏**（`c3d89d1`）：光标停在侧边 Dock 上时关闭 Dock，
   `OnWaveTick`（`CompositionTarget.Rendering`）不会被注销，每帧在隐藏窗口后持续空转
   （隐藏时 CPU 泄漏）。修复：`DoHide()` 折叠后调用 `ResetWave()` 并把 `_waveCursorY`
