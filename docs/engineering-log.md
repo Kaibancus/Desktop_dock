@@ -52,6 +52,10 @@
   「UU加速器」正好等于固定项名）。只存受保护进程标题，普通应用标题不入集合，避免误判。
   顺带新增 `IsRunningInSameFolderWithWindow`（同安装目录有可见窗口的兄弟主程序，带
   系统/共享目录保护）覆盖「路径可读的启动器（如 iQiyi）」场景。
+  - **后续**：同一应用还会同时出现在常驻区和运行区（运行区未排除它）。同因路径/AUMID
+    读不到，运行区的 path/aumid/fileName 排除全部落空。修复：侧 Dock running strip 增加
+    `excludeTitles`（常驻 pin 的显示名），过滤时运行窗口标题等于某常驻 pin 名则排除
+    （UU 窗口标题「UU加速器」= pin 名），避免「常驻+运行区」重复显示。
 - **侧边 Dock 隐藏时放大波循环泄漏**（`c3d89d1`）：光标停在侧边 Dock 上时关闭 Dock，
   `OnWaveTick`（`CompositionTarget.Rendering`）不会被注销，每帧在隐藏窗口后持续空转
   （隐藏时 CPU 泄漏）。修复：`DoHide()` 折叠后调用 `ResetWave()` 并把 `_waveCursorY`

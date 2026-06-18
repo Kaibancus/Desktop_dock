@@ -82,9 +82,15 @@ public partial class SideDockWindow
         // running strip while running (they don't otherwise appear on the side
         // dock). Only the resident apps — already shown as pinned tiles here — are
         // excluded to avoid duplicating them.
+        var excludeTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var pinned = new List<AppEntry>(_config.SideDockApps);
         foreach (var a in pinned)
         {
+            // Path-protected apps (UU加速器) expose no usable path/AUMID for their
+            // running window, so also exclude any running window whose TITLE equals
+            // a resident pin's display name (UU's window title equals its pin name).
+            if (!string.IsNullOrWhiteSpace(a.Name))
+                excludeTitles.Add(a.Name);
             if (string.IsNullOrWhiteSpace(a.Path))
                 continue;
             string? aumid = WindowPreviewService.TryGetLauncherAumid(a.Path, a.Arguments);
@@ -179,6 +185,11 @@ public partial class SideDockWindow
                         continue;
                 }
                 catch (System.Exception ex) { Polaris.Services.Log.Debug("SideDock", "running-app exclude filter failed", ex); }
+                // Title fallback for path-protected apps (UU加速器): its running
+                // window carries no usable path/AUMID, so exclude it when its title
+                // matches a resident pin's display name.
+                if (!string.IsNullOrWhiteSpace(ta.Title) && excludeTitles.Contains(ta.Title))
+                    continue;
                 filtered.Add(ta);
             }
 
