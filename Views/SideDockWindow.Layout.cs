@@ -168,6 +168,7 @@ public partial class SideDockWindow
         PanelCanvas.Children.Clear();
         _pinnedIcons.Clear();
         _pinnedSlots.Clear();
+        ClearAmbientLoops();
         _scrollLayer = null;
         _scrollTransform = null;
         _hoverLabel = null;
@@ -337,6 +338,7 @@ public partial class SideDockWindow
     {
         var bmp = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
         var icon = new RadialIcon(entry, bmp, size, AccentColor, LabelBrush, dropletHover: true, sideDockStyle: true);
+        icon.AmbientRegistrar = RegisterAmbientLoop;   // pausable breathing while unattended
         icon.ApplyDockEdge(_side);
         icon.ExternalMagnify = true;   // the dock drives a coordinated macOS-style wave
         icon.PreviewMouseLeftButtonDown += Icon_PreviewMouseLeftButtonDown;

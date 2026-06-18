@@ -615,21 +615,21 @@ public partial class SideDockWindow
         canvas.Children.Add(glowEllipse);
         canvas.Children.Add(core);
 
-        int loopFps = App.AmbientFrameRate;
+        int loopFps = App.GlassLoopFrameRate;
         var pulse = new DoubleAnimation(0.55, 1.0, new Duration(TimeSpan.FromSeconds(2.0)))
         {
             AutoReverse = true,
             RepeatBehavior = RepeatBehavior.Forever,
         };
         Timeline.SetDesiredFrameRate(pulse, loopFps);
-        core.BeginAnimation(OpacityProperty, pulse);
+        RegisterAmbientLoop(core, OpacityProperty, pulse);
         var glowPulse = new DoubleAnimation(0.25, 0.65, new Duration(TimeSpan.FromSeconds(2.0)))
         {
             AutoReverse = true,
             RepeatBehavior = RepeatBehavior.Forever,
         };
         Timeline.SetDesiredFrameRate(glowPulse, loopFps);
-        glowEllipse.BeginAnimation(OpacityProperty, glowPulse);
+        RegisterAmbientLoop(glowEllipse, OpacityProperty, glowPulse);
 
         return canvas;
     }

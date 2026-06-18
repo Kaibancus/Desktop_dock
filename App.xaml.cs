@@ -120,6 +120,17 @@ public partial class App : Application
     private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan IdleTrimInterval = TimeSpan.FromSeconds(30);
 
+    // Cursor-movement tracking for the side dock's ambient-animation pause. The
+    // dock is a large per-pixel-alpha layered window, so its breathing run-dots
+    // re-composite the whole surface every tick. We freeze them whenever the
+    // cursor is not actively moving over the dock (stationary or away), and resume
+    // the instant it moves again — eliminating the idle render cost of a dock the
+    // user is merely parked next to.
+    private Point _lastCursorDip = new(double.NaN, double.NaN);
+    private DateTime _lastCursorMoveUtc = DateTime.MinValue;
+    private bool _cursorMovingRecently;
+    private static readonly TimeSpan AmbientStillDelay = TimeSpan.FromMilliseconds(700);
+
     // Masks the system auto-hide taskbar's reveal trigger under the bottom
     // side-dock's centre-50% activation band. Self-contained subsystem (own hook
     // thread + message loop + poll thread); the edge poll only toggles its
@@ -533,22 +544,82 @@ public partial class App : Application
             }
 
             _sideDock.SetEdgeShown(inTrigger || inDock);
+            // Freeze the dock's perpetual breathing animations unless the cursor is
+            // actively moving over (or summoning) it. On this large layered window
+            // each opacity tick re-composites the whole surface (~60% CPU + resident
+            // RAM), so it is wasteful while the cursor is parked still or away. Any
+            // cursor movement resumes them instantly; the magnify wave already stops
+            // itself once it has converged, so a still cursor leaves the dock fully
+            // static and the working-set trim can reclaim its memory.
+            var curDip = new Point(x, y);
+            if (double.IsNaN(_lastCursorDip.X) ||
+                Math.Abs(curDip.X - _lastCursorDip.X) > 0.5 ||
+                Math.Abs(curDip.Y - _lastCursorDip.Y) > 0.5)
+            {
+                _lastCursorDip = curDip;
+                _lastCursorMoveUtc = DateTime.UtcNow;
+            }
+            bool cursorMovingRecently = DateTime.UtcNow - _lastCursorMoveUtc < AmbientStillDelay;
+            _cursorMovingRecently = cursorMovingRecently;
+            bool ambientAttended = _sideDock.DockVisible && (inTrigger || inDock) && cursorMovingRecently;
+            _sideDock.SetAmbientPaused(!ambientAttended);
             EvaluateIdleTrim();
         };
         _edgePollTimer.Start();
     }
 
-    /// <summary>Called every edge-poll tick: once both docks have been hidden for
-    /// <see cref="IdleTrimDelay"/>, evict the process working set (and re-trim
-    /// every <see cref="IdleTrimInterval"/> while still idle) so Polaris's idle
-    /// RAM is returned to the system. Any dock becoming visible resets the timer,
-    /// so an interactive session is never trimmed.</summary>
+    /// <summary>Called every edge-poll tick. Trims the process working set once
+    /// Polaris has been "passive" for <see cref="IdleTrimDelay"/> (re-trimming
+    /// every <see cref="IdleTrimInterval"/> while it stays passive), returning its
+    /// (almost entirely unmanaged) RAM to the system. Passive means the user is
+    /// not currently interacting with a Polaris surface:
+    /// <list type="bullet">
+    /// <item>the main dock is hidden (it is the heavy software-rendered surface —
+    /// while it is up a fault-back mid-hover would hitch the magnify wave, so it
+    /// is never trimmed); AND</item>
+    /// <item>the cursor is not over a visible secondary surface (the side dock or
+    /// the settings window).</item>
+    /// </list>
+    /// This covers all idle shapes: nothing shown, the side dock pinned/parked
+    /// with the cursor away, and the settings window open but not being used. A
+    /// visible window's on-screen pixels are held by DWM, so eviction never blanks
+    /// it; the next interaction simply faults the few pages it needs back in.</summary>
     private void EvaluateIdleTrim()
     {
-        bool idle = _panel?.IsShown != true
-                    && _sideDock?.DockVisible != true
-                    && _settings == null && !_openingSettings;
-        if (!idle)
+        // The main dock is up (or settings is mid-open): treat as active.
+        if (_panel?.IsShown == true || _openingSettings)
+        {
+            _idleSince = DateTime.MaxValue;
+            return;
+        }
+
+        // Active only while the cursor is actually over a visible secondary
+        // surface AND moving — a cursor parked still over the side dock or the
+        // settings window means the surface is static (its breathing is frozen and
+        // its pixels are held by DWM), so it is safe to trim and let the pages
+        // fault back on the next interaction.
+        bool active = false;
+        if (_cursorMovingRecently && GetCursorPos(out POINT cp))
+        {
+            double scale = GetDpiScale();
+            var cur = new Point(cp.X / scale, cp.Y / scale);
+
+            if (_sideDock?.DockVisible == true)
+            {
+                Rect b = _sideDock.GetDockScreenBounds();
+                b.Inflate(24, 24);   // a little slack so a near-edge hover counts
+                if (b.Contains(cur))
+                    active = true;
+            }
+            if (!active && _settings is { IsLoaded: true } s && s.ActualWidth > 0)
+            {
+                var sb = new Rect(s.Left, s.Top, s.ActualWidth, s.ActualHeight);
+                sb.Inflate(16, 16);
+                if (sb.Contains(cur))
+                    active = true;
+            }
+        }
+        if (active)
         {
             _idleSince = DateTime.MaxValue;
             return;
