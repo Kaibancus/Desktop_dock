@@ -311,6 +311,7 @@ internal sealed class SideDockWindowGpu : IDisposable
             }
         }
         _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
+        DrivePreview(_hover);
 
         // Render every frame while the wave is live or a launch bounce is playing;
         // once settled at rest, render one final frame and idle (the timer keeps
@@ -661,6 +662,9 @@ internal sealed class SideDockWindowGpu : IDisposable
     public void Dispose()
     {
         _timer?.Stop();
+        CloseSlotMenu();
+        ClosePreview();
+        if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         _host?.Dispose();
@@ -973,6 +977,127 @@ internal sealed class SideDockWindowGpu : IDisposable
         PersistAndRebuild();
     }
 
+    // ---- Hover window-thumbnail preview (parity with the WPF dock) -----------
+    // The polished thumbnail popup (live capture, caching, per-tile close button,
+    // minimized / no-preview fallbacks) lives in WindowPreviewPopup, which anchors
+    // to a WPF FrameworkElement. The GPU dock has no per-icon WPF visuals, so we
+    // park a tiny, transparent, click-through anchor window over the hovered icon
+    // and use it as the popup's placement target. A single popup is reused; its own
+    // open/close dwell timers drive show/hide as the GPU dock reports hover changes.
+
+    private System.Windows.Window? _anchorWin;
+    private System.Windows.Controls.Border? _anchorEl;
+    private WindowPreviewPopup? _preview;
+    private Func<List<WindowPreview>>? _previewSource;
+    private int _prevHover = -1;
+
+    private const int GWL_EXSTYLE = -20;
+    [DllImport("user32.dll")] private static extern int GetWindowLongW(IntPtr h, int idx);
+    [DllImport("user32.dll")] private static extern int SetWindowLongW(IntPtr h, int idx, int val);
+
+    /// <summary>Builds the windows-source delegate for a slot, or null when the slot
+    /// has no previewable windows (overflow, or our own Polaris tile).</summary>
+    private Func<List<WindowPreview>>? PreviewSourceFor(in Slot s)
+    {
+        if (s.Kind == SlotKind.Pinned && s.Entry != null && !string.IsNullOrWhiteSpace(s.Entry.Path))
+        {
+            var path = s.Entry.Path; var args = s.Entry.Arguments;
+            return () => WindowPreviewService.GetWindowsForEntry(path, args);
+        }
+        if (s.Kind == SlotKind.Run)
+        {
+            if (!string.IsNullOrWhiteSpace(s.RunAumid))
+            { var a = s.RunAumid!; return () => WindowPreviewService.GetWindowsByAumid(a); }
+            if (!string.IsNullOrWhiteSpace(s.RunPath))
+            { var p = s.RunPath!; return () => WindowPreviewService.GetWindowsForEntry(p, null); }
+            if (s.Window != IntPtr.Zero)
+            { var w = s.Window; return () => WindowPreviewService.GetWindowsByHandle(w); }
+        }
+        return null;
+    }
+
+    /// <summary>Called every Tick with the slot under the cursor (or -1). Drives the
+    /// reusable thumbnail popup: re-anchors and re-enters on a slot change, leaves on
+    /// exit. The popup's own dwell timers handle the open/close delays and the
+    /// icon→popup pointer travel.</summary>
+    private void DrivePreview(int hover)
+    {
+        if (hover == _prevHover)
+            return;
+        if (_prevHover >= 0)
+            _preview?.OnPointerLeave();
+        _prevHover = hover;
+        if (hover < 0 || hover >= _slots.Count)
+            return;
+        var s = _slots[hover];
+        var src = PreviewSourceFor(s);
+        if (src == null)
+            return;
+        _previewSource = src;
+        EnsureAnchor();
+        AnchorOverSlot(s);
+        _preview!.Placement = PreviewPlacementForSide();
+        _preview.OnPointerEnter();
+    }
+
+    private PreviewPlacement PreviewPlacementForSide() => _side switch
+    {
+        DockSide.Left => PreviewPlacement.Right,
+        DockSide.Right => PreviewPlacement.Left,
+        DockSide.Top => PreviewPlacement.Below,
+        _ => PreviewPlacement.Above,
+    };
+
+    private void EnsureAnchor()
+    {
+        if (_anchorWin != null)
+            return;
+        _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
+        _anchorWin = new System.Windows.Window
+        {
+            WindowStyle = System.Windows.WindowStyle.None,
+            AllowsTransparency = true,
+            Background = System.Windows.Media.Brushes.Transparent,
+            ShowInTaskbar = false,
+            ShowActivated = false,
+            Topmost = true,
+            ResizeMode = System.Windows.ResizeMode.NoResize,
+            Width = 1, Height = 1, Left = -10000, Top = -10000,
+            Content = _anchorEl,
+        };
+        _anchorWin.Show();
+        // Make the anchor fully click-through / non-activating so it never steals
+        // clicks from the GPU dock icon it sits over.
+        var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
+        int ex = GetWindowLongW(h, GWL_EXSTYLE);
+        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+        _preview = new WindowPreviewPopup(
+            _anchorEl,
+            () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
+            minWindows: 1,
+            onActivated: null);
+    }
+
+    /// <summary>Positions the anchor window so its element exactly overlaps the
+    /// hovered icon's glyph box (screen DIPs), so the popup centres over the icon.</summary>
+    private void AnchorOverSlot(in Slot s)
+    {
+        if (_anchorWin == null)
+            return;
+        double size = _gIcon;
+        _anchorWin.Width = size;
+        _anchorWin.Height = size;
+        _anchorWin.Left = _winX + s.Center.X - size / 2.0;
+        _anchorWin.Top = _winY + s.Center.Y - size / 2.0;
+    }
+
+    private void ClosePreview()
+    {
+        _preview?.Close();
+        _prevHover = -1;
+    }
+
     private void DropSlot(int idx, float lx, float ly)
     {
         var s = _slots[idx];
@@ -1075,6 +1200,8 @@ internal sealed class SideDockWindowGpu : IDisposable
     private void Rebuild()
     {
         _timer?.Stop();
+        CloseSlotMenu();
+        ClosePreview();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
         _host?.Dispose(); _host = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
