@@ -113,6 +113,7 @@
 
 ## ⚡ 性能优化
 
+- **玻璃网格图标虚拟化（显示态深度降内存）**：液态玻璃主 Dock 的图标网格只渲染可视视口内（含上下各 1 行缓冲）的行，离屏行的 `RadialIcon` 对象被丢弃（移出滚动层、退订事件、槽位置 null），由 GC 回收其软件渲染的非托管可视子树——这是显示态占用的主体。滚回视口时按需用 `CreateIcon` 重建。关键设计：`_iconElements` 保持与 `_slotPositions`、配置条目 **1:1 全长**（离屏槽为 null），故所有按索引的代码（放大波 `Magnify`、悬停 spread、拖拽重排 `Reorder`、运行态刷新）只需各加一处 null 守卫即可照常工作，无需重写索引逻辑。配套：①每帧放大波 tick 跳过 null 槽；②重建图标时 `ResetMagnifySlot` 重置该槽放大状态、`RefreshIconState` 从 `_runStateCache`（每轮询覆盖**全部**条目，含离屏）同步套用绿色运行灯，故滚入即时点亮；③拖拽中（`_pressedIcon != null`）暂停虚拟化，drop 触发 `Rebuild` 重新裁剪；④滚动定格后 `GC.Collect(Optimized, 非阻塞, ApplicationIdle 优先级)` 促使非托管渲染资源真正归还。实测显示态约 1029MB→566MB（首次）/ 滚遍全部行后稳定 ~661MB（**-36%**，且收益持久不随使用侵蚀；仅 detach 不丢弃对象时会回升到 842MB，因 BitmapCache/MilCore 资源挂在存活对象上）。仅在网格可滚动（行数 > `VisibleRows`）时生效。
 - **隐藏时把分层窗口缩到 1×1**（接续"隐藏时释放内存"）：`AllowsTransparency=True` 会维持一块
   约 窗口面积×4 字节的逐像素 alpha 软件合成缓冲（外加渲染暂存），是隐藏态占用的主体。`HidePanel`
   在 `ClearVisualTree()` 之后把 `Width=Height=1`，迫使 WPF 释放这块大缓冲；下次 `ShowFaded` 的

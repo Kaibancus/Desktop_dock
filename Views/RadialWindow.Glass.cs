@@ -697,6 +697,10 @@ public partial class RadialWindow
         double clamped = Math.Clamp(target, 0, GlassScrollMax);
         _glassScroll = clamped;
         SyncGlassScrollBar();
+        // Realize rows entering from the destination immediately (no detach yet)
+        // so they're present before the glide reveals them; the settle pass below
+        // detaches the rows that slid out.
+        UpdateGlassVirtualization(allowDetach: false);
 
         if (_glassScrollTransform == null)
             return;
@@ -719,6 +723,8 @@ public partial class RadialWindow
             if (token == _glassScrollAnimToken)
             {
                 EndGlassScrollProfile();
+                // Glide finished — detach the rows that scrolled out of view.
+                UpdateGlassVirtualization();
             }
         };
         // Pin the base value to the destination so the offset persists once the
@@ -739,6 +745,92 @@ public partial class RadialWindow
             _glassScrollTransform.Y = -clamped;
         }
         SyncGlassScrollBar();
+        // Instant jump — re-cull immediately (rows that left are detached, rows
+        // that entered are realized).
+        UpdateGlassVirtualization();
+    }
+
+    /// <summary>Realizes only the glass-grid icons whose row is within (or one
+    /// row of) the visible viewport, and DISCARDS off-screen icons (removes them
+    /// from the scroll layer, unsubscribes their events and nulls their slot) so
+    /// the GC can reclaim their software-rendered visual subtrees — the bulk of
+    /// the shown-state footprint. Slots stay full-length and 1:1 with the entries,
+    /// so every index-based path (magnify wave, hover, reorder, refresh) keeps
+    /// working; each just null-guards a virtualized slot. Skipped while a drag is
+    /// in progress (the dragged icon lives in PanelCanvas and a drop triggers a
+    /// full <c>Rebuild</c> that re-culls) and a no-op when the grid isn't
+    /// scrollable (every row already fits, so all icons stay realized).</summary>
+    /// <param name="allowDetach">When false, off-screen icons are kept realized
+    /// (used during a scroll glide so a row sliding out isn't discarded before it
+    /// has finished leaving the viewport); the settle pass discards them.</param>
+    private void UpdateGlassVirtualization(bool allowDetach = true)
+    {
+        if (!_theme.ShowGlassPanel || _glassScrollLayer == null ||
+            _pressedIcon != null || !GlassScrollable)
+            return;
+
+        Rect vp = GlassGridViewport;
+        // One row of slack each side so a fast scroll / reorder reflow never pops
+        // an icon in late.
+        double pad = GlassCellH;
+        double topLimit = vp.Top - pad;
+        double botLimit = vp.Bottom + pad;
+        double size = EffectiveIconSize * GlassIconScale;
+
+        int n = Math.Min(_iconElements.Count, _slotPositions.Count);
+        bool discarded = false;
+        for (int i = 0; i < n; i++)
+        {
+            double screenY = _slotPositions[i].Y - _glassScroll;
+            bool visible = screenY >= topLimit && screenY <= botLimit;
+            var icon = _iconElements[i];
+            if (visible && icon == null)
+            {
+                var ni = CreateIcon(_config.Apps[i], size);
+                PlaceCentered(ni, _slotPositions[i]);
+                _glassScrollLayer.Children.Add(ni);
+                _iconElements[i] = ni;
+                ResetMagnifySlot(i);
+                RefreshIconState(ni);
+            }
+            else if (!visible && icon != null && allowDetach)
+            {
+                _glassScrollLayer.Children.Remove(icon);
+                icon.PreviewMouseLeftButtonDown -= Icon_PreviewMouseLeftButtonDown;
+                icon.HoverStarted -= OnIconHoverStarted;
+                icon.HoverEnded -= OnIconHoverEnded;
+                icon.WindowActivated -= HidePanel;
+                if (ReferenceEquals(_hoverIcon, icon))
+                    _hoverIcon = null;
+                _iconElements[i] = null;
+                discarded = true;
+            }
+        }
+
+        // The discarded icons' unmanaged (MilCore) render data is rooted by the
+        // managed visual until it finalizes, so nudge a low-priority collection
+        // once a settle pass actually freed something. Background priority keeps
+        // it off the interactive path.
+        if (discarded && allowDetach)
+            Dispatcher.BeginInvoke(
+                () => GC.Collect(2, GCCollectionMode.Optimized, blocking: false),
+                System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+    }
+
+    /// <summary>Resets the magnify-wave bookkeeping for a single slot so a freshly
+    /// realized icon starts at rest (scale 1, no offset) and the next wave tick
+    /// re-pushes it from scratch instead of inheriting the slot's stale state.</summary>
+    private void ResetMagnifySlot(int i)
+    {
+        if (i < 0)
+            return;
+        if (_magCur.Length > i) _magCur[i] = 1.0;
+        if (_magOffX.Length > i) _magOffX[i] = 0.0;
+        if (_magOffY.Length > i) _magOffY[i] = 0.0;
+        if (_magAppScale.Length > i) _magAppScale[i] = -1.0;
+        if (_magAppX.Length > i) _magAppX[i] = double.MinValue;
+        if (_magAppY.Length > i) _magAppY[i] = double.MinValue;
+        if (_magAppZ.Length > i) _magAppZ[i] = int.MinValue;
     }
 
     /// <summary>Pushes the current scroll offset onto the scrollbar's thumb,

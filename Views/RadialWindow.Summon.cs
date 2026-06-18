@@ -256,7 +256,7 @@ public partial class RadialWindow
 
         // Dismiss any open window-preview popups so they don't linger on screen.
         foreach (var ic in _iconElements)
-            ic.ClosePreview();
+            ic?.ClosePreview();
 
         // Fade the content out, then collapse it so the fully-transparent
         // layered window passes clicks straight through to the desktop (a

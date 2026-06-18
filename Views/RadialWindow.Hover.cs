@@ -174,6 +174,9 @@ public partial class RadialWindow
         {
             if (i == hovered)
                 continue;
+            var el = _iconElements[i];
+            if (el == null)
+                continue;
 
             Vector v = _slotPositions[i] - hp;
             double d = v.Length;
@@ -181,11 +184,11 @@ public partial class RadialWindow
             {
                 double amount = push * (1 - d / influence);
                 Point np = _slotPositions[i] + (v / d) * amount;
-                AnimateTo(_iconElements[i], np);
+                AnimateTo(el, np);
             }
             else
             {
-                AnimateTo(_iconElements[i], _slotPositions[i]);
+                AnimateTo(el, _slotPositions[i]);
             }
         }
     }
@@ -195,9 +198,10 @@ public partial class RadialWindow
     {
         for (int i = 0; i < _iconElements.Count && i < _slotPositions.Count; i++)
         {
-            if (_iconElements[i] == _pressedIcon)
+            var el = _iconElements[i];
+            if (el == null || el == _pressedIcon)
                 continue;
-            AnimateTo(_iconElements[i], _slotPositions[i]);
+            AnimateTo(el, _slotPositions[i]);
         }
     }
 
@@ -217,11 +221,12 @@ public partial class RadialWindow
         var positions = SlotPositionsFor(n, newR0);
         for (int i = 0; i < _iconElements.Count; i++)
         {
-            if (_iconElements[i] == _pressedIcon)
+            var el = _iconElements[i];
+            if (el == null || el == _pressedIcon)
                 continue;
             int slot = slotOfEntry[i];
             if (slot >= 0 && slot < positions.Count)
-                AnimateTo(_iconElements[i], positions[slot]);
+                AnimateTo(el, positions[slot]);
         }
     }
 

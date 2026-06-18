@@ -92,9 +92,12 @@ public partial class RadialWindow
         _magCursor = new Point(double.NaN, double.NaN);
         for (int i = 0; i < _iconElements.Count; i++)
         {
-            _iconElements[i].SetMagnify(1.0, 0.0, 0.0);
-            if (_iconElements[i] != _pressedIcon)
-                Panel.SetZIndex(_iconElements[i], 0);
+            var el = _iconElements[i];
+            if (el == null)
+                continue;
+            el.SetMagnify(1.0, 0.0, 0.0);
+            if (el != _pressedIcon)
+                Panel.SetZIndex(el, 0);
         }
         if (_magCur.Length != 0)
             Array.Clear(_magCur);
@@ -208,7 +211,7 @@ public partial class RadialWindow
             double best = double.MaxValue;
             for (int i = 0; i < n && i < _slotPositions.Count; i++)
             {
-                if (_iconElements[i] == _pressedIcon)
+                if (_iconElements[i] is null || _iconElements[i] == _pressedIcon)
                     continue;
                 double dd = (_slotPositions[i] - _magCursor).Length;
                 if (dd < best) { best = dd; focal = i; }
@@ -232,7 +235,8 @@ public partial class RadialWindow
 
         for (int i = 0; i < n; i++)
         {
-            if (_iconElements[i] == _pressedIcon || i >= _slotPositions.Count)
+            var el = _iconElements[i];
+            if (el is null || el == _pressedIcon || i >= _slotPositions.Count)
             {
                 _magCur[i] = 1.0;
                 continue;
@@ -271,7 +275,7 @@ public partial class RadialWindow
                 Math.Abs(_magOffX[i] - _magAppX[i]) > 1e-3 ||
                 Math.Abs(_magOffY[i] - _magAppY[i]) > 1e-3)
             {
-                _iconElements[i].SetMagnify(cur, _magOffX[i], _magOffY[i]);
+                el.SetMagnify(cur, _magOffX[i], _magOffY[i]);
                 _magAppScale[i] = cur;
                 _magAppX[i] = _magOffX[i];
                 _magAppY[i] = _magOffY[i];
@@ -279,7 +283,7 @@ public partial class RadialWindow
             int z = cur > 1.001 ? 3000 + (int)(cur * 1000) : 0;
             if (z != _magAppZ[i])
             {
-                Panel.SetZIndex(_iconElements[i], z);
+                Panel.SetZIndex(el, z);
                 _magAppZ[i] = z;
             }
         }
@@ -288,16 +292,17 @@ public partial class RadialWindow
         {
             for (int i = 0; i < n; i++)
             {
-                if (_iconElements[i] == _pressedIcon)
+                var el = _iconElements[i];
+                if (el == null || el == _pressedIcon)
                     continue;
-                _iconElements[i].SetMagnify(1.0, 0.0, 0.0);
+                el.SetMagnify(1.0, 0.0, 0.0);
                 _magCur[i] = 1.0;
                 _magOffX[i] = 0.0;
                 _magOffY[i] = 0.0;
                 _magAppScale[i] = 1.0;
                 _magAppX[i] = 0.0;
                 _magAppY[i] = 0.0;
-                Panel.SetZIndex(_iconElements[i], 0);
+                Panel.SetZIndex(el, 0);
                 _magAppZ[i] = 0;
             }
             StopMagTicking();

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -408,9 +409,20 @@ public partial class RadialWindow : Window
     // on the desktop, past the compact (clipped) main-dock window box.
     private DragGhostWindow? _dragGhost;
 
-    // Icons in current _config.Apps order, parallel to the entries. Used to
-    // animate the non-dragged icons aside while reordering.
-    private readonly List<RadialIcon> _iconElements = new();
+    // Icons in current _config.Apps order, parallel to the entries (and to
+    // _slotPositions). Used to animate the non-dragged icons aside while
+    // reordering. For the glass dock this list is kept FULL-LENGTH and 1:1 with
+    // the entries, but off-screen rows are VIRTUALIZED: their slot holds null
+    // (the RadialIcon object is discarded so WPF frees its software-rendered
+    // visual subtree) and is recreated on demand when scrolled back into view.
+    // Every index-based consumer therefore null-guards its slot.
+    private readonly List<RadialIcon?> _iconElements = new();
+
+    // Last-known running state per icon source, refreshed for EVERY configured
+    // entry on each running-state poll (not just realized icons). Lets a glass
+    // icon that was virtualized away show the correct green running light the
+    // instant it is recreated on scroll-in, instead of waiting for the next poll.
+    private readonly Dictionary<string, bool> _runStateCache = new();
 
     // Slot the dragged icon is currently hovering toward, expressed as a target
     // ring (0 = inner, 1 = outer, -1 = none) and angular position within it.
@@ -551,7 +563,7 @@ public partial class RadialWindow : Window
     {
         if (!_shown)
             return;
-        var icons = new List<RadialIcon>(_iconElements);
+        var icons = _iconElements.OfType<RadialIcon>().ToList();
         var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -976,6 +988,12 @@ public partial class RadialWindow : Window
         if (_theme.ShowGlassPanel && GlassScrollable)
             DrawGlassScrollBar();
 
+        // Detach the off-screen glass rows so only the visible window of icons
+        // holds a (software-rendered) visual subtree. Runs after the full grid is
+        // built so _slotPositions / _iconElements are complete and 1:1.
+        if (_theme.ShowGlassPanel)
+            UpdateGlassVirtualization();
+
         if (_theme.IsSaturn)
         {
             DrawCenterButton();
@@ -1007,7 +1025,8 @@ public partial class RadialWindow : Window
     {
         // Enumerate processes on a background thread so the (relatively slow)
         // snapshot never blocks the UI thread and stutters the light animation.
-        var icons = new List<RadialIcon>(_iconElements);
+        var icons = _iconElements.OfType<RadialIcon>().ToList();
+        var entries = new List<AppEntry>(_config.Apps);
         var flashing = AttentionService.SnapshotFlashing();
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -1019,6 +1038,14 @@ public partial class RadialWindow : Window
             try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
             catch { runningAumids = new System.Collections.Generic.HashSet<string>(); }
 
+            // Running state for EVERY configured entry (cheap, entry-based) so a
+            // virtualized icon recreated on scroll-in can be lit instantly from
+            // the cache rather than appearing dark until the next poll.
+            var runMap = new Dictionary<string, bool>();
+            foreach (var entry in entries)
+                runMap[entry.EffectiveIconSource] = RunningAppTracker.IsEntryRunning(
+                    entry, running, explorerTitles, runningAumids);
+
             // Resolve each running icon's windows to derive its new-message badge:
             // flashing if any of its windows is requesting attention, with a best-
             // effort unread count parsed from the window titles. Reusing
@@ -1027,8 +1054,7 @@ public partial class RadialWindow : Window
             var attention = new Dictionary<RadialIcon, (bool flashing, int count)>();
             foreach (var icon in icons)
             {
-                bool isRunning = RunningAppTracker.IsEntryRunning(
-                    icon.Entry, running, explorerTitles, runningAumids);
+                bool isRunning = runMap.TryGetValue(icon.Entry.EffectiveIconSource, out var r) && r;
                 if (!isRunning)
                 {
                     attention[icon] = (false, 0);
@@ -1039,15 +1065,25 @@ public partial class RadialWindow : Window
 
             Dispatcher.BeginInvoke(() =>
             {
+                foreach (var kv in runMap)
+                    _runStateCache[kv.Key] = kv.Value;
                 foreach (var icon in icons)
                 {
-                    icon.IsRunning = RunningAppTracker.IsEntryRunning(
-                        icon.Entry, running, explorerTitles, runningAumids);
+                    icon.IsRunning = runMap.TryGetValue(icon.Entry.EffectiveIconSource, out var r) && r;
                     if (attention.TryGetValue(icon, out var a))
                         icon.SetAttention(a.flashing, a.count);
                 }
             });
         });
+    }
+
+    /// <summary>Applies the cached running state to a single icon — used the
+    /// moment a virtualized glass icon is recreated on scroll-in so its green
+    /// light matches the rest of the dock without waiting for the next poll.</summary>
+    private void RefreshIconState(RadialIcon icon)
+    {
+        if (_runStateCache.TryGetValue(icon.Entry.EffectiveIconSource, out var r))
+            icon.IsRunning = r;
     }
 
     /// <summary>Starts (or restarts) the inner/outer ring revolution at periods
