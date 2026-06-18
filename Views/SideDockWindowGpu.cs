@@ -42,9 +42,11 @@ internal sealed class SideDockWindowGpu : IDisposable
         public readonly BitmapSource? Image;
         public readonly AppEntry? Entry;  // pinned: the app to launch
         public readonly IntPtr Window;    // running: the window to activate
+        public readonly string? RunPath;  // running: exe path (for right-click pin/close)
+        public readonly string? RunAumid; // running: AUMID (for right-click pin/close)
         public Slot(Vector2 c, float g, string name, bool run, SlotKind kind, string iconKey,
-            BitmapSource? img, AppEntry? entry, IntPtr window)
-        { Center = c; G = g; Name = name; Running = run; Kind = kind; IconKey = iconKey; Image = img; Entry = entry; Window = window; }
+            BitmapSource? img, AppEntry? entry, IntPtr window, string? runPath = null, string? runAumid = null)
+        { Center = c; G = g; Name = name; Running = run; Kind = kind; IconKey = iconKey; Image = img; Entry = entry; Window = window; RunPath = runPath; RunAumid = runAumid; }
     }
 
     private readonly AppConfig _config;
@@ -216,7 +218,7 @@ internal sealed class SideDockWindowGpu : IDisposable
             {
                 var it = runItems[k - 1];
                 _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, it.Name, true,
-                    SlotKind.Run, it.IconKey, it.Image, null, it.Window));
+                    SlotKind.Run, it.IconKey, it.Image, null, it.Window, it.Path, it.Aumid));
             }
         }
         _seamMain = (float)seamMain;
@@ -513,7 +515,9 @@ internal sealed class SideDockWindowGpu : IDisposable
         public readonly string Name, IconKey;
         public readonly BitmapSource? Image;
         public readonly IntPtr Window;
-        public RunItem(string name, string key, BitmapSource? img, IntPtr window) { Name = name; IconKey = key; Image = img; Window = window; }
+        public readonly string? Path, Aumid;
+        public RunItem(string name, string key, BitmapSource? img, IntPtr window, string? path, string? aumid)
+        { Name = name; IconKey = key; Image = img; Window = window; Path = path; Aumid = aumid; }
     }
 
     /// <summary>Collects running-but-unpinned taskbar apps for the running strip.
@@ -588,7 +592,7 @@ internal sealed class SideDockWindowGpu : IDisposable
                 bool pathless = string.IsNullOrEmpty(ta.Path);
                 string key = !string.IsNullOrEmpty(ta.Aumid) ? "aumid:" + ta.Aumid
                            : (pathless ? "win:" + ta.Window : ta.Path);
-                result.Add(new RunItem(FriendlyRunName(ta, pathless), key, ResolveRunIcon(ta, pathless), ta.Window));
+                result.Add(new RunItem(FriendlyRunName(ta, pathless), key, ResolveRunIcon(ta, pathless), ta.Window, ta.Path, ta.Aumid));
             }
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "running collect failed: " + ex.Message); }
@@ -666,6 +670,7 @@ internal sealed class SideDockWindowGpu : IDisposable
     // ---- Interaction (Stage E): click-launch, drag-reorder, drag-out-unpin ----
 
     private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_NCHITTEST = 0x0084;
+    private const uint WM_RBUTTONUP = 0x0205;
     private const uint WM_DROPFILES = 0x0233;
     private const int HTTRANSPARENT = -1, HTCLIENT = 1;
 
@@ -754,6 +759,14 @@ internal sealed class SideDockWindowGpu : IDisposable
                     Render();
                 return true;
             }
+            case WM_RBUTTONUP:
+            {
+                (float lx, float ly) = ClientDip(lParam);
+                int idx = HitSlot(lx, ly);
+                if (idx >= 0 && idx < _slots.Count)
+                    ShowSlotMenu(idx);
+                return true;
+            }
         }
         return false;
     }
@@ -793,6 +806,171 @@ internal sealed class SideDockWindowGpu : IDisposable
                 WindowPreviewService.Activate(s.Window);
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "launch failed: " + ex.Message); }
+    }
+
+    // ---- Right-click context menu (parity with the WPF dock) -----------------
+
+    private System.Windows.Controls.Primitives.Popup? _slotMenu;
+
+    /// <summary>Shows a dock-styled right-click menu for the slot under the cursor:
+    /// pinned icons offer unpin (+ close window when running); running-strip tiles
+    /// offer pin-to-resident + close. Mirrors <c>SideDockWindow.Menu.cs</c>.</summary>
+    private void ShowSlotMenu(int idx)
+    {
+        var s = _slots[idx];
+        var items = new List<(string text, Action action)>();
+        if (s.Kind == SlotKind.Pinned && s.Entry != null)
+        {
+            var entry = s.Entry;
+            items.Add(("从常驻区取消固定", () => UnpinPinned(entry)));
+            if (s.Running)
+                items.Add(("关闭窗口", () => CloseSlotWindows(s)));
+        }
+        else if (s.Kind == SlotKind.Run)
+        {
+            if (!string.IsNullOrWhiteSpace(s.RunPath) || !string.IsNullOrWhiteSpace(s.RunAumid))
+                items.Add(("固定到常驻区", () => PinRunningSlot(s)));
+            items.Add(("关闭窗口", () => CloseSlotWindows(s)));
+        }
+        if (items.Count == 0)
+            return;
+        BuildAndShowSlotMenu(s, items);
+    }
+
+    private void BuildAndShowSlotMenu(in Slot s, List<(string text, Action action)> items)
+    {
+        CloseSlotMenu();
+
+        bool light = SystemTheme.IsLight;
+        var textColor   = light ? System.Windows.Media.Color.FromArgb(0xF0, 0x1B, 0x1B, 0x1F) : System.Windows.Media.Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF);
+        var hoverColor  = light ? System.Windows.Media.Color.FromArgb(0x14, 0x00, 0x00, 0x00) : System.Windows.Media.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF);
+        var shellColor  = light ? System.Windows.Media.Color.FromArgb(0xF4, 0xF3, 0xF3, 0xF6) : System.Windows.Media.Color.FromArgb(0xF2, 0x1E, 0x1E, 0x22);
+        var borderColor = light ? System.Windows.Media.Color.FromArgb(0x22, 0x00, 0x00, 0x00) : System.Windows.Media.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+
+        var panel = new System.Windows.Controls.StackPanel();
+        foreach (var (text, action) in items)
+        {
+            var label = new System.Windows.Controls.TextBlock
+            {
+                Text = text,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontSize = 13 * FontScale.Current,
+                Foreground = new SolidColorBrush(textColor),
+            };
+            var row = new System.Windows.Controls.Border
+            {
+                CornerRadius = new System.Windows.CornerRadius(6),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Padding = new System.Windows.Thickness(13, 7, 18, 7),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Child = label,
+            };
+            row.MouseEnter += (_, _) => row.Background = new SolidColorBrush(hoverColor);
+            row.MouseLeave += (_, _) => row.Background = System.Windows.Media.Brushes.Transparent;
+            var act = action;
+            row.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                CloseSlotMenu();
+                try { act(); } catch (Exception ex) { Log.Warn("SideDockGpu", "menu action failed: " + ex.Message); }
+            };
+            panel.Children.Add(row);
+        }
+
+        var shell = new System.Windows.Controls.Border
+        {
+            Background = new SolidColorBrush(shellColor),
+            CornerRadius = new System.Windows.CornerRadius(10),
+            BorderBrush = new SolidColorBrush(borderColor),
+            BorderThickness = new System.Windows.Thickness(1),
+            Padding = new System.Windows.Thickness(5),
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 20, ShadowDepth = 3, Direction = 270,
+                Opacity = light ? 0.28 : 0.5, Color = System.Windows.Media.Colors.Black,
+            },
+            Child = panel,
+        };
+
+        // Anchor the menu just past the icon, opening toward the screen interior.
+        // All of _winX/_winY/_gIcon/s.Center are layout DIPs (the window is sized in
+        // DIPs and positioned at _winX*_dpi), and WPF Popup.Absolute offsets are
+        // screen DIPs — so screen-DIP icon centre = _winX + s.Center. Measure the
+        // shell so we can centre / offset it without a WPF placement target.
+        shell.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var ds = shell.DesiredSize;
+        double half = _gIcon / 2.0; const double gap = 4.0;
+        double cxDip = _winX + s.Center.X;
+        double cyDip = _winY + s.Center.Y;
+        double px, py;
+        switch (_side)
+        {
+            case DockSide.Left:   px = cxDip + half + gap;            py = cyDip - ds.Height / 2.0; break;
+            case DockSide.Right:  px = cxDip - half - gap - ds.Width; py = cyDip - ds.Height / 2.0; break;
+            case DockSide.Top:    px = cxDip - ds.Width / 2.0;        py = cyDip + half + gap; break;
+            default:              px = cxDip - ds.Width / 2.0;        py = cyDip - half - gap - ds.Height; break;  // Bottom → above
+        }
+        var popup = new System.Windows.Controls.Primitives.Popup
+        {
+            Child = shell,
+            StaysOpen = false,
+            AllowsTransparency = true,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Absolute,
+            HorizontalOffset = px,
+            VerticalOffset = py,
+            PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.Fade,
+        };
+        popup.Closed += (_, _) => { if (ReferenceEquals(_slotMenu, popup)) _slotMenu = null; };
+        _slotMenu = popup;
+        popup.IsOpen = true;
+    }
+
+    private void CloseSlotMenu()
+    {
+        if (_slotMenu != null) { _slotMenu.IsOpen = false; _slotMenu = null; }
+    }
+
+    /// <summary>Closes every window of the slot's app (right-click "关闭窗口").</summary>
+    private void CloseSlotWindows(in Slot s)
+    {
+        List<WindowPreview> wins;
+        try
+        {
+            if (s.Kind == SlotKind.Pinned && s.Entry != null && !string.IsNullOrWhiteSpace(s.Entry.Path))
+                wins = WindowPreviewService.GetWindowsForEntry(s.Entry.Path, s.Entry.Arguments);
+            else if (!string.IsNullOrWhiteSpace(s.RunAumid))
+                wins = WindowPreviewService.GetWindowsByAumid(s.RunAumid!);
+            else if (!string.IsNullOrWhiteSpace(s.RunPath))
+                wins = WindowPreviewService.GetWindowsForEntry(s.RunPath!, null);
+            else
+                wins = WindowPreviewService.GetWindowsByHandle(s.Window);
+        }
+        catch { wins = new List<WindowPreview>(); }
+        if (wins.Count == 0 && s.Window != IntPtr.Zero)
+            WindowPreviewService.CloseWindow(s.Window);
+        else
+            foreach (var w in wins)
+                WindowPreviewService.CloseWindow(w.Handle);
+        // Refresh the strip shortly after so the closed tile drops off.
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+        t.Tick += (o, _) => { ((DispatcherTimer)o!).Stop(); if (_hwnd != IntPtr.Zero) Rebuild(); };
+        t.Start();
+    }
+
+    /// <summary>Pins a running-strip app to the resident region (right-click).</summary>
+    private void PinRunningSlot(in Slot s)
+    {
+        AppEntry? entry = ShellNamespace.FromAumid(s.RunAumid);
+        if (entry == null && !string.IsNullOrWhiteSpace(s.RunPath))
+            entry = ShortcutResolver.CreateEntry(s.RunPath!);
+        if (entry == null)
+            return;
+        if (!string.IsNullOrWhiteSpace(s.Name) && string.IsNullOrWhiteSpace(entry.Name))
+            entry.Name = s.Name;
+        if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) >= 0)
+            return;   // already pinned
+        DockSync.InsertResident(_config, entry, DockSync.ResidentCount(_config));
+        PersistAndRebuild();
     }
 
     private void DropSlot(int idx, float lx, float ly)
