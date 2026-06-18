@@ -25,6 +25,7 @@ internal sealed class NotchClockWindowGpu : INotchClock
 
     private IntPtr _hwnd;
     private CompositionHost? _host;
+    private double _dpi = 1.0;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _format;
     private readonly DispatcherTimer _timer;
@@ -46,9 +47,10 @@ internal sealed class NotchClockWindowGpu : INotchClock
             _atBottom = atBottom;
 
             var mon = MonitorLayout.ActiveBounds;
-            int x = (int)(mon.Left + (mon.Width - WinW) / 2.0);
-            int y = (int)(atBottom ? mon.Bottom - WinH : mon.Top);
-            SetWindowPos(_hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            int pw = (int)Math.Ceiling(WinW * _dpi), ph = (int)Math.Ceiling(WinH * _dpi);
+            int x = (int)Math.Round((mon.Left + (mon.Width - WinW) / 2.0) * _dpi);
+            int y = (int)Math.Round((atBottom ? mon.Bottom - WinH : mon.Top) * _dpi);
+            SetWindowPos(_hwnd, HWND_TOPMOST, x, y, pw, ph, SWP_NOACTIVATE);
             if (!_visible)
             {
                 ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
@@ -75,7 +77,9 @@ internal sealed class NotchClockWindowGpu : INotchClock
         if (_built)
             return;
         _hwnd = CreateWindow(WinW, WinH);
-        _host = new CompositionHost(_hwnd, WinW, WinH);
+        _dpi = CompositionHost.DpiScale(_hwnd);
+        _host = new CompositionHost(_hwnd, (int)Math.Ceiling(WinW * _dpi),
+            (int)Math.Ceiling(WinH * _dpi), (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _format = _dwrite.CreateTextFormat("华文新魏", null, FontWeight.SemiBold,
             FontStyle.Normal, FontStretch.Normal, 20f, "zh-cn");

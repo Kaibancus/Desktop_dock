@@ -155,8 +155,7 @@ internal sealed class SideDockWindowGpu : IDisposable
         Array.Fill(_waveCur, 1f);
 
         _hwnd = CreateWindow(_winW, _winH);
-        uint rawDpi = GetDpiForWindow(_hwnd);
-        _dpi = rawDpi >= 48 ? rawDpi / 96.0 : 1.0;
+        _dpi = CompositionHost.DpiScale(_hwnd);
         // Layout is computed in DIPs (MonitorLayout returns DIPs); the Win32 window
         // + DComp swap chain live in PHYSICAL pixels. Size the window to physical px
         // and tell D2D the target DPI so all DIP-space drawing scales up 1:1.
@@ -427,6 +426,5 @@ internal sealed class SideDockWindowGpu : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
-    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
 }

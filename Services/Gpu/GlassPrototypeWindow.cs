@@ -27,6 +27,7 @@ internal sealed class GlassPrototypeWindow
     private readonly DispatcherTimer _timer;
 
     private readonly int _w, _h;
+    private readonly double _dpi;
     private readonly float _margin = 70f;   // room for the drop shadow
 
     public static void Show()
@@ -40,17 +41,21 @@ internal sealed class GlassPrototypeWindow
         _w = 1280;
         _h = 620;
         _hwnd = CreateWindow(_w, _h);
+        _dpi = CompositionHost.DpiScale(_hwnd);
         // Place it bottom-flush, same TALL+WIDE proportions as the real glass dock
         // (its slab is ~700px tall), so the radial gradients fall off as gently as
         // the real one — a thin strip makes them look far more uneven than they are.
         var wa = System.Windows.SystemParameters.WorkArea;
-        // Move only (SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE) — the window was already
-        // created at _w×_h; passing 0,0 size WITHOUT NOSIZE would shrink it to 0×0.
+        // Layout is in DIPs; the window + swap chain are physical-pixel. Size the
+        // window physically (DIP × dpi) and tell the host the scaled DPI so the
+        // DIP-space drawing maps 1:1 (correct on >100% displays).
+        int pw = (int)Math.Ceiling(_w * _dpi), ph = (int)Math.Ceiling(_h * _dpi);
         SetWindowPos(_hwnd, IntPtr.Zero,
-            (int)(wa.Left + (wa.Width - _w) / 2), (int)(wa.Bottom - _h + 50), 0, 0, 0x0001 | 0x0004 | 0x0010);
+            (int)Math.Round((wa.Left + (wa.Width - _w) / 2) * _dpi),
+            (int)Math.Round((wa.Bottom - _h + 50) * _dpi), pw, ph, 0x0004 | 0x0010);
         ShowWindow(_hwnd, 4);
 
-        _host = new CompositionHost(_hwnd, _w, _h);
+        _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _timeFormat = _dwrite.CreateTextFormat("Segoe UI", null, FontWeight.SemiLight,

@@ -35,6 +35,18 @@ internal sealed class CompositionHost : IDisposable
     public int Width { get; }
     public int Height { get; }
 
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    /// <summary>Device pixels per DIP for the monitor hosting <paramref name="hwnd"/>
+    /// (1.0 at 100%, 1.5 at 150%). Layout math is in DIPs but the Win32 window and
+    /// swap chain are physical-pixel; callers scale the window/swap-chain size by
+    /// this and pass <c>96 * scale</c> as the host DPI so DIP-space drawing maps 1:1.</summary>
+    public static double DpiScale(IntPtr hwnd)
+    {
+        uint dpi = GetDpiForWindow(hwnd);
+        return dpi >= 48 ? dpi / 96.0 : 1.0;
+    }
+
     public CompositionHost(IntPtr hwnd, int width, int height, float dpi = 96f)
     {
         Width = Math.Max(1, width);
