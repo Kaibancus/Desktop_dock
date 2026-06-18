@@ -94,7 +94,7 @@ public partial class App : Application
     // poll must NOT re-summon the side dock (which would flash on screen).
     private bool _openingSettings;
     private Forms.NotifyIcon? _tray;
-    private SideDockWindow? _sideDock;
+    private Polaris.Views.ISideDock? _sideDock;
     private DispatcherTimer? _edgePollTimer;
 
     // Idle working-set trimming. While both docks are hidden, Polaris's (almost
@@ -207,13 +207,6 @@ public partial class App : Application
         // Keep registry startup state in sync with config on launch.
         StartupManager.SetEnabled(_config.Settings.RunAtStartup);
 
-        // GPU side dock — STAGE A static-render validation (POLARIS_GPU_SIDEDOCK=1):
-        // shows the D2D slab + pinned icon column at the left edge for eyeballing.
-        if (Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "1")
-            Dispatcher.BeginInvoke(new Action(() =>
-                new Polaris.Views.SideDockWindowGpu(_config).Show()),
-                DispatcherPriority.ApplicationIdle);
-
         // One-time migration: the resident / inner-ring count used to be a single
         // shared value. Seed the currently-active theme's per-theme count from
         // the legacy shared value so it isn't lost; the other theme starts at
@@ -241,19 +234,17 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        // While the GPU side dock spike is on (POLARIS_GPU_SIDEDOCK=1) suppress the
-        // WPF side dock so the two don't render stacked on top of each other — the
-        // GPU window is the one under evaluation. Every later _sideDock reference is
-        // null-guarded, so leaving it null is safe.
-        if (Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") != "1")
-        {
-            _sideDock = new SideDockWindow(_config, Persist);
-            _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
-            // Clicking the Polaris tile in the left dock's running strip toggles the
-            // pinned docks (equivalent to Ctrl+4).
-            _sideDock.ToggleDocks = TogglePinnedDock;
-            _sideDock.Realize();
-        }
+        // Pick the side-dock implementation: the GPU (DirectComposition + Direct2D)
+        // dock under POLARIS_GPU_SIDEDOCK=1, otherwise the WPF one. Both implement
+        // ISideDock so the host wiring below is identical (A/B like the ghost/notch).
+        _sideDock = Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "1"
+            ? new Polaris.Views.SideDockWindowGpu(_config)
+            : new SideDockWindow(_config, Persist);
+        _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
+        // Clicking the Polaris tile in the left dock's running strip toggles the
+        // pinned docks (equivalent to Ctrl+4).
+        _sideDock.ToggleDocks = TogglePinnedDock;
+        _sideDock.Realize();
         // Let the main dock hand an icon to the left dock when dragged onto it.
         _panel.DropToSideDock = TryDropToSideDock;
         // Lift the liquid-glass main dock clear of the side dock when the latter

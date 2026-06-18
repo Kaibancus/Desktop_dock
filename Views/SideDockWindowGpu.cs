@@ -23,7 +23,7 @@ namespace Polaris.Views;
 /// across both halves and shows the hovered icon's name. Per-monitor DPI aware (layout
 /// in DIPs, window + swap chain in physical px, D2D target DPI = 96 x scale). The window
 /// stays click-through — launch/drag come in Stage E. Shown behind POLARIS_GPU_SIDEDOCK=1.</summary>
-internal sealed class SideDockWindowGpu : IDisposable
+internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 {
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
@@ -80,10 +80,128 @@ internal sealed class SideDockWindowGpu : IDisposable
 
     public SideDockWindowGpu(AppConfig config) => _config = config;
 
-    public void Show()
+    // ---- Visibility (ISideDock) ------------------------------------------
+    // The dock is realised once (hidden) and summoned by any of four independent
+    // show reasons, mirroring the WPF side dock. The Win32 window is kept built
+    // and toggled with ShowWindow so a summon doesn't pay to recreate the DComp
+    // surface; the magnify/render Tick idles while hidden.
+    private bool _shown;
+    private bool _realized;
+    private bool _byMain, _byEdge, _byDrag, _byPinned;
+
+    /// <summary>Raised after the dock mutates the shared main-dock app list, so the
+    /// host can refresh the main dock (parity with the WPF side dock).</summary>
+    public event Action? MainDockChanged;
+
+    /// <summary>Invoked when the dock's Polaris tile asks to toggle the pinned docks.</summary>
+    public Action? ToggleDocks { get; set; }
+
+    public bool DockVisible => _shown;
+    public DockSide DockSidePosition => _config.Settings.DockPosition;
+
+    public void Realize()
     {
-        try { Build(); }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "failed: " + ex); }
+        if (_realized)
+            return;
+        _realized = true;
+        try { Build(); }   // builds the window HIDDEN (since _shown == false)
+        catch (Exception ex) { Log.Warn("SideDockGpu", "realize failed: " + ex); }
+    }
+
+    /// <summary>Legacy entry point (was the always-on spike). Now just realises the
+    /// dock hidden, ready to be summoned by the host.</summary>
+    public void Show() => Realize();
+
+    public void SetMainShown(bool shown) { _byMain = shown; UpdateVisibility(); }
+    public void SetPinnedShown(bool shown) { _byPinned = shown; UpdateVisibility(); }
+    public void SetEdgeShown(bool shown) { _byEdge = shown; UpdateVisibility(); }
+    public void SetDragActive(bool active) { _byDrag = active; UpdateVisibility(); }
+
+    public void HideAll()
+    {
+        _byMain = _byEdge = _byDrag = _byPinned = false;
+        UpdateVisibility();
+    }
+
+    /// <summary>The GPU dock has no perpetual breathing animation (the running dot
+    /// is a static gradient and the magnify wave already settles on its own), so
+    /// there is nothing to pause — kept for ISideDock parity.</summary>
+    public void SetAmbientPaused(bool paused) { /* no-op */ }
+
+    private void UpdateVisibility()
+    {
+        bool want = _byMain || _byEdge || _byDrag || _byPinned;
+        if (want == _shown)
+            return;
+        if (want) DoShow();
+        else DoHide();
+    }
+
+    private void DoShow()
+    {
+        _shown = true;
+        if (!_realized) { Realize(); return; }   // Realize builds with _shown=true → shown
+        // Recreate so the running strip + layout reflect the latest state, then
+        // ensure the window is visible and on top.
+        Rebuild();
+        if (_hwnd != IntPtr.Zero)
+        {
+            ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+        }
+    }
+
+    private void DoHide()
+    {
+        _shown = false;
+        CloseSlotMenu();
+        ClosePreview();
+        _hover = -1; _prevHover = -1;
+        if (_hwnd != IntPtr.Zero)
+            ShowWindow(_hwnd, SW_HIDE);
+    }
+
+    public void RefreshFromConfig()
+    {
+        try { DockSync.MirrorResidentToLeft(_config); } catch { }
+        if (_realized) Rebuild();
+    }
+
+    public void RefreshLayout()
+    {
+        if (_realized) Rebuild();
+    }
+
+    /// <summary>Screen-DIP rectangle of the glass slab (the host's edge poll and the
+    /// main dock's "drop into side dock" test work in DIPs). _winX/_winY and the
+    /// slab _sx/_sy/_sw/_sh are all DIPs.</summary>
+    public System.Windows.Rect GetDockScreenBounds()
+    {
+        if (!_realized) Realize();
+        return new System.Windows.Rect(_winX + _sx, _winY + _sy, _sw, _sh);
+    }
+
+    /// <summary>Pins an entry dragged from the main dock onto this dock. The point
+    /// is DEVICE pixels (from the main dock's PointToScreen); convert to window-local
+    /// DIP and test against the slab, then insert at the pointer's main-axis slot.</summary>
+    public bool TryAcceptDrop(System.Windows.Point screenDevicePoint, AppEntry entry)
+    {
+        if (!_realized) Realize();
+        float lx = (float)(screenDevicePoint.X / _dpi - _winX);
+        float ly = (float)(screenDevicePoint.Y / _dpi - _winY);
+        float m = _gIcon * 0.5f;
+        bool inside = lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
+        if (!inside)
+            return false;
+        if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) < 0)
+        {
+            float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
+            int dropIdx = (int)Math.Round((main - _pinnedAreaMain) / _cellMain);
+            dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
+            DockSync.InsertResident(_config, entry, dropIdx);
+            PersistAndRebuild();
+        }
+        return true;
     }
 
     private void Build()
@@ -243,7 +361,7 @@ internal sealed class SideDockWindowGpu : IDisposable
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
-        ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        ShowWindow(_hwnd, _shown ? SW_SHOWNOACTIVATE : SW_HIDE);
         DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
@@ -278,7 +396,7 @@ internal sealed class SideDockWindowGpu : IDisposable
 
     private void Tick()
     {
-        if (_host == null)
+        if (_host == null || !_shown)
             return;
         bool vertical = _side is DockSide.Left or DockSide.Right;
         bool active = false;
@@ -808,6 +926,9 @@ internal sealed class SideDockWindowGpu : IDisposable
             }
             else if (s.Kind == SlotKind.Run && s.Window != IntPtr.Zero)
                 WindowPreviewService.Activate(s.Window);
+            else if (s.Kind == SlotKind.Run && s.Window == IntPtr.Zero
+                     && s.IconKey.StartsWith("polaris:", StringComparison.Ordinal))
+                ToggleDocks?.Invoke();   // the Polaris tile toggles the pinned docks
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "launch failed: " + ex.Message); }
     }
@@ -1183,9 +1304,9 @@ internal sealed class SideDockWindowGpu : IDisposable
         PersistAndRebuild();
     }
 
-    /// <summary>Mirrors the resident region into the side-dock list, saves the config
-    /// and rebuilds the GPU dock. (The WPF dock picks the change up on next launch —
-    /// the spike isn't wired into the host's live-sync callbacks.)</summary>
+    /// <summary>Mirrors the resident region into the side-dock list, saves the config,
+    /// rebuilds the GPU dock and notifies the host so the main dock refreshes live
+    /// (parity with the WPF side dock's MainDockChanged).</summary>
     private void PersistAndRebuild()
     {
         try
@@ -1195,6 +1316,7 @@ internal sealed class SideDockWindowGpu : IDisposable
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
         Rebuild();
+        MainDockChanged?.Invoke();
     }
 
     private void Rebuild()
@@ -1311,8 +1433,10 @@ internal sealed class SideDockWindowGpu : IDisposable
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const uint WS_POPUP = 0x80000000;
     private const int SW_SHOWNOACTIVATE = 4;
+    private const int SW_HIDE = 0;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_NOMOVE = 0x0002;
 
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
 
