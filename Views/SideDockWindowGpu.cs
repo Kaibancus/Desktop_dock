@@ -242,6 +242,7 @@ internal sealed class SideDockWindowGpu : IDisposable
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
@@ -552,19 +553,51 @@ internal sealed class SideDockWindowGpu : IDisposable
                 bool pathless = string.IsNullOrEmpty(ta.Path);
                 string key = !string.IsNullOrEmpty(ta.Aumid) ? "aumid:" + ta.Aumid
                            : (pathless ? "win:" + ta.Window : ta.Path);
-                string name = !string.IsNullOrWhiteSpace(ta.Title) ? ta.Title!
-                            : (pathless ? "" : System.IO.Path.GetFileNameWithoutExtension(ta.Path));
-                result.Add(new RunItem(name, key, ResolveRunIcon(ta, pathless), ta.Window));
+                result.Add(new RunItem(FriendlyRunName(ta, pathless), key, ResolveRunIcon(ta, pathless), ta.Window));
             }
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "running collect failed: " + ex.Message); }
         return result;
     }
 
+    /// <summary>A human-friendly label for a running app: the executable's embedded
+    /// product description (e.g. "Microsoft Edge"), then its file name, then the raw
+    /// window title for path-protected / UWP windows. The window title alone is a
+    /// poor label — a browser's is the full page name, a terminal's is the tab.</summary>
+    private static string FriendlyRunName(TaskbarApp ta, bool pathless)
+    {
+        if (!pathless && !string.IsNullOrEmpty(ta.Path))
+        {
+            try
+            {
+                var desc = System.Diagnostics.FileVersionInfo.GetVersionInfo(ta.Path).FileDescription;
+                if (!string.IsNullOrWhiteSpace(desc))
+                    return desc.Trim();
+            }
+            catch { /* unreadable metadata — fall through */ }
+            try { return System.IO.Path.GetFileNameWithoutExtension(ta.Path); }
+            catch { /* unreadable path */ }
+        }
+        return ta.Title ?? "";
+    }
+
     private static BitmapSource? ResolveRunIcon(TaskbarApp ta, bool pathless)
     {
         try
         {
+            // A real Win32 exe (not a WindowsApps-packaged path) carries its own
+            // icon and is the most reliable source. The AppsFolder lookup is only
+            // preferable for packaged/UWP apps whose exe has no embedded icon — and
+            // for some apps (e.g. Edge launched under a profile-specific AUMID) it
+            // returns a generic blank document, so try the exe icon first here.
+            bool packaged = !string.IsNullOrEmpty(ta.Path)
+                && ta.Path.IndexOf("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!packaged && !string.IsNullOrEmpty(ta.Path))
+            {
+                var pb = IconExtractor.GetIcon(ta.Path);
+                if (pb != null)
+                    return pb;
+            }
             if (!string.IsNullOrEmpty(ta.Aumid))
             {
                 var b = IconExtractor.GetIcon(ShellNamespace.NormalizeAppsFolderPath(ta.Aumid));
@@ -598,15 +631,42 @@ internal sealed class SideDockWindowGpu : IDisposable
     // ---- Interaction (Stage E): click-launch, drag-reorder, drag-out-unpin ----
 
     private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_NCHITTEST = 0x0084;
+    private const uint WM_DROPFILES = 0x0233;
     private const int HTTRANSPARENT = -1, HTCLIENT = 1;
+
+    [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, System.Text.StringBuilder? buf, uint cch);
+    [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out POINT pt);
+    [DllImport("shell32.dll")] private static extern void DragFinish(IntPtr hDrop);
 
     /// <summary>Routes the raw window messages this instance cares about. Returns
     /// true (with <paramref name="result"/>) when handled; false defers to DefWindowProc.</summary>
-    private bool HandleMessage(uint msg, IntPtr lParam, out IntPtr result)
+    private bool HandleMessage(uint msg, IntPtr wParam, IntPtr lParam, out IntPtr result)
     {
         result = IntPtr.Zero;
         switch (msg)
         {
+            case WM_DROPFILES:
+            {
+                IntPtr hDrop = wParam;
+                try
+                {
+                    uint count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+                    DragQueryPoint(hDrop, out POINT pt);
+                    var paths = new List<string>();
+                    for (uint i = 0; i < count; i++)
+                    {
+                        uint len = DragQueryFileW(hDrop, i, null, 0);
+                        var sb = new System.Text.StringBuilder((int)len + 1);
+                        if (DragQueryFileW(hDrop, i, sb, len + 1) > 0)
+                            paths.Add(sb.ToString());
+                    }
+                    HandleDropFiles(paths, pt);
+                }
+                catch (Exception ex) { Log.Warn("SideDockGpu", "drop-in failed: " + ex.Message); }
+                finally { DragFinish(hDrop); }
+                return true;
+            }
             case WM_NCHITTEST:
             {
                 // lParam = SCREEN coords. Inside the glass slab → grab the click;
@@ -735,6 +795,39 @@ internal sealed class SideDockWindowGpu : IDisposable
         }
     }
 
+    /// <summary>Pins desktop shortcuts / executables dropped onto the dock from
+    /// outside (Explorer / desktop), mirroring the WPF dock's OnDrop: each becomes
+    /// a resident app inserted at the pointer's main-axis position.</summary>
+    private void HandleDropFiles(List<string> paths, POINT clientPt)
+    {
+        var entries = new List<AppEntry>();
+        foreach (var p in paths)
+        {
+            try { var e = ShortcutResolver.CreateEntry(p); if (e != null) entries.Add(e); }
+            catch { /* skip an unresolvable drop */ }
+        }
+        if (entries.Count == 0)
+            return;
+
+        // DragQueryPoint gives client (physical) coords; convert to window-local DIP.
+        float lx = (float)(clientPt.X / _dpi), ly = (float)(clientPt.Y / _dpi);
+        float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
+        int dropIdx = (int)Math.Round((main - _pinnedAreaMain) / _cellMain);
+        dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
+
+        bool changed = false;
+        foreach (var entry in entries)
+        {
+            if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) >= 0)
+                continue;   // already present — don't duplicate
+            DockSync.InsertResident(_config, entry, dropIdx);
+            dropIdx++;
+            changed = true;
+        }
+        if (changed)
+            PersistAndRebuild();
+    }
+
     private void UnpinPinned(AppEntry entry)
     {
         int idx = _config.Apps.FindIndex(e => DockSync.Matches(e, entry));
@@ -838,7 +931,7 @@ internal sealed class SideDockWindowGpu : IDisposable
 
     private static IntPtr WndProcImpl(IntPtr h, uint m, IntPtr w, IntPtr l)
     {
-        if (s_instances.TryGetValue(h, out var inst) && inst.HandleMessage(m, l, out IntPtr r))
+        if (s_instances.TryGetValue(h, out var inst) && inst.HandleMessage(m, w, l, out IntPtr r))
             return r;
         return DefWindowProcW(h, m, w, l);
     }
