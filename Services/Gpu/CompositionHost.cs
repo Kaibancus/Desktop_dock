@@ -118,6 +118,12 @@ internal sealed class CompositionHost : IDisposable
             dpi, dpi, BitmapOptions.Target | BitmapOptions.CannotDraw);
         _targetBitmap = _d2d.CreateBitmapFromDxgiSurface(surface, props);
         _d2d.Target = _targetBitmap;
+        // Setting the target bitmap's DPI does NOT change the device context's own
+        // DPI (it defaults to 96), and the context DPI is what scales DIP-space
+        // drawing to pixels. Without this the whole scene renders at 1.0x — too
+        // small and anchored to the top-left of a physical-pixel window. Set it so
+        // DIP drawing maps 1:1 to the physical back buffer.
+        _d2d.SetDpi(dpi, dpi);
     }
 
     /// <summary>Creates a static premultiplied-BGRA D2D bitmap from raw pixels

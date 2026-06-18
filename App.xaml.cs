@@ -241,12 +241,19 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        _sideDock = new SideDockWindow(_config, Persist);
-        _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
-        // Clicking the Polaris tile in the left dock's running strip toggles the
-        // pinned docks (equivalent to Ctrl+4).
-        _sideDock.ToggleDocks = TogglePinnedDock;
-        _sideDock.Realize();
+        // While the GPU side dock spike is on (POLARIS_GPU_SIDEDOCK=1) suppress the
+        // WPF side dock so the two don't render stacked on top of each other — the
+        // GPU window is the one under evaluation. Every later _sideDock reference is
+        // null-guarded, so leaving it null is safe.
+        if (Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") != "1")
+        {
+            _sideDock = new SideDockWindow(_config, Persist);
+            _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
+            // Clicking the Polaris tile in the left dock's running strip toggles the
+            // pinned docks (equivalent to Ctrl+4).
+            _sideDock.ToggleDocks = TogglePinnedDock;
+            _sideDock.Realize();
+        }
         // Let the main dock hand an icon to the left dock when dragged onto it.
         _panel.DropToSideDock = TryDropToSideDock;
         // Lift the liquid-glass main dock clear of the side dock when the latter
