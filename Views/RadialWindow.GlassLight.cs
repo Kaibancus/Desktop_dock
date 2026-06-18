@@ -10,5 +10,6 @@ public partial class RadialWindow
     /// glow (1) and below the icons.</summary>
     private void BuildGlassOrbitLight(double left, double top, double w, double h, double radius)
         => GlassOrbitLight.Build(
-            PanelCanvas, new Rect(left, top, w, h), radius, EffectiveIconSize, zIndex: 2);
+            PanelCanvas, new Rect(left, top, w, h), radius, EffectiveIconSize, zIndex: 2,
+            registerClock: RegisterAmbientClock);
 }

@@ -836,6 +836,8 @@ public partial class RadialWindow : Window
     {
         PanelCanvas.Children.Clear();
         _iconElements.Clear();
+        // The orbit-light spin / running-glow clocks lived on the cleared visuals.
+        ClearAmbientLoops();
         // Icons are about to be discarded, so drop any in-flight magnification
         // wave state (its per-icon array indexes the old icon list).
         StopMagTicking();

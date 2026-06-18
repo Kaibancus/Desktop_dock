@@ -41,7 +41,8 @@
 
 ## ⚡ 性能优化 / 健壮性
 
-- **统一进程检测到低权限健壮路径读取（参考 Windows 任务栏）**：此前「检测不到运行程序」
+- **活跃态内存的真实边界 + 静止悬停去空转（轨道光/放大波）**：用户实测发现 trim 只在「被动/静止」时降内存，**实际交互（鼠标移动，或运行 App 的呼吸指示灯）会让分层窗口持续 `UpdateLayeredWindow` 整屏重传，页面立刻换回**，故活跃态内存仍高（仅侧 dock ~200MB、双 dock ~800MB）。诊断确认：①主玻璃 dock 的窗口因 `SizeToActiveContent`（IconSize 68 × 7 列 + 底部侧 dock 反向占用顶高）算出超屏高度被钳到全屏 1436×1061，是一个全屏分层软件窗口；②其**放大波 `OnMagTick` / 侧 dock `OnWaveTick` 原本只在光标离开时才停**——光标停在 dock 上不动也每帧空转重算（主 dock 60fps、侧 dock 每帧重建火焰几何）。改为**收敛到当前目标即停 tick**（光标移动经 `EnsureMagTicking`/`EnsureWaveTicking` 重启，离开分支也补重启确保回弹），视觉不变；③主 dock 的**轨道光**改为可暂停时钟（`RadialWindow.RegisterAmbientClock` + `SetAmbientPaused`，经 `GlassOrbitLight.Build` 的 `registerClock` 回调），光标静止即冻结。结论性边界：**绿色运行呼吸灯按用户要求始终呼吸不冻结**（冻结会让其停在随机相位「时亮时不亮」），而只要呼吸灯在动，整屏每帧重传不可避免——故活跃态内存的根本下降仍需改 GPU 渲染架构（去 `AllowsTransparency`，改动大、改玻璃观感），未实施。静止悬停的 CPU 因放大波/轨道光停转而显著下降。
+- **空闲判据改为「光标未在可见界面上活动」（覆盖仅侧 dock / 设置界面两态）+ 侧 dock 关闭空转**：原 idle-trim 只在两 dock 全隐藏时触发，导致「仅侧 dock」与「设置界面打开」两态全基线常驻。改为：主 dock 隐藏且光标未在可见次级界面（侧 dock / 设置窗）上**移动**即视为被动可 trim（静止窗口画面由 DWM 持有、换出不变黑，下次交互按需换回）。设置界面态 196MB→~70MB。侧 dock 的装饰星空闪烁亦改为光标静止即暂停。
   与「常驻+运行区重复显示」两类 BUG 的共同根因是 **`Process.MainModule.FileName` 读不到
   路径**——它需要 `PROCESS_VM_READ`，对反调试保护进程（UU加速器）、跨位（32/64）、提权进程
   都会失败。而 Windows shell/任务栏用的是更低权限的 **`QueryFullProcessImageName`**（只需

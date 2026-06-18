@@ -23,7 +23,8 @@ internal static class GlassOrbitLight
     /// <param name="radius">The slab's corner radius.</param>
     /// <param name="iconSize">Icon size used to size the lamp's orbit / glow reach.</param>
     /// <param name="zIndex">Z-order for the clip layer (above the slab glow, below icons).</param>
-    public static void Build(Canvas panel, Rect slab, double radius, double iconSize, int zIndex)
+    public static void Build(Canvas panel, Rect slab, double radius, double iconSize, int zIndex,
+        Func<DoubleAnimation, AnimationClock>? registerClock = null)
     {
         double cx = slab.X + slab.Width / 2.0;
         double cy = slab.Y + slab.Height / 2.0;
@@ -82,6 +83,11 @@ internal static class GlassOrbitLight
         // would just double its full-frame layered-window uploads for no visible
         // gain. (In low-perf mode the orbit light is skipped entirely upstream.)
         Timeline.SetDesiredFrameRate(spin, Math.Min(App.GlassLoopFrameRate, App.SlowDriftFrameRate));
-        rot.BeginAnimation(RotateTransform.AngleProperty, spin);
+        if (registerClock != null)
+            // Pausable clock: the dock freezes the orbit light while the cursor is
+            // not moving (the whole layered window re-composites every spin tick).
+            rot.ApplyAnimationClock(RotateTransform.AngleProperty, registerClock(spin));
+        else
+            rot.BeginAnimation(RotateTransform.AngleProperty, spin);
     }
 }

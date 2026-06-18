@@ -563,6 +563,11 @@ public partial class App : Application
             _cursorMovingRecently = cursorMovingRecently;
             bool ambientAttended = _sideDock.DockVisible && (inTrigger || inDock) && cursorMovingRecently;
             _sideDock.SetAmbientPaused(!ambientAttended);
+            // The main dock's orbit light + running glows re-composite its large
+            // (often full-screen) layered window every tick; freeze them whenever the
+            // cursor is not moving, so a parked main dock goes static (CPU drops and
+            // the trim can reclaim its RAM) and resumes the instant the cursor moves.
+            _panel?.SetAmbientPaused(!cursorMovingRecently);
             EvaluateIdleTrim();
         };
         _edgePollTimer.Start();
@@ -571,33 +576,30 @@ public partial class App : Application
     /// <summary>Called every edge-poll tick. Trims the process working set once
     /// Polaris has been "passive" for <see cref="IdleTrimDelay"/> (re-trimming
     /// every <see cref="IdleTrimInterval"/> while it stays passive), returning its
-    /// (almost entirely unmanaged) RAM to the system. Passive means the user is
-    /// not currently interacting with a Polaris surface:
+    /// (almost entirely unmanaged) RAM to the system. Passive means the user is not
+    /// interacting with a Polaris surface AND no surface is continuously animating:
     /// <list type="bullet">
-    /// <item>the main dock is hidden (it is the heavy software-rendered surface —
-    /// while it is up a fault-back mid-hover would hitch the magnify wave, so it
-    /// is never trimmed); AND</item>
-    /// <item>the cursor is not over a visible secondary surface (the side dock or
-    /// the settings window).</item>
+    /// <item>the main dock is hidden — while it is shown its running-app glows keep
+    /// breathing, which re-composites its (full-screen, layered) surface every frame,
+    /// so a trim would just churn pages straight back; AND</item>
+    /// <item>the cursor is not moving over a visible secondary surface (side dock /
+    /// settings), whose breathing freezes when the cursor stops.</item>
     /// </list>
-    /// This covers all idle shapes: nothing shown, the side dock pinned/parked
-    /// with the cursor away, and the settings window open but not being used. A
-    /// visible window's on-screen pixels are held by DWM, so eviction never blanks
-    /// it; the next interaction simply faults the few pages it needs back in.</summary>
+    /// A visible window's on-screen pixels are held by DWM, so eviction never blanks
+    /// it; the next interaction faults the few pages it needs back in.</summary>
     private void EvaluateIdleTrim()
     {
-        // The main dock is up (or settings is mid-open): treat as active.
+        // Main dock shown (its run-glows keep re-compositing the surface) or settings
+        // mid-open: treat as active so we don't churn pages.
         if (_panel?.IsShown == true || _openingSettings)
         {
             _idleSince = DateTime.MaxValue;
             return;
         }
 
-        // Active only while the cursor is actually over a visible secondary
-        // surface AND moving — a cursor parked still over the side dock or the
-        // settings window means the surface is static (its breathing is frozen and
-        // its pixels are held by DWM), so it is safe to trim and let the pages
-        // fault back on the next interaction.
+        // Active only while the cursor is actually MOVING over a visible secondary
+        // surface — a still cursor freezes the side dock's breathing, so its pages
+        // can be evicted and faulted back on the next move.
         bool active = false;
         if (_cursorMovingRecently && GetCursorPos(out POINT cp))
         {

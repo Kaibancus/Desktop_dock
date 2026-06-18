@@ -187,25 +187,6 @@ public partial class RadialIcon : UserControl
     private bool _isRunning;
     private DockSide _dockEdge = DockSide.Left;
 
-    /// <summary>Optional hook used by the side dock to register this icon's
-    /// perpetual "breathing" running-dot animations as controllable clocks, so
-    /// they can be PAUSED while the dock is unattended (the cursor is away). On a
-    /// per-pixel-alpha layered window every opacity tick re-composites the whole
-    /// window, so freezing the breathing when no one is looking removes a large
-    /// idle CPU / memory cost. When null (the main dock) the loops run via the
-    /// normal <c>BeginAnimation</c> path, unchanged.</summary>
-    public Action<UIElement, DependencyProperty, DoubleAnimation>? AmbientRegistrar;
-
-    /// <summary>Applies a perpetual ambient animation either through the side
-    /// dock's pausable-clock registrar (if set) or directly.</summary>
-    private void BeginAmbient(UIElement el, DependencyProperty prop, DoubleAnimation anim)
-    {
-        if (AmbientRegistrar != null)
-            AmbientRegistrar(el, prop, anim);
-        else
-            el.BeginAnimation(prop, anim);
-    }
-
     /// <summary>Tells a left-dock icon which screen edge its dock is anchored
     /// to, so the running dot hugs the outer (screen-edge) side and the
     /// window-preview popup opens toward the screen interior.</summary>
@@ -399,14 +380,14 @@ public partial class RadialIcon : UserControl
                 RepeatBehavior = RepeatBehavior.Forever,
             };
             Timeline.SetDesiredFrameRate(pulse, loopFps);
-            BeginAmbient(RunDot, OpacityProperty, pulse);
+            RunDot.BeginAnimation(OpacityProperty, pulse);
             var glowPulse = new DoubleAnimation(0.15, 0.42, new Duration(TimeSpan.FromSeconds(2.0)))
             {
                 AutoReverse = true,
                 RepeatBehavior = RepeatBehavior.Forever,
             };
             Timeline.SetDesiredFrameRate(glowPulse, loopFps);
-            BeginAmbient(RunDotGlow, OpacityProperty, glowPulse);
+            RunDotGlow.BeginAnimation(OpacityProperty, glowPulse);
         }
         else
         {

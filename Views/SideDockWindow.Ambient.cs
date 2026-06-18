@@ -27,10 +27,10 @@ public partial class SideDockWindow
     /// registers it so it can be paused/resumed with the dock's attended state.
     /// Used by the running-strip dots, the star twinkle and (via
     /// <see cref="RadialIcon.AmbientRegistrar"/>) the pinned icons' running dots.</summary>
-    private void RegisterAmbientLoop(UIElement el, DependencyProperty prop, DoubleAnimation anim)
+    private void RegisterAmbientLoop(IAnimatable target, DependencyProperty prop, DoubleAnimation anim)
     {
         AnimationClock clock = anim.CreateClock();
-        el.ApplyAnimationClock(prop, clock);
+        target.ApplyAnimationClock(prop, clock);
         if (clock.Controller is { } ctrl)
         {
             if (_ambientPaused)

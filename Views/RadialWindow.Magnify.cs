@@ -83,6 +83,8 @@ public partial class RadialWindow
         else
         {
             _magCursor = new Point(double.NaN, double.NaN);
+            EnsureMagTicking();   // re-arm so the ease-back to rest runs even if the
+                                  // loop had stopped while the cursor sat still
         }
     }
 
@@ -288,22 +290,31 @@ public partial class RadialWindow
             }
         }
 
-        if (!active && maxDelta < 0.0015)
+        // Stop the loop once it has converged to its CURRENT target — not only when
+        // the cursor has fully left (active=false). While the cursor sits still over
+        // the dock the wave is settled, so spinning the render loop every vsync just
+        // re-composites the (full-screen, layered) glass window for nothing. A later
+        // pointer move re-arms it (EnsureMagTicking) and re-eases, so it is visually
+        // identical. Only normalise back to exactly rest when the cursor has left.
+        if (maxDelta < 0.0015)
         {
-            for (int i = 0; i < n; i++)
+            if (!active)
             {
-                var el = _iconElements[i];
-                if (el == null || el == _pressedIcon)
-                    continue;
-                el.SetMagnify(1.0, 0.0, 0.0);
-                _magCur[i] = 1.0;
-                _magOffX[i] = 0.0;
-                _magOffY[i] = 0.0;
-                _magAppScale[i] = 1.0;
-                _magAppX[i] = 0.0;
-                _magAppY[i] = 0.0;
-                Panel.SetZIndex(el, 0);
-                _magAppZ[i] = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    var el = _iconElements[i];
+                    if (el == null || el == _pressedIcon)
+                        continue;
+                    el.SetMagnify(1.0, 0.0, 0.0);
+                    _magCur[i] = 1.0;
+                    _magOffX[i] = 0.0;
+                    _magOffY[i] = 0.0;
+                    _magAppScale[i] = 1.0;
+                    _magAppX[i] = 0.0;
+                    _magAppY[i] = 0.0;
+                    Panel.SetZIndex(el, 0);
+                    _magAppZ[i] = 0;
+                }
             }
             StopMagTicking();
         }

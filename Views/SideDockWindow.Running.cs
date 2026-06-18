@@ -622,14 +622,14 @@ public partial class SideDockWindow
             RepeatBehavior = RepeatBehavior.Forever,
         };
         Timeline.SetDesiredFrameRate(pulse, loopFps);
-        RegisterAmbientLoop(core, OpacityProperty, pulse);
+        core.BeginAnimation(OpacityProperty, pulse);
         var glowPulse = new DoubleAnimation(0.25, 0.65, new Duration(TimeSpan.FromSeconds(2.0)))
         {
             AutoReverse = true,
             RepeatBehavior = RepeatBehavior.Forever,
         };
         Timeline.SetDesiredFrameRate(glowPulse, loopFps);
-        RegisterAmbientLoop(glowEllipse, OpacityProperty, glowPulse);
+        glowEllipse.BeginAnimation(OpacityProperty, glowPulse);
 
         return canvas;
     }
