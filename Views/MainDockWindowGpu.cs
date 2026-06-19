@@ -1092,17 +1092,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float rRoot = _gearR * 0.50f;    // valley radius between teeth
         float rHole = _gearR * 0.24f;    // hollow hub
         double step = 2 * Math.PI / teeth;
-        double tipHalf = step * 0.26;    // half-width of each (flat) tooth tip
+        double tipHalf = step * 0.13;    // narrow flat tip
+        double rootHalf = step * 0.26;   // wider base, so each tooth is a trapezoid
         Vector2 Polar(double a, float rad) =>
             new Vector2(_gearC.X + (float)(Math.Cos(a) * rad), _gearC.Y + (float)(Math.Sin(a) * rad));
         var pts = new List<Vector2>(teeth * 4);
         for (int i = 0; i < teeth; i++)
         {
             double baseA = i * step - Math.PI / 2;          // first tooth points up
-            pts.Add(Polar(baseA - tipHalf, rTip));          // rise -> tip start
+            pts.Add(Polar(baseA - rootHalf, rRoot));        // wide base, left
+            pts.Add(Polar(baseA - tipHalf, rTip));          // slope in to narrow tip, left
             pts.Add(Polar(baseA + tipHalf, rTip));          // tip flat
-            pts.Add(Polar(baseA + tipHalf, rRoot));         // fall -> valley
-            pts.Add(Polar(baseA + step - tipHalf, rRoot));  // valley flat -> next rise
+            pts.Add(Polar(baseA + rootHalf, rRoot));        // slope out to wide base, right
         }
         using (var cog = ctx.Factory.CreatePathGeometry())
         {

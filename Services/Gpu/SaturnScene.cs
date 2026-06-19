@@ -233,8 +233,10 @@ internal static class SaturnScene
             double eOut = r - icon * 0.04;
             DrawRingZone(ctx, g, eIn, eOut, icyG, 0.14, 0.012, icon, crispRim: false);
 
-            // Soft outer bloom over the faint G/E rings.
-            AddBloomRing(ctx, g, (gIn + eOut) / 2, (eOut - gIn) + icon * 0.7, icyG, 0.078);
+            // Soft outer bloom over the faint G/E rings. Kept fully inside the disc
+            // (width = G→E span, no extra spill past the rim) so the icy halo never
+            // bleeds onto the bright wallpaper and whitens the disc edge.
+            AddBloomRing(ctx, g, (gIn + eOut) / 2, (eOut - gIn), icyG, 0.062);
         }
     }
 
@@ -310,17 +312,31 @@ internal static class SaturnScene
 
     /// <summary>Approximate the WPF blurred halo with a few stacked translucent
     /// ellipse strokes of decreasing alpha (no per-frame BlurEffect needed).</summary>
+    /// <summary>Soft icy halo over the faint G/E rings. The WPF version strokes one
+    /// ellipse and runs it through a real <c>BlurEffect</c>, giving a smooth feathered
+    /// glow. The earlier GPU port stacked five hard concentric strokes at the SAME
+    /// radius, so their alphas piled up into a bright whitish band that spilled past
+    /// the disc edge ("泛白"). Here we instead spread many thin strokes radially with a
+    /// Gaussian alpha falloff (peak at <paramref name="rMid"/>, fading to nothing at the
+    /// rim), approximating the blurred halo with a far lower, softer peak.</summary>
     private static void AddBloomRing(ID2D1DeviceContext ctx, in Geom g, double rMid, double thickness, Rgb color, double alpha)
     {
         var c = new Vector2(g.Cx, g.Cy);
-        int layers = 5;
+        double half = Math.Max(2, thickness) * 0.5;   // penumbra half-width
+        double sigma = half * 0.55;                    // Gaussian spread
+        const int layers = 20;
+        double layerTh = Math.Max(1.4, (2 * half) / layers * 1.7);
         for (int i = 0; i < layers; i++)
         {
-            double th = Math.Max(2, thickness) * (1.0 - i * 0.12);
-            double a = alpha * (1.0 - i * 0.16);
-            var e = new Ellipse(c, (float)rMid, (float)(rMid * g.TiltY));
+            double d = -half + (2 * half) * (i / (double)(layers - 1)); // offset from centre
+            double rr = rMid + d;
+            if (rr <= 1) continue;
+            double falloff = Math.Exp(-(d * d) / (2 * sigma * sigma));
+            double a = alpha * falloff;
+            if (a < 0.002) continue;
+            var e = new Ellipse(c, (float)rr, (float)(rr * g.TiltY));
             using var br = ctx.CreateSolidColorBrush(A(color, a));
-            ctx.DrawEllipse(e, br, (float)th);
+            ctx.DrawEllipse(e, br, (float)layerTh);
         }
     }
 
