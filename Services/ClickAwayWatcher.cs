@@ -113,20 +113,18 @@ internal sealed class ClickAwayWatcher
                 // Ignore programmatically-injected clicks (e.g. our own).
                 if ((flags & LLMHF_INJECTED) == 0)
                 {
-                    var pt = new POINT { X = px, Y = py };
-                    IntPtr hwnd = WindowFromPoint(pt);
-                    IntPtr root = hwnd == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hwnd, GA_ROOT);
-                    uint pid = 0;
-                    if (root != IntPtr.Zero)
-                        GetWindowThreadProcessId(root, out pid);
-                    // A click resolving to no window, or to a window owned by
-                    // another process, is outside every Polaris surface. A click on
-                    // one of our own windows still counts as "outside" when it lands
-                    // in the transparent headroom around the dock (the GPU docks are
-                    // a large HWND whose padding hit-tests as HTTRANSPARENT), so the
-                    // dock dismisses when the user clicks just outside the visible slab.
-                    bool ownSurface = root != IntPtr.Zero && pid == _ownPid
-                        && SendMessage(root, WM_NCHITTEST, IntPtr.Zero, MakeLParam(px, py)) != (IntPtr)HTTRANSPARENT;
+                    // Decide whether the press landed on one of OUR dock surfaces.
+                    // WindowFromPoint only yields the single topmost window, which is
+                    // unreliable when two of our own overlapping dock windows (the main
+                    // dock and the side dock) both span the press point: it can return
+                    // the wrong one (whose transparent padding hit-tests HTTRANSPARENT)
+                    // and a press ON the side dock's icon strip is then misjudged as a
+                    // click "outside", dismissing both docks. Instead, query EVERY visible
+                    // top-level window of our process directly: if any claims the point
+                    // with a non-transparent hit-test, the press is on one of our docks
+                    // and must NOT dismiss. Only when no own window claims it (truly empty
+                    // space, or our docks' transparent headroom) do we treat it as outside.
+                    bool ownSurface = OwnWindowClaimsPoint(px, py);
                     if (!ownSurface)
                         ClickedOutside?.Invoke();   // non-blocking: handler marshals to UI
                 }
@@ -136,6 +134,38 @@ internal sealed class ClickAwayWatcher
         // Never swallow the click — the user's click should still reach whatever
         // they clicked; we only dismiss the dock alongside it.
         return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    /// <summary>True when the screen point lies on an interactive (non-transparent)
+    /// part of ANY visible top-level window owned by this process. Enumerates our own
+    /// windows directly rather than trusting WindowFromPoint's single topmost result,
+    /// so two overlapping transparent-padded dock windows can't trick us into treating
+    /// a press on one dock as a click outside every dock. A window that doesn't answer
+    /// the hit-test in time (busy UI thread) is treated as claiming the point, erring
+    /// toward keeping the docks open.</summary>
+    private bool OwnWindowClaimsPoint(int px, int py)
+    {
+        bool claimed = false;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h))
+                return true;
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid != _ownPid)
+                return true;
+            if (!GetWindowRect(h, out RECT r) || px < r.Left || px > r.Right || py < r.Top || py > r.Bottom)
+                return true;
+            IntPtr nchit = SendMessage(h, WM_NCHITTEST, IntPtr.Zero, MakeLParam(px, py));
+            // HTTRANSPARENT means the window explicitly passes the click through; any
+            // other answer (incl. a 0/timeout from a busy thread) counts as a claim.
+            if (nchit != (IntPtr)HTTRANSPARENT)
+            {
+                claimed = true;
+                return false;   // stop enumerating
+            }
+            return true;
+        }, IntPtr.Zero);
+        return claimed;
     }
 
     private const int WH_MOUSE_LL = 14;
@@ -160,6 +190,11 @@ internal sealed class ClickAwayWatcher
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MSG
@@ -190,6 +225,15 @@ internal sealed class ClickAwayWatcher
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
