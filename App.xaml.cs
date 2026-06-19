@@ -234,12 +234,12 @@ public partial class App : Application
         // The left dock mirrors the main dock's resident region (top two rows),
         // so seed that mirror once before the docks build.
         DockSync.MirrorResidentToLeft(_config);
-        // Pick the side-dock implementation: the GPU (DirectComposition + Direct2D)
-        // dock under POLARIS_GPU_SIDEDOCK=1, otherwise the WPF one. Both implement
-        // ISideDock so the host wiring below is identical (A/B like the ghost/notch).
-        _sideDock = Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "1"
-            ? new Polaris.Views.SideDockWindowGpu(_config)
-            : new SideDockWindow(_config, Persist);
+        // Pick the side-dock implementation. The GPU (DirectComposition + Direct2D)
+        // dock is now the DEFAULT; set POLARIS_GPU_SIDEDOCK=0 to fall back to the WPF
+        // one. Both implement ISideDock so the host wiring below is identical.
+        _sideDock = Environment.GetEnvironmentVariable("POLARIS_GPU_SIDEDOCK") == "0"
+            ? new SideDockWindow(_config, Persist)
+            : new Polaris.Views.SideDockWindowGpu(_config);
         _sideDock.MainDockChanged += () => _panel?.RefreshFromConfig();
         // Clicking the Polaris tile in the left dock's running strip toggles the
         // pinned docks (equivalent to Ctrl+4).
