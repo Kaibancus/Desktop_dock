@@ -90,6 +90,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private int _introMode;               // 0=idle, 1=show (slide-in + fade-in), 2=hide (fade-out)
     private float _introSlidePx;          // physical-px cross slide distance for the show anim
 
+    // ---- Drag-reorder "push neighbours aside" (parity with WPF ArrangeForDrag) -------
+    private float[] _dragShift = Array.Empty<float>();     // per-slot main-axis gap offset (DIP, eased)
+    private float[] _dragShiftTgt = Array.Empty<float>();  // its target
+    private int _dragInsert = -1;                          // current insertion index (pinned region)
+
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
@@ -463,6 +468,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             BuildSaturnField(slabMain, slabMainLen, bodyCross, bodyCrossLen, gIcon, uiScale);
         _waveCur = new float[_slots.Count];
         Array.Fill(_waveCur, 1f);
+        _dragShift = new float[_slots.Count];
+        _dragShiftTgt = new float[_slots.Count];
+        _dragInsert = -1;
         _anyRunning = false;
         foreach (var sl in _slots) if (sl.Running) { _anyRunning = true; break; }
 
@@ -561,6 +569,20 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
         DrivePreview(_hover);
+
+        // Drag-reorder "push neighbours aside": ease each non-dragged pinned slot's
+        // main-axis offset toward its open-gap target (while dragging) or back to rest
+        // (after a drop that didn't rebuild), mirroring WPF ArrangeForDrag/AnimateIconTo.
+        if (_dragShift.Length > 0)
+        {
+            for (int i = 0; i < _dragShift.Length; i++)
+            {
+                float tgt = _dragging ? _dragShiftTgt[i] : 0f;
+                float cur = _dragShift[i] + (tgt - _dragShift[i]) * k;
+                _dragShift[i] = cur;
+                maxDelta = Math.Max(maxDelta, Math.Abs(tgt - cur));
+            }
+        }
 
         // Saturn debris: ease each rock's outward push toward the magnify wave at its
         // main coordinate so the rubble belt bulges under the cursor and relaxes behind.
@@ -1005,6 +1027,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 continue;
             float scale = _waveCur[i];
             Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f + BounceOffset(i));
+            if (i < _dragShift.Length && _dragShift[i] != 0f)
+                pop += (_side is DockSide.Left or DockSide.Right)
+                    ? new Vector2(0f, _dragShift[i]) : new Vector2(_dragShift[i], 0f);
             DrawIcon(ctx, _slots[i], scale, pop);
         }
 
@@ -1461,7 +1486,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > _gIcon * 0.35f)
                     _dragging = true;
                 if (_dragging)
+                {
+                    UpdateDragGap(lx, ly);
                     Render();
+                }
                 return true;
             }
             case WM_LBUTTONUP:
@@ -1472,6 +1500,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 (float lx, float ly) = ClientDip(lParam);
                 _pressIdx = -1;
                 _dragging = false;
+                _dragInsert = -1;
                 if (idx >= 0 && idx < _slots.Count)
                 {
                     if (!wasDrag) ClickSlot(idx);
@@ -1824,6 +1853,51 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         _preview?.Close();
         _prevHover = -1;
+    }
+
+    /// <summary>Recomputes the drag insertion index from the pointer and, when it
+    /// changes, retargets the neighbour "push aside" offsets — the GPU equivalent of
+    /// WPF ArrangeForDrag. Dragging clear of the column closes the gap.</summary>
+    private void UpdateDragGap(float lx, float ly)
+    {
+        if (_pressIdx < 0 || _pinnedVisible <= 0)
+            return;
+        float cross = _side switch
+        {
+            DockSide.Left => lx,
+            DockSide.Right => _winW - lx,
+            DockSide.Top => ly,
+            _ => _winH - ly,
+        };
+        int gap;
+        if (MathF.Abs(cross - _colCenterCross) > _slabCrossLen * 0.85f)
+            gap = int.MaxValue;   // out of the column → neighbours fill back in
+        else
+        {
+            float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
+            gap = (int)MathF.Round((main - _pinnedAreaMain - _cellMain / 2f) / _cellMain);
+            gap = Math.Clamp(gap, 0, Math.Max(0, _pinnedVisible - 1));
+        }
+        if (gap == _dragInsert)
+            return;
+        _dragInsert = gap;
+        ArrangeDragTargets(gap);
+    }
+
+    /// <summary>Sets each non-dragged pinned slot's main-axis target so the column opens
+    /// a one-slot gap at <paramref name="gap"/> (or compacts when gap is int.MaxValue).</summary>
+    private void ArrangeDragTargets(int gap)
+    {
+        Array.Clear(_dragShiftTgt, 0, _dragShiftTgt.Length);
+        int src = _pressIdx, compact = 0;
+        for (int i = 0; i < _pinnedVisible && i < _dragShiftTgt.Length; i++)
+        {
+            if (i == src)
+                continue;
+            int visual = (gap == int.MaxValue) ? compact : (compact < gap ? compact : compact + 1);
+            _dragShiftTgt[i] = (visual - i) * _cellMain;
+            compact++;
+        }
     }
 
     private void DropSlot(int idx, float lx, float ly)
