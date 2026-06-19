@@ -57,11 +57,24 @@ internal sealed class OleDropTarget : IOleDropTarget
             return;
         try
         {
-            OleInitialize(IntPtr.Zero);   // refcounted; harmless if already initialised
-            _registered = RegisterDragDrop(_hwnd, this) == S_OK;
+            // Allow drag-drop messages through UIPI in case the dock window runs at a
+            // higher integrity than the drag source (e.g. Polaris launched as admin,
+            // files dragged from a normal Explorer). No-op when integrities match.
+            foreach (uint m in new uint[] { WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA })
+            {
+                try { ChangeWindowMessageFilterEx(_hwnd, m, MSGFLT_ALLOW, IntPtr.Zero); } catch { }
+            }
+            int oi = OleInitialize(IntPtr.Zero);   // refcounted; harmless if already initialised
+            int hr = RegisterDragDrop(_hwnd, this);
+            _registered = hr == S_OK;
+            Log.Warn("OleDropTarget", $"Register hwnd={_hwnd:X} OleInit=0x{oi:X8} RegisterDragDrop=0x{hr:X8} CF_SHELLIDLIST={CF_SHELLIDLIST}");
         }
         catch (Exception ex) { Log.Warn("OleDropTarget", "RegisterDragDrop failed: " + ex.Message); }
     }
+
+    private const uint WM_DROPFILES = 0x0233, WM_COPYDATA = 0x004A, WM_COPYGLOBALDATA = 0x0049;
+    private const uint MSGFLT_ALLOW = 1;
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr pChangeFilterStruct);
 
     public void Revoke()
     {
@@ -83,8 +96,11 @@ internal sealed class OleDropTarget : IOleDropTarget
 
     int IOleDropTarget.DragEnter(ComTypes.IDataObject pDataObj, int grfKeyState, POINTL pt, ref int pdwEffect)
     {
-        _accepting = pDataObj != null && Accepts(pDataObj);
+        bool hd = pDataObj != null && HasFormat(pDataObj, CF_HDROP);
+        bool sh = pDataObj != null && CF_SHELLIDLIST != 0 && HasFormat(pDataObj, CF_SHELLIDLIST);
+        _accepting = hd || sh;
         pdwEffect = _accepting ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        Log.Warn("OleDropTarget", $"DragEnter pt=({pt.X},{pt.Y}) hdrop={hd} shell={sh} accepting={_accepting}");
         return S_OK;
     }
 
@@ -106,6 +122,7 @@ internal sealed class OleDropTarget : IOleDropTarget
         {
             var files = ReadHDrop(pDataObj);
             byte[]? shell = ReadBytes(pDataObj, CF_SHELLIDLIST);
+            Log.Warn("OleDropTarget", $"Drop pt=({pt.X},{pt.Y}) files={files.Count} shell={(shell?.Length ?? -1)}");
             if (files.Count > 0 || shell != null)
             {
                 _onDrop(files, shell, pt.X, pt.Y);

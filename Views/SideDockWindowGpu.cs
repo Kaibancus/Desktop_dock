@@ -55,6 +55,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private readonly AppConfig _config;
     private IntPtr _hwnd;
+    private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
+    private OleDropTarget? _oleDrop;   // OLE drop target for Explorer/desktop drags
     private CompositionHost? _host;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
@@ -528,6 +530,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         ShowWindow(_hwnd, _shown ? SW_SHOWNOACTIVATE : SW_HIDE);
         DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
+        // Full OLE drop target so Explorer/desktop drags (OLE protocol, not WM_DROPFILES)
+        // can drop files AND shell items onto the side dock — parity with WPF AllowDrop.
+        _oleDrop = new OleDropTarget(_hwnd, HandleOleDrop);
+        _oleDrop.Register();
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat?.Dispose();
@@ -1509,6 +1515,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         DisposeRockResources();
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
+        _oleDrop?.Revoke(); _oleDrop = null;
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
@@ -1535,6 +1542,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             case WM_DROPFILES:
             {
                 IntPtr hDrop = wParam;
+                Log.Warn("SideDockGpu", "WM_DROPFILES received");
                 try
                 {
                     uint count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
@@ -2124,11 +2132,43 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             try { var e = ShortcutResolver.CreateEntry(p); if (e != null) entries.Add(e); }
             catch { /* skip an unresolvable drop */ }
         }
+        // DragQueryPoint gives client (physical) coords; convert to window-local DIP.
+        InsertDroppedEntries(entries, (float)(clientPt.X / _dpi), (float)(clientPt.Y / _dpi));
+    }
+
+    /// <summary>Handles a committed OLE drop from Explorer / the desktop (files AND
+    /// shell-namespace items), pinning each into the resident column. Mirrors the WPF
+    /// side dock's AllowDrop. <paramref name="screenX"/>/<paramref name="screenY"/> are
+    /// screen pixels (the IDropTarget POINTL).</summary>
+    private void HandleOleDrop(List<string> files, byte[]? shellIdList, int screenX, int screenY)
+    {
+        Log.Warn("SideDockGpu", $"HandleOleDrop files={files.Count} shell={(shellIdList?.Length ?? -1)} screen=({screenX},{screenY})");
+        var entries = new List<AppEntry>();
+        foreach (var f in files)
+        {
+            try { var e = ShortcutResolver.CreateEntry(f); if (e != null) entries.Add(e); }
+            catch { /* skip an unresolvable drop */ }
+        }
+        if (shellIdList != null)
+        {
+            try { entries.AddRange(ShellNamespace.CreateEntriesFromBytes(shellIdList)); }
+            catch (Exception ex) { Log.Warn("SideDockGpu", "shell-item drop parse failed: " + ex.Message); }
+        }
+        // Screen pixels → window-local DIPs.
+        float lx = (float)(screenX / _dpi - _winX);
+        float ly = (float)(screenY / _dpi - _winY);
+        _dispatcher.BeginInvoke(new Action(() => InsertDroppedEntries(entries, lx, ly)),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>Shared drop core: pins each resolved entry into the resident column at
+    /// the slot nearest the window-local drop point (<paramref name="lx"/>,<paramref
+    /// name="ly"/>).</summary>
+    private void InsertDroppedEntries(List<AppEntry> entries, float lx, float ly)
+    {
         if (entries.Count == 0)
             return;
 
-        // DragQueryPoint gives client (physical) coords; convert to window-local DIP.
-        float lx = (float)(clientPt.X / _dpi), ly = (float)(clientPt.Y / _dpi);
         float main = _side is DockSide.Left or DockSide.Right ? ly : lx;
         int dropIdx = (int)Math.Round((main - _pinnedAreaMain) / _cellMain);
         dropIdx = Math.Clamp(dropIdx, 0, DockSync.ResidentCount(_config));
@@ -2213,6 +2253,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         CloseSlotMenu();
         ClosePreview();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
+        _oleDrop?.Revoke(); _oleDrop = null;
         _host?.Dispose(); _host = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         foreach (var b in _bmpCache.Values) b?.Dispose();

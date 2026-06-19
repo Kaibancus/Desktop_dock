@@ -1628,6 +1628,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             case WM_DROPFILES:
             {
                 IntPtr hDrop = wParam;
+                Log.Warn("MainDockGpu", "WM_DROPFILES received");
                 try
                 {
                     uint count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
