@@ -109,6 +109,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     // ---- Saturn theme state ----
     private bool _saturn;                 // active theme is the Saturn ring system
+    // Phone-notch date/time panel shown at the screen top while the Saturn theme is
+    // summoned (mirrors RadialWindow._notch / ShowNotchIfSaturn).
+    private INotchClock? _notch;
+    private static readonly bool UseGpuNotch =
+        Environment.GetEnvironmentVariable("POLARIS_GPU_NOTCH") == "1";
     private SaturnScene.Geom _sg;         // Saturn ring/planet geometry (window-local DIP)
     private float[] _slotG = Array.Empty<float>();   // per-slot icon draw size (Saturn rings differ)
     private double _spinAngle, _innerAngle, _outerAngle, _saturnTime;   // Saturn animation phases
@@ -1644,7 +1649,24 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
         SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         Rebuild();                 // pick up config / running changes; rebuilds visible
+        ShowNotchIfSaturn();
         _timer?.Start();
+    }
+
+    /// <summary>Shows the phone-notch date/time panel when the Saturn theme is active
+    /// (hidden for any other theme), sitting on the active monitor's top edge — or its
+    /// bottom edge when the side dock is anchored to the top. Mirrors
+    /// RadialWindow.ShowNotchIfSaturn so the GPU main dock owns the notch too.</summary>
+    private void ShowNotchIfSaturn()
+    {
+        if (!_saturn)
+        {
+            _notch?.HideNotch();
+            return;
+        }
+        _notch ??= UseGpuNotch ? new NotchClockWindowGpu() : (INotchClock)new NotchClockWindow();
+        bool atBottom = _config.Settings.DockPosition == Models.DockSide.Top;
+        _notch.ShowNotch(atBottom);
     }
 
     public void HidePanel() => HidePanel(null);
@@ -1662,6 +1684,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Cancel any in-flight drag / menu so they don't outlive the dismiss.
         _pressIdx = -1; _dragging = false; _hover = -1;
         CloseSlotMenu();
+        _notch?.HideNotch();        // retract the Saturn notch with the dock
         PanelDismissed?.Invoke();   // retract the side dock together with the main dock
         _onFaded = onFaded;
         _summonDir = -1; _summonLast = Environment.TickCount64;
@@ -1699,6 +1722,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _timer?.Stop();
         _timer = null;
         CloseSlotMenu();
+        _notch?.HideNotch();
         _labelFormat?.Dispose();
         _gearFormat?.Dispose();
         _clockFormat?.Dispose();
