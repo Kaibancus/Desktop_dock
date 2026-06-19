@@ -93,6 +93,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float[] _dragShift = Array.Empty<float>();     // per-slot main-axis gap offset (DIP, eased)
     private float[] _dragShiftTgt = Array.Empty<float>();  // its target
     private int _dragInsert = -1;                          // current insertion index (pinned region)
+    private long _dragShiftLastMs;                         // last drag-shift advance (for time-based ease)
+    private const float DragShiftTauMs = 45f;              // push-aside ease time constant
 
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
@@ -572,16 +574,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // Drag-reorder "push neighbours aside": ease each non-dragged pinned slot's
         // main-axis offset toward its open-gap target (while dragging) or back to rest
         // (after a drop that didn't rebuild), mirroring WPF ArrangeForDrag/AnimateIconTo.
+        // Time-based so it stays smooth despite DispatcherTimer jitter, and is also
+        // advanced from WM_MOUSEMOVE so neighbours track the dragged icon during fast drags.
         if (_dragShift.Length > 0)
-        {
-            for (int i = 0; i < _dragShift.Length; i++)
-            {
-                float tgt = _dragging ? _dragShiftTgt[i] : 0f;
-                float cur = _dragShift[i] + (tgt - _dragShift[i]) * k;
-                _dragShift[i] = cur;
-                maxDelta = Math.Max(maxDelta, Math.Abs(tgt - cur));
-            }
-        }
+            maxDelta = Math.Max(maxDelta, AdvanceDragShift());
 
         // Saturn debris: ease each rock's outward push toward the magnify wave at its
         // main coordinate so the rubble belt bulges under the cursor and relaxes behind.
@@ -1454,10 +1450,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 (float lx, float ly) = ClientDip(lParam);
                 _dragMain = lx; _dragCross = ly;
                 if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > _gIcon * 0.35f)
+                {
                     _dragging = true;
+                    _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
+                }
                 if (_dragging)
                 {
                     UpdateDragGap(lx, ly);
+                    AdvanceDragShift();   // keep neighbours in step with the cursor between ticks
                     Render();
                 }
                 return true;
@@ -1823,6 +1823,32 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         _preview?.Close();
         _prevHover = -1;
+    }
+
+    /// <summary>Advances the per-slot "push aside" offsets toward their targets using
+    /// real elapsed time (exponential ease, <see cref="DragShiftTauMs"/>). Driven from
+    /// both <c>Tick</c> and <c>WM_MOUSEMOVE</c> so the gap stays in lockstep with the
+    /// cursor-tracked drag icon and is immune to DispatcherTimer jitter. Returns the
+    /// largest remaining distance so callers can keep the render loop alive.</summary>
+    private float AdvanceDragShift()
+    {
+        if (_dragShift.Length == 0)
+            return 0f;
+        long now = Environment.TickCount64;
+        float dt = (now - _dragShiftLastMs) / 1000f;
+        _dragShiftLastMs = now;
+        if (dt <= 0f)
+            return 0f;
+        if (dt > 0.1f) dt = 0.1f;   // clamp after a stall so we don't snap
+        float k = 1f - MathF.Exp(-dt / (DragShiftTauMs / 1000f));
+        float maxDelta = 0f;
+        for (int i = 0; i < _dragShift.Length; i++)
+        {
+            float tgt = _dragging ? _dragShiftTgt[i] : 0f;
+            _dragShift[i] += (tgt - _dragShift[i]) * k;
+            maxDelta = Math.Max(maxDelta, Math.Abs(tgt - _dragShift[i]));
+        }
+        return maxDelta;
     }
 
     /// <summary>Recomputes the drag insertion index from the pointer and, when it
