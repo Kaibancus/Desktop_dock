@@ -28,9 +28,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
     private const float HoverScale = 1.5f;
-    // Pointer travel (window-DIP, Manhattan) before a press becomes a drag.
-    // Matches the WPF dock's 6 px DragThreshold so small reposition gestures
-    // register as drags instead of being misread as a launch-click.
+    // Pointer travel (window-DIP, Euclidean) before a press becomes a drag.
+    // Matches the WPF dock's 6 px Euclidean DragThreshold so small reposition
+    // gestures register as drags instead of being misread as a launch-click.
     private const float DragThreshold = 6f;
 
     private enum SlotKind { Pinned, Run, Overflow }
@@ -1535,10 +1535,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     return false;
                 (float lx, float ly) = ClientDip(lParam);
                 _dragMain = lx; _dragCross = ly;
-                if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > DragThreshold)
+                if (!_dragging)
                 {
-                    _dragging = true;
-                    _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
+                    float ddx = lx - _pressMain, ddy = ly - _pressCross;
+                    if (ddx * ddx + ddy * ddy > DragThreshold * DragThreshold)
+                    {
+                        _dragging = true;
+                        _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
+                    }
                 }
                 if (_dragging)
                 {
@@ -1590,12 +1594,19 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// or -1.</summary>
     private int HitSlot(float lx, float ly)
     {
-        int best = -1; float bestD = _gIcon * 0.75f;
+        // Hit-test against each icon's CURRENT rendered position/size: a hovered icon
+        // magnifies and pops outward from the slab, so testing the static slot centre
+        // would miss clicks on the visibly popped icon (parity with WPF, which hit-tests
+        // the magnified icon). Grow the catch radius with the icon's live wave scale.
+        int best = -1; float bestD = float.MaxValue;
         for (int i = 0; i < _slots.Count; i++)
         {
-            var c = _slots[i].Center;
+            float scale = i < _waveCur.Length ? _waveCur[i] : 1f;
+            Vector2 pop = PopOffset((scale - 1f) * _gIcon * 1.18f + BounceOffset(i));
+            var c = _slots[i].Center + pop;
+            float r = _gIcon * 0.75f * MathF.Max(1f, scale);
             float d = MathF.Abs(lx - c.X) + MathF.Abs(ly - c.Y);
-            if (d < bestD) { bestD = d; best = i; }
+            if (d < r && d < bestD) { bestD = d; best = i; }
         }
         return best;
     }
