@@ -421,7 +421,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _labelFontPx, "zh-cn");
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
-        _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.Normal,
+        _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.SemiBold,
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _gearR * 1.16f, "en-us");
         _gearFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _gearFormat.ParagraphAlignment = ParagraphAlignment.Center;
@@ -625,7 +625,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _summonLast = nowMs;
             if (_summonDir > 0)
             {
-                _summon = Math.Min(1f, _summon + dt / SummonInSec);
+                // Saturn's rings-expand reads as a sequenced inside-out bloom, so it
+                // wants a touch more time than the glass slab's quick rise to make the
+                // inner-then-outer stagger perceptible.
+                float inSec = _saturn ? 0.5f : SummonInSec;
+                _summon = Math.Min(1f, _summon + dt / inSec);
                 if (_summon >= 1f) _summonDir = 0;
             }
             else
@@ -885,13 +889,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_saturn)
         {
             // Summon "rings expand" (mirrors WPF AnimateRingsExpand): the inner band
-            // leads and the outer band follows ~0.28 of the summon later, each growing
-            // 0.55 -> 1.0 from the planet with a CubicEaseOut fade-in, so the dock reads
-            // as rings blooming out from the centre rather than a single rigid zoom.
-            float innerP = CubicEaseOut(Math.Clamp(_summon / 0.72f, 0f, 1f));
-            float outerP = CubicEaseOut(Math.Clamp((_summon - 0.28f) / 0.72f, 0f, 1f));
-            _satInnerScl = 0.55f + 0.45f * innerP;
-            _satOuterScl = 0.55f + 0.45f * outerP;
+            // leads and the outer band follows ~0.42 of the summon later, each growing
+            // 0.42 -> 1.0 from the planet with a CubicEaseOut fade-in, so the dock reads
+            // as rings blooming out from the centre one after another rather than a
+            // single rigid zoom. The wide delay + small start scale keep the inner-then-
+            // outer sequencing clearly legible.
+            float innerP = CubicEaseOut(Math.Clamp(_summon / 0.58f, 0f, 1f));
+            float outerP = CubicEaseOut(Math.Clamp((_summon - 0.42f) / 0.58f, 0f, 1f));
+            _satInnerScl = 0.42f + 0.58f * innerP;
+            _satOuterScl = 0.42f + 0.58f * outerP;
             _satInnerOp = innerP;
             _satOuterOp = outerP;
             _satR0 = EffectiveRing0Count(_slots.Count);
@@ -1054,6 +1060,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_gearFormat == null) return;
         float r = _gearR * _gearScale;
         var e = new Vortice.Direct2D1.Ellipse(_gearC, r, r);
+        // Soft drop shadow under the bead (approximates the WPF DropShadowEffect
+        // blur=14, depth=3, dir=270): a few falling-alpha discs nudged downward so
+        // a gentle dark halo peeks out beneath the frosted bead.
+        var shCen = new Vector2(_gearC.X, _gearC.Y + 3f);
+        (float dr, byte a)[] shadow = { (5f, 0x14), (3f, 0x1E), (1.4f, 0x2A) };
+        foreach (var (dr, a) in shadow)
+            using (var sb = ctx.CreateSolidColorBrush(Col(a, 0x00, 0x00, 0x00)))
+                ctx.FillEllipse(new Vortice.Direct2D1.Ellipse(shCen, r + dr, r + dr), sb);
         // Frosted vertical gradient fill (WPF: 70FFFFFF -> 42EAF2FF -> 5CD6E4F6).
         using (var stops = ctx.CreateGradientStopCollection(new[]
         {
@@ -1071,7 +1085,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.Transform = Matrix3x2.CreateRotation(_gearAngle * MathF.PI / 180f, _gearC)
             * Matrix3x2.CreateScale(_gearScale, _gearScale, _gearC) * saved;
         var rect = new Vortice.Mathematics.Rect(_gearC.X - _gearR, _gearC.Y - _gearR, _gearR * 2f, _gearR * 2f);
-        using (var fg = ctx.CreateSolidColorBrush(Col(0xF0, 0xFF, 0xFF, 0xFF)))
+        // Soft even shade behind the glyph (WPF: blur=3, depth=0, opacity=0.32,
+        // colour 2A3340) — a faint dark glyph drawn underneath fakes the halo.
+        using (var sh = ctx.CreateSolidColorBrush(Col(0x52, 0x2A, 0x33, 0x40)))
+            ctx.DrawText("\u2699", _gearFormat, rect, sh);
+        // Frosted-glass glyph: a soft cool-white vertical gradient (no metal) so it
+        // reads as the same frosted glass as the bead (WPF F0FFFFFF -> E2EAF2FF -> D2CFDFF0).
+        using (var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0xF0, 0xFF, 0xFF, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = Col(0xE2, 0xEA, 0xF2, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0xD2, 0xCF, 0xDF, 0xF0) },
+        }))
+        using (var fg = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = new Vector2(_gearC.X, _gearC.Y - _gearR), EndPoint = new Vector2(_gearC.X, _gearC.Y + _gearR) }, stops))
             ctx.DrawText("\u2699", _gearFormat, rect, fg);
         ctx.Transform = saved;
     }
@@ -1891,17 +1918,40 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // preview so the icon lands at the grid cell the pointer is actually over.
         float dropY = _scrollable ? ly + (float)_glassScroll : ly;
         int tgt = ComputeGridTarget(lx, dropY, idx);
+
+        // Resident promote/demote (parity with WPF UpdateResidentCountForDrop):
+        // dropping an icon inside the framed resident rows grows the resident count
+        // (up to the cap) and dragging a resident icon out of the frame shrinks it,
+        // so the resident region follows what the user drags in/out. Computed from
+        // the ORIGINAL index (before the reorder below), like the WPF reference.
+        int resident = DockSync.ResidentCount(_config);
+        bool inResident = _hasResident
+            && dropY >= _resY && dropY <= _resY + _resH
+            && lx >= _resX && lx <= _resX + _resW;
+        bool wasResident = idx < resident;
+        int newResident = resident;
+        if (inResident && !wasResident && resident < DockSync.MaxResidentCount)
+            newResident = resident + 1;
+        else if (!inResident && wasResident && resident > 1)
+            newResident = resident - 1;
+
+        bool changed = false;
         if (tgt >= 0 && tgt != idx && idx < _config.Apps.Count && tgt < _config.Apps.Count)
         {
             var e = _config.Apps[idx];
             _config.Apps.RemoveAt(idx);
             _config.Apps.Insert(tgt, e);
-            PersistAndRelayout();
+            changed = true;
         }
-        else
+        if (newResident != resident)
         {
-            Render();
+            _config.Settings.Ring0Count = newResident;
+            changed = true;
         }
+        if (changed)
+            PersistAndRelayout();
+        else
+            Render();
     }
 
     /// <summary>Pins shortcuts / executables dropped from Explorer / the desktop,

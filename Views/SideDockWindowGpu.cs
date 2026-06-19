@@ -305,6 +305,15 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void Build()
     {
+        LayoutContent();
+        CreateHostWindow();
+    }
+
+    /// <summary>Computes window geometry + all icon slots without touching the
+    /// Win32/DComp window, so a reorder can relayout in place (parity with the main
+    /// dock's LayoutContent) instead of recreating the window — which flashes.</summary>
+    private void LayoutContent()
+    {
         _slots.Clear();
         var wa = MonitorLayout.ActiveWorkArea;
         _side = _config.Settings.DockPosition;
@@ -474,7 +483,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _dragInsert = -1;
         _anyRunning = false;
         foreach (var sl in _slots) if (sl.Running) { _anyRunning = true; break; }
+    }
 
+    /// <summary>Creates the Win32 host window, DComp host and render timer for the
+    /// current geometry. Split from <see cref="LayoutContent"/> so reorders can
+    /// relayout without recreating the window.</summary>
+    private void CreateHostWindow()
+    {
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
         _dpi = DpiScale();
@@ -1926,7 +1941,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             var e = _config.Apps[src];
             _config.Apps.RemoveAt(src);
             _config.Apps.Insert(tgt, e);
-            PersistAndRebuild();
+            PersistAndRelayout();
         }
         else
         {
@@ -1994,6 +2009,38 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
         Rebuild();
         MainDockChanged?.Invoke();
+    }
+
+    /// <summary>Persists then relayouts in place (no window/host recreation) so a
+    /// reorder drop does not flash. Used for reorders, where the icon count — and
+    /// hence the window geometry — is unchanged (mirrors the main dock's
+    /// PersistAndRelayout).</summary>
+    private void PersistAndRelayout()
+    {
+        try
+        {
+            DockSync.MirrorResidentToLeft(_config);
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
+        RelayoutInPlace();
+        MainDockChanged?.Invoke();
+    }
+
+    /// <summary>Recomputes the slots/geometry in the existing window. Falls back to a
+    /// full Rebuild only when the window geometry actually changed.</summary>
+    private void RelayoutInPlace()
+    {
+        if (_host == null || _hwnd == IntPtr.Zero) { Rebuild(); return; }
+        int ow = _winW, oh = _winH, ox = _winX, oy = _winY;
+        _hover = -1; _pressIdx = -1; _dragging = false;
+        LayoutContent();
+        if (_winW != ow || _winH != oh || _winX != ox || _winY != oy)
+        {
+            Rebuild();   // geometry changed → window/swapchain must be recreated
+            return;
+        }
+        Render();
     }
 
     private void Rebuild()
