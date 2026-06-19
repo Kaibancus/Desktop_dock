@@ -5,11 +5,14 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Polaris.Models;
 using Polaris.Services;
 using Polaris.Services.Gpu;
 using Vortice.Direct2D1;
+using Vortice.DirectWrite;
 using Vortice.Mathematics;
+using FontStyle = Vortice.DirectWrite.FontStyle;
 
 namespace Polaris.Views;
 
@@ -18,14 +21,24 @@ namespace Polaris.Views;
 /// and the 7-column pinned icon grid in Direct2D under DirectComposition, mirroring the
 /// WPF <see cref="RadialWindow"/>'s glass layout (<c>DrawGlassPanel</c> +
 /// <c>LiquidGlassTheme.ComputeSlots</c>). Per-monitor DPI aware (layout in DIPs, window +
-/// swap chain in physical px, D2D target DPI = 96 × scale). Click-through for now —
-/// hover / magnify / interaction come in later stages. Shown behind POLARIS_GPU_MAINDOCK=1.</summary>
+/// swap chain in physical px, D2D target DPI = 96 × scale).
+/// <para>Stage B: a 16 ms cursor poll drives a continuous 2-D fisheye magnify wave
+/// (raised-cosine falloff, focal anchoring + neighbour spread mirroring
+/// <c>RadialWindow.Magnify</c>) and a floating hover name label below the focal icon.
+/// Still click-through (hit-test is poll-based) — launch / drag interaction lands in
+/// Stage D. Shown behind POLARIS_GPU_MAINDOCK=1.</summary>
 internal sealed class MainDockWindowGpu : IDisposable
 {
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
     // for glass; glyphs drawn at icon*GlassIconScale).
     private const double ThemeScale = 0.9;
     private const float GlassIconScale = 1.32f;
+
+    // Magnify wave constants — kept in lockstep with DockTuning so the GPU dock
+    // feels identical to the WPF glass dock.
+    private const float MagnifyPeak = (float)DockTuning.HoverScale;       // 1.7x under the cursor
+    private const float SpreadPush = (float)DockTuning.SpreadPush;        // 0.75 * iconSize
+    private const float SpreadInfluence = (float)DockTuning.SpreadInfluence; // 2.7 * iconSize
 
     private readonly AppConfig _config;
     private IntPtr _hwnd;
@@ -39,14 +52,27 @@ internal sealed class MainDockWindowGpu : IDisposable
     // Slab geometry (window-local DIP) + the laid-out icon slots.
     private float _slabX, _slabY, _slabW, _slabH, _radius, _opacity, _frost;
     private float _gIcon;
+    private float _effIcon;                    // EffectiveIconSize (DIP), wave support unit
+    private float _iconRaw;                     // raw IconSize (DIP), spread unit
     private readonly List<IconSlot> _slots = new();
+
+    // ---- Stage B magnify wave state ----
+    private DispatcherTimer? _timer;
+    private IDWriteFactory? _dwrite;
+    private IDWriteTextFormat? _labelFormat;
+    private float[] _waveCur = Array.Empty<float>();   // smoothed per-icon scale
+    private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
+    private float[] _waveOffY = Array.Empty<float>();
+    private int _hover = -1;
 
     private readonly struct IconSlot
     {
         public readonly Vector2 Center;       // window-local DIP
         public readonly string IconKey;
+        public readonly string Name;
         public readonly BitmapSource? Image;
-        public IconSlot(Vector2 c, string key, BitmapSource? img) { Center = c; IconKey = key; Image = img; }
+        public IconSlot(Vector2 c, string key, string name, BitmapSource? img)
+        { Center = c; IconKey = key; Name = name; Image = img; }
     }
 
     public MainDockWindowGpu(AppConfig config) => _config = config;
@@ -117,6 +143,8 @@ internal sealed class MainDockWindowGpu : IDisposable
         _slabH = (float)slabTotalH;
         _radius = 28f;
         _gIcon = (float)gIcon;
+        _effIcon = (float)icon;
+        _iconRaw = (float)_config.Settings.IconSize;
         _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
         _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
 
@@ -130,8 +158,14 @@ internal sealed class MainDockWindowGpu : IDisposable
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
-                entry.EffectiveIconSource, img));
+                entry.EffectiveIconSource, entry.Name, img));
         }
+
+        // Magnify wave state starts at rest (scale 1, no spread).
+        _waveCur = new float[_slots.Count];
+        _waveOffX = new float[_slots.Count];
+        _waveOffY = new float[_slots.Count];
+        Array.Fill(_waveCur, 1f);
 
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
@@ -142,10 +176,105 @@ internal sealed class MainDockWindowGpu : IDisposable
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
+        _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, Vortice.DirectWrite.FontWeight.SemiBold,
+            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, 13f, "zh-cn");
+        _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
+        _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
+
         Render();
+
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        _timer.Tick += (_, _) => Tick();
+        _timer.Start();
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
+
+    /// <summary>Raised-cosine fisheye falloff: peaks at <see cref="MagnifyPeak"/> under the
+    /// cursor and eases to 1.0 at the support radius (EffectiveIconSize × 1.3), mirroring
+    /// <c>RadialWindow.MagnifyScaleAt</c>.</summary>
+    private float WaveScaleAt(float dist)
+    {
+        float s = _effIcon * 1.3f;
+        if (dist >= s)
+            return 1f;
+        float f = 0.5f * (1f + (float)Math.Cos(Math.PI * dist / s));
+        return 1f + (MagnifyPeak - 1f) * f;
+    }
+
+    /// <summary>16 ms cursor poll: feeds the live pointer into the 2-D magnify wave,
+    /// updates per-icon scale + neighbour-spread offsets, tracks the focal (hovered)
+    /// icon, and re-renders while anything is in motion.</summary>
+    private void Tick()
+    {
+        if (_host == null || _slots.Count == 0)
+            return;
+
+        bool active = false;
+        Vector2 cur = default;
+        if (GetCursorPos(out POINT p))
+        {
+            cur = new Vector2((float)(p.X / _dpi - _winX), (float)(p.Y / _dpi - _winY));
+            float nearest = float.MaxValue;
+            for (int i = 0; i < _slots.Count; i++)
+                nearest = Math.Min(nearest, Vector2.Distance(_slots[i].Center, cur));
+            active = nearest <= _effIcon * 1.3f;
+        }
+
+        // Focal icon = nearest to the cursor; it stays anchored while neighbours
+        // part around its FIXED slot (so it never slides out from under the pointer).
+        int focal = -1; float best = float.MaxValue;
+        if (active)
+            for (int i = 0; i < _slots.Count; i++)
+            {
+                float d = Vector2.Distance(_slots[i].Center, cur);
+                if (d < best) { best = d; focal = i; }
+            }
+        float focalF = 0f;
+        Vector2 fp = default;
+        if (focal >= 0)
+        {
+            focalF = (WaveScaleAt(best) - 1f) / (MagnifyPeak - 1f);
+            fp = _slots[focal].Center;
+        }
+
+        float k = 1f - (float)Math.Exp(-0.016 / 0.045);    // tau 45ms
+        float influence = _iconRaw * SpreadInfluence;
+        float push = _iconRaw * SpreadPush;
+        float maxDelta = 0f;
+
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            float d = active ? Vector2.Distance(_slots[i].Center, cur) : 0f;
+            float target = active ? WaveScaleAt(d) : 1f;
+            float c = _waveCur[i] + (target - _waveCur[i]) * k;
+            _waveCur[i] = c;
+            maxDelta = Math.Max(maxDelta, Math.Abs(target - c));
+
+            float tx = 0f, ty = 0f;
+            if (active && focal >= 0 && i != focal && focalF > 0.001f)
+            {
+                Vector2 v = _slots[i].Center - fp;
+                float vd = v.Length();
+                if (vd > 0.01f && vd < influence)
+                {
+                    float amt = push * (1f - vd / influence) * focalF;
+                    tx = v.X / vd * amt; ty = v.Y / vd * amt;
+                }
+            }
+            _waveOffX[i] += (tx - _waveOffX[i]) * k;
+            _waveOffY[i] += (ty - _waveOffY[i]) * k;
+            maxDelta = Math.Max(maxDelta, Math.Abs(tx - _waveOffX[i]));
+            maxDelta = Math.Max(maxDelta, Math.Abs(ty - _waveOffY[i]));
+        }
+
+        // Hover only when the pointer is genuinely over an icon's cell.
+        _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
+
+        if (active || maxDelta > 0.001f)
+            Render();
+    }
 
     private void Render()
     {
@@ -169,25 +298,51 @@ internal sealed class MainDockWindowGpu : IDisposable
         using (var rim = ctx.CreateSolidColorBrush(Col(0xE6, 0xEA, 0xF4, 0xFF)))
             ctx.DrawRoundedRectangle(slab, rim, 1.4f);
 
-        foreach (var s in _slots)
-            DrawIcon(ctx, s);
+        // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
+        var order = new int[_slots.Count];
+        for (int i = 0; i < order.Length; i++) order[i] = i;
+        Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        foreach (int i in order)
+            DrawIcon(ctx, _slots[i], _waveCur[i], new Vector2(_waveOffX[i], _waveOffY[i]));
+
+        if (_hover >= 0 && _hover < _slots.Count)
+            DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
 
         ctx.EndDraw();
         _host.Present();
     }
 
-    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s)
+    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off)
     {
-        float g = _gIcon, half = g / 2f, cx = s.Center.X, cy = s.Center.Y;
+        float g = _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
         var bmp = GetBitmap(ctx, s.IconKey, s.Image);
         if (bmp == null)
             return;
+        var wave = Matrix3x2.CreateScale(scale, scale, new Vector2(cx, cy));
         float pad = g * 0.06f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
         var bs = bmp.Size;
         ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
-                      * Matrix3x2.CreateTranslation(dstX, dstY);
+                      * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
         ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
         ctx.Transform = Matrix3x2.Identity;
+    }
+
+    /// <summary>Floating name label centred just below the magnified focal icon
+    /// (mirrors the WPF glass dock's <c>ShowGlassHoverLabel</c>: barely-there dark tint,
+    /// 7px radius, light text). The icon zooms about its centre, so its visible bottom
+    /// sits at center + gIcon/2 × scale.</summary>
+    private void DrawHoverLabel(ID2D1DeviceContext ctx, in IconSlot s, float scale)
+    {
+        if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
+            return;
+        float zoomedHalf = _gIcon / 2f * scale;
+        float w = Math.Max(48f, s.Name.Length * 13f * 0.95f + 20f), h = 24f;
+        float lx = s.Center.X, ly = s.Center.Y + zoomedHalf + 2f + h / 2f;
+        var rect = new Vortice.Mathematics.Rect(lx - w / 2f, ly - h / 2f, w, h);
+        using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
+            ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
+        using (var ink = ctx.CreateSolidColorBrush(Col(0xF2, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawText(s.Name, _labelFormat, rect, ink);
     }
 
     private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
@@ -216,6 +371,10 @@ internal sealed class MainDockWindowGpu : IDisposable
 
     public void Dispose()
     {
+        _timer?.Stop();
+        _timer = null;
+        _labelFormat?.Dispose();
+        _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         _host?.Dispose();
@@ -327,4 +486,5 @@ internal sealed class MainDockWindowGpu : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
 }
