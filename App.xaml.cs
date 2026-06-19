@@ -734,7 +734,11 @@ public partial class App : Application
         // reserve from screen coordinates — e.g. primaryHeight - b.Top — breaks
         // on a secondary monitor whose bottom edge differs from the primary's,
         // producing a huge bogus reserve that shoves the glass dock off-screen.)
-        const double gap = 18.0;
+        // Reserve the side dock's thickness plus a gap so the glass main dock lifts
+        // clear of it. The gap must exceed the main dock's bottom grab margin so the
+        // two slabs read as visually separate and the side dock's toggle tile stays
+        // clickable (the main dock is a topmost window that overlaps the side dock).
+        const double gap = 30.0;
         double reserve = b.Height + gap;
         return reserve > 0 ? reserve : 0.0;
     }

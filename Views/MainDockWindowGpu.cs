@@ -1414,8 +1414,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 int sy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
                 float lx = (float)(sx / _dpi - _winX), ly = (float)(sy / _dpi - _winY);
                 float m = _gIcon * 0.5f;
+                // The bottom edge uses a tight margin so the slab's grab region never
+                // reaches into the bottom side dock sitting just below it (otherwise the
+                // side dock's Polaris toggle tile gets eaten by this topmost window).
+                float bottomM = _saturn ? m : Math.Min(m, _effIcon * 0.12f);
                 bool inside = lx >= _slabX - m && lx <= _slabX + _slabW + m
-                           && ly >= _slabY - m && ly <= _slabY + _slabH + m;
+                           && ly >= _slabY - m && ly <= _slabY + _slabH + bottomM;
                 result = inside ? HTCLIENT : HTTRANSPARENT;
                 return true;
             }
