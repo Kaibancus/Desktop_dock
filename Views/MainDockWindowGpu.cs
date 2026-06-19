@@ -1199,6 +1199,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var rect = new Vortice.Mathematics.Rect(lx - w / 2f, ly - h / 2f, w, h);
         using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
+        // 3-D raised lettering: dark offset copies behind the light text give the name
+        // depth and a legibility halo, mirroring the WPF DropShadowEffect (black, depth
+        // 1.4, direction 315° → a ~1px down-right offset, plus a soft second copy).
+        using (var halo = ctx.CreateSolidColorBrush(Col(0xE6, 0, 0, 0)))
+        {
+            ctx.DrawText(s.Name, _labelFormat, new Vortice.Mathematics.Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
+            ctx.DrawText(s.Name, _labelFormat, new Vortice.Mathematics.Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
+        }
         using (var ink = ctx.CreateSolidColorBrush(Col(0xF2, 0xFF, 0xFF, 0xFF)))
             ctx.DrawText(s.Name, _labelFormat, rect, ink);
     }

@@ -54,6 +54,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private CompositionHost? _host;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
+    private IDWriteTextFormat? _hoverFormat;   // floating hover name (SemiBold, hover-scaled)
+    private float _hoverFontPx = 16f;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
     private DispatcherTimer? _timer;
@@ -412,10 +414,19 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        _labelFormat?.Dispose();
+        _hoverFormat?.Dispose();
         _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
             FontStyle.Normal, FontStretch.Normal, 13f, "zh-cn");
         _labelFormat.TextAlignment = TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
+        // Floating hover name: SemiBold and sized to read at the hover-zoom scale, exactly
+        // like the WPF ShowHoverLabelCore (10.5 × HoverScale × FontScale).
+        _hoverFontPx = (float)(10.5 * HoverScale * FontScale.Current);
+        _hoverFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.SemiBold,
+            FontStyle.Normal, FontStretch.Normal, _hoverFontPx, "zh-cn");
+        _hoverFormat.TextAlignment = TextAlignment.Center;
+        _hoverFormat.ParagraphAlignment = ParagraphAlignment.Center;
 
         Render();
 
@@ -1000,11 +1011,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s, float scale)
     {
-        if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
+        if (_hoverFormat == null || string.IsNullOrEmpty(s.Name))
             return;
         // Clear the magnified + popped focal icon.
         float reach = s.G / 2f * scale + (scale - 1f) * _gIcon * 1.18f;
-        float w = Math.Max(40f, s.Name.Length * 13f * 0.95f + 18f), h = 24f, gap = 8f;
+        float fp = _hoverFontPx;
+        float w = Math.Max(40f, s.Name.Length * fp * 0.95f + 20f), h = fp + 12f, gap = 8f;
         (float lx, float ly) = _side switch
         {
             DockSide.Left => (s.Center.X + reach + gap + w / 2f, s.Center.Y),
@@ -1017,8 +1029,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // (ARGB 0x05,1A1A1A) — no visible plate.
         using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
-        using (var ink = ctx.CreateSolidColorBrush(Col(0xE6, 0xFF, 0xFF, 0xFF)))
-            ctx.DrawText(s.Name, _labelFormat, rect, ink);
+        // 3-D raised lettering: dark offset copies behind the light text give the name
+        // depth and a legibility halo, mirroring the WPF DropShadowEffect (black, depth
+        // 1.4, direction 315° → a ~1px down-right offset, plus a soft second copy).
+        using (var halo = ctx.CreateSolidColorBrush(Col(0xE6, 0, 0, 0)))
+        {
+            ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
+            ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
+        }
+        using (var ink = ctx.CreateSolidColorBrush(Col(0xF2, 0xFF, 0xFF, 0xFF)))
+            ctx.DrawText(s.Name, _hoverFormat, rect, ink);
     }
 
     private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
@@ -1221,6 +1241,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
         DisposeRockResources();
+        _labelFormat?.Dispose(); _labelFormat = null;
+        _hoverFormat?.Dispose(); _hoverFormat = null;
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
