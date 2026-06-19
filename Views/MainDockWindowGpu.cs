@@ -144,6 +144,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // Baked Saturn layers (full-window): static rings+disc+planet body, the
     // spinning polar disc (rotated each frame), and the static planet shading.
     private ID2D1Bitmap1? _satStaticInner, _satStaticOuter, _satDisc, _satShade, _satInner, _satOuter;
+    private ID2D1Bitmap1? _satBacking, _satPlanet;
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -575,7 +576,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Inner and outer ring layers are baked separately so the summon can
         // expand them on the inner vs outer bands (the ring graphic itself blooms
         // inside-out, mirroring the WPF _innerBandLayer / _outerBandLayer stagger).
-        _satStaticInner = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticInner(c, _sg));
+        // Backing disc + base starfield: full size, never scales during summon
+        // (parity with WPF — the disc is at PanelCanvas index 0). The inner ring
+        // group is baked separately so the summon can bloom it out from centre;
+        // the centre planet is baked separately so it stays full size as well.
+        _satBacking = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawBacking(c, _sg));
+        _satStaticInner = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawInnerRings(c, _sg));
+        _satPlanet = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanet(c, _sg));
         _satStaticOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticOuter(c, _sg));
         _satDisc = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
         _satShade = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
@@ -606,6 +613,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         _satStaticInner?.Dispose(); _satStaticInner = null;
         _satStaticOuter?.Dispose(); _satStaticOuter = null;
+        _satBacking?.Dispose(); _satBacking = null;
+        _satPlanet?.Dispose(); _satPlanet = null;
         _satDisc?.Dispose(); _satDisc = null;
         _satShade?.Dispose(); _satShade = null;
         _satInner?.Dispose(); _satInner = null;
@@ -645,7 +654,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 // Saturn's rings-expand reads as a sequenced inside-out bloom, so it
                 // wants a touch more time than the glass slab's quick rise to make the
                 // inner-then-outer stagger perceptible.
-                float inSec = _saturn ? 0.5f : SummonInSec;
+                float inSec = _saturn ? 0.42f : SummonInSec;
                 _summon = Math.Min(1f, _summon + dt / inSec);
                 if (_summon >= 1f) _summonDir = 0;
             }
@@ -906,31 +915,37 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_saturn)
         {
             // Summon "rings expand" (mirrors WPF AnimateRingsExpand): the inner band
-            // leads and the outer band follows ~0.42 of the summon later, each growing
-            // 0.42 -> 1.0 from the planet with a CubicEaseOut fade-in, so the dock reads
-            // as rings blooming out from the centre one after another rather than a
-            // single rigid zoom. The wide delay + small start scale keep the inner-then-
-            // outer sequencing clearly legible.
-            float innerP = CubicEaseOut(Math.Clamp(_summon / 0.58f, 0f, 1f));
-            float outerP = CubicEaseOut(Math.Clamp((_summon - 0.42f) / 0.58f, 0f, 1f));
-            _satInnerScl = 0.42f + 0.58f * innerP;
-            _satOuterScl = 0.42f + 0.58f * outerP;
+            // leads and the outer band follows ~0.26 of the summon later, each growing
+            // 0.55 -> 1.0 from the planet with a CubicEaseOut fade-in, so the dock reads
+            // as rings blooming out from the centre one after another. The backing disc
+            // and the centre planet are drawn at FULL size (they never scale with the
+            // rings — parity with WPF, where the disc sits at PanelCanvas index 0 and the
+            // planet lives on PanelCanvas; both only fade with the overall panel opacity).
+            float innerP = CubicEaseOut(Math.Clamp(_summon / 0.74f, 0f, 1f));
+            float outerP = CubicEaseOut(Math.Clamp((_summon - 0.26f) / 0.74f, 0f, 1f));
+            _satInnerScl = 0.55f + 0.45f * innerP;
+            _satOuterScl = 0.55f + 0.45f * outerP;
             _satInnerOp = innerP;
             _satOuterOp = outerP;
             _satR0 = EffectiveRing0Count(_slots.Count);
             var cen = new Vector2(_sg.Cx, _sg.Cy);
             var satBase = System.Numerics.Matrix3x2.CreateScale(_satInnerScl, _satInnerScl, cen);
             var outerBase = System.Numerics.Matrix3x2.CreateScale(_satOuterScl, _satOuterScl, cen);
-            // Inner ring layer (backing disc + D/C/B rings + planet body) blooms
-            // on the inner band; the outer A/F/G/E ring layer follows on the outer
-            // band so the whole ring graphic expands inside-out, not just the icons.
+
+            // Backing disc + base starfield: full size, full opacity (rides the content
+            // fade via the DComp visual). Never scales with the rings.
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
+            if (_satBacking != null)
+                ctx.DrawBitmap(_satBacking, 1f, InterpolationMode.Linear);
+
+            // Inner ring group blooms on the inner band; the outer A/F/G/E ring layer
+            // follows on the outer band so the ring graphic expands inside-out.
             ctx.Transform = satBase;
             if (_satStaticInner != null)
                 ctx.DrawBitmap(_satStaticInner, _satInnerOp, InterpolationMode.Linear);
             ctx.Transform = outerBase;
             if (_satStaticOuter != null)
                 ctx.DrawBitmap(_satStaticOuter, _satOuterOp, InterpolationMode.Linear);
-            ctx.Transform = satBase;
             // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
             // Inner cues bloom with the inner band; outer cues trail on the outer band.
             if (_satInner != null)
@@ -945,16 +960,21 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                     * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * outerBase;
                 ctx.DrawBitmap(_satOuter, _satOuterOp, InterpolationMode.Linear);
             }
-            ctx.Transform = satBase;
+
+            // Centre planet: full size, full opacity, drawn over the rings (parity with
+            // WPF, where the planet is added to PanelCanvas after the ring layers).
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
+            if (_satPlanet != null)
+                ctx.DrawBitmap(_satPlanet, 1f, InterpolationMode.Linear);
             if (_satDisc != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
-                    (float)(_spinAngle * Math.PI / 180.0), cen) * satBase;
-                ctx.DrawBitmap(_satDisc, _satInnerOp, InterpolationMode.Linear);
-                ctx.Transform = satBase;
+                    (float)(_spinAngle * Math.PI / 180.0), cen);
+                ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
             }
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
             if (_satShade != null)
-                ctx.DrawBitmap(_satShade, _satInnerOp, InterpolationMode.Linear);
+                ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);
             SaturnScene.DrawTwinkle(ctx, _sg, _saturnTime);
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
         }

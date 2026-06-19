@@ -117,6 +117,24 @@ internal static class SaturnScene
         DrawPlanetBody(ctx, g);
     }
 
+    /// <summary>Backing layer only: the near-black disc + base starfield. Drawn at
+    /// full size during the summon (mirrors WPF: the disc is inserted at PanelCanvas
+    /// index 0 and never scales — only the rings bloom out from the centre).</summary>
+    public static void DrawBacking(ID2D1DeviceContext ctx, in Geom g) => DrawBackingBase(ctx, g);
+
+    /// <summary>Inner D/C/B ring group only (no backing, no planet). This is the
+    /// layer that scales/fades on the inner band during the rings-expand summon.</summary>
+    public static void DrawInnerRings(ID2D1DeviceContext ctx, in Geom g) => DrawRingGroup(ctx, g, outer: false);
+
+    /// <summary>Centre planet only (warm glow halo + planet body). Drawn at full size
+    /// during the summon (mirrors WPF: the planet lives on PanelCanvas, never scaling
+    /// with the rings — it only fades with the overall panel opacity).</summary>
+    public static void DrawPlanet(ID2D1DeviceContext ctx, in Geom g)
+    {
+        DrawPlanetGlow(ctx, g);
+        DrawPlanetBody(ctx, g);
+    }
+
     /// <summary>Outer static layer: the A/F/G/E ring group beyond the Cassini
     /// division, drawn over the inner layer. Blooms a step after it.</summary>
     public static void DrawStaticOuter(ID2D1DeviceContext ctx, in Geom g)
