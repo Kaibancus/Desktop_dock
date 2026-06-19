@@ -585,18 +585,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float pos = _summonDir < 0 ? EaseInCubic(_summon) : BackEaseOut(_summon);
         float riseOff = (1f - pos) * _riseUnit;
         bool slid = riseOff > 0.01f;
+        float satScl = 1f;   // Saturn summon zoom (set in the _saturn branch)
         if (slid)
             ctx.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff);
 
         if (_saturn)
         {
-            var satBase = slid
-                ? System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff)
-                : System.Numerics.Matrix3x2.Identity;
+            // Summon "rings expand": grow the whole scene out from the centre with
+            // a soft BackEase-out settle (mirrors the WPF AnimateRingsExpand burst),
+            // collapsing back in on dismiss. Self-consistent zoom about the planet.
+            float satPos = _summonDir < 0 ? EaseInCubic(_summon) : BackEaseOut(_summon);
+            satScl = 0.72f + 0.28f * satPos;
+            var cen = new Vector2(_sg.Cx, _sg.Cy);
+            var satBase = System.Numerics.Matrix3x2.CreateScale(satScl, satScl, cen);
+            ctx.Transform = satBase;
             if (_satStatic != null)
                 ctx.DrawBitmap(_satStatic, 1f, InterpolationMode.Linear);
             // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
-            var cen = new Vector2(_sg.Cx, _sg.Cy);
             if (_satInner != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_innerAngle * Math.PI / 180.0), cen)
@@ -613,13 +618,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             if (_satDisc != null)
             {
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
-                    (float)(_spinAngle * Math.PI / 180.0), new Vector2(_sg.Cx, _sg.Cy)) * satBase;
+                    (float)(_spinAngle * Math.PI / 180.0), cen) * satBase;
                 ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
                 ctx.Transform = satBase;
             }
             if (_satShade != null)
                 ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);
             SaturnScene.DrawTwinkle(ctx, _sg, _saturnTime);
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
         }
         else
         {
@@ -651,7 +657,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             if (i == dragIdx)
                 continue;
             var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i));
-            DrawIcon(ctx, _slots[i], _waveCur[i], off, _saturn && i < _slotG.Length ? _slotG[i] : 0f);
+            float gi = _saturn && i < _slotG.Length ? _slotG[i] : 0f;
+            if (_saturn && satScl != 1f)
+            {
+                // Expand the ring icons out from the planet in lock-step with the scene zoom.
+                var ce = new Vector2(_sg.Cx, _sg.Cy);
+                var ss = _slots[i];
+                var scaled = new IconSlot(ce + (ss.Center - ce) * satScl, ss.IconKey, ss.Name, ss.Running, ss.Image, ss.Entry);
+                DrawIcon(ctx, scaled, _waveCur[i], off * satScl, gi * satScl);
+            }
+            else
+                DrawIcon(ctx, _slots[i], _waveCur[i], off, gi);
         }
 
         if (dragIdx >= 0 && dragIdx < _slots.Count)
