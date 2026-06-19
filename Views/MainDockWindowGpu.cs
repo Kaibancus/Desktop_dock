@@ -68,7 +68,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private float _labelFontPx = 13f;
-    private IDWriteTextFormat? _gearFormat;
     private IDWriteTextFormat? _clockFormat;   // glass top-left date/time bar
     private int _lastClockMin = -1;            // last rendered minute (forces a clock repaint)
     private readonly Polaris.Services.WeatherService _weather = new();   // clock weather suffix
@@ -421,10 +420,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _labelFontPx, "zh-cn");
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
-        _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.SemiBold,
-            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _gearR * 1.16f, "en-us");
-        _gearFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
-        _gearFormat.ParagraphAlignment = ParagraphAlignment.Center;
         float clockSize = (float)(Math.Max(18.0, _effIcon * 0.36) * FontScale.Current);
         _clockFormat = _dwrite.CreateTextFormat("Segoe UI Semibold", null, Vortice.DirectWrite.FontWeight.SemiBold,
             FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, clockSize, "zh-cn");
@@ -488,7 +483,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _gIcon = icon;             // base draw size; per-slot size in _slotG
         _effIcon = icon;
         _iconRaw = (float)_config.Settings.IconSize;
-        _gearR = _effIcon * 0.30f; // keeps _gearFormat sizing valid
+        _gearR = _effIcon * 0.30f; // bead radius for the top-right settings gear
         // The centre planet is the settings button on Saturn (mirrors the WPF
         // DrawCenterButton MouseLeftButtonUp -> RequestOpenSettings).
         _gearC = new Vector2(_sg.Cx, _sg.Cy);
@@ -1064,54 +1059,65 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return expo * MathF.Sin((MathF.PI * 2f * osc + MathF.PI * 0.5f) * t);
     }
 
-    /// <summary>Settings gear: a frosted disc with a ⚙ glyph in the slab's top-right
-    /// corner; the glyph spins while hovered and the disc dips on press, mirroring the
-    /// WPF dock gear. Clicking it asks the host to open the settings window.</summary>
+    /// <summary>Settings gear in the slab's top-right corner: a hollow-glass bead
+    /// (bright cool-white rim over a near-transparent interior) holding a large
+    /// outlined cog — eight hollow teeth + a hollow hub drawn as stroked vector
+    /// geometry (a font ⚙ glyph renders the teeth solid and too small). The cog
+    /// spins while hovered and the bead dips on press. Clicking opens settings.</summary>
     private void DrawGear(ID2D1DeviceContext ctx)
     {
-        if (_gearFormat == null) return;
         float r = _gearR * _gearScale;
         var e = new Vortice.Direct2D1.Ellipse(_gearC, r, r);
-        // Soft drop shadow under the bead (approximates the WPF DropShadowEffect
-        // blur=14, depth=3, dir=270): a few falling-alpha discs nudged downward so
-        // a gentle dark halo peeks out beneath the frosted bead.
-        var shCen = new Vector2(_gearC.X, _gearC.Y + 3f);
-        (float dr, byte a)[] shadow = { (5f, 0x14), (3f, 0x1E), (1.4f, 0x2A) };
-        foreach (var (dr, a) in shadow)
-            using (var sb = ctx.CreateSolidColorBrush(Col(a, 0x00, 0x00, 0x00)))
-                ctx.FillEllipse(new Vortice.Direct2D1.Ellipse(shCen, r + dr, r + dr), sb);
-        // Frosted vertical gradient fill (WPF: 70FFFFFF -> 42EAF2FF -> 5CD6E4F6).
+        // Hollow-glass bead: a very faint frosted interior so the disc reads as a
+        // hollow ring (parity with the original), with a crisp cool-white rim.
         using (var stops = ctx.CreateGradientStopCollection(new[]
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = Col(0x70, 0xFF, 0xFF, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = Col(0x42, 0xEA, 0xF2, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = Col(0x5C, 0xD6, 0xE4, 0xF6) },
+            new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = Col(0x2A, 0xFF, 0xFF, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = Col(0x16, 0xEA, 0xF2, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = Col(0x22, 0xD6, 0xE4, 0xF6) },
         }))
         using (var fill = ctx.CreateLinearGradientBrush(
             new LinearGradientBrushProperties { StartPoint = new Vector2(_gearC.X, _gearC.Y - r), EndPoint = new Vector2(_gearC.X, _gearC.Y + r) }, stops))
             ctx.FillEllipse(e, fill);
         using (var rim = ctx.CreateSolidColorBrush(Col(0xFF, 0xEA, 0xF4, 0xFF)))
-            ctx.DrawEllipse(e, rim, 2.0f);
-        // ⚙ glyph: rotate while hovered, scale on press.
+            ctx.DrawEllipse(e, rim, 2.2f);
+
+        // Outlined cog: rotate while hovered, scale on press (about the bead centre).
         var saved = ctx.Transform;
         ctx.Transform = Matrix3x2.CreateRotation(_gearAngle * MathF.PI / 180f, _gearC)
             * Matrix3x2.CreateScale(_gearScale, _gearScale, _gearC) * saved;
-        var rect = new Vortice.Mathematics.Rect(_gearC.X - _gearR, _gearC.Y - _gearR, _gearR * 2f, _gearR * 2f);
-        // Soft even shade behind the glyph (WPF: blur=3, depth=0, opacity=0.32,
-        // colour 2A3340) — a faint dark glyph drawn underneath fakes the halo.
-        using (var sh = ctx.CreateSolidColorBrush(Col(0x52, 0x2A, 0x33, 0x40)))
-            ctx.DrawText("\u2699", _gearFormat, rect, sh);
-        // Frosted-glass glyph: a soft cool-white vertical gradient (no metal) so it
-        // reads as the same frosted glass as the bead (WPF F0FFFFFF -> E2EAF2FF -> D2CFDFF0).
-        using (var stops = ctx.CreateGradientStopCollection(new[]
+
+        const int teeth = 8;
+        float rTip = _gearR * 0.72f;     // tooth tip radius (large, fills the bead)
+        float rRoot = _gearR * 0.50f;    // valley radius between teeth
+        float rHole = _gearR * 0.24f;    // hollow hub
+        double step = 2 * Math.PI / teeth;
+        double tipHalf = step * 0.26;    // half-width of each (flat) tooth tip
+        Vector2 Polar(double a, float rad) =>
+            new Vector2(_gearC.X + (float)(Math.Cos(a) * rad), _gearC.Y + (float)(Math.Sin(a) * rad));
+        var pts = new List<Vector2>(teeth * 4);
+        for (int i = 0; i < teeth; i++)
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0xF0, 0xFF, 0xFF, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = Col(0xE2, 0xEA, 0xF2, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0xD2, 0xCF, 0xDF, 0xF0) },
-        }))
-        using (var fg = ctx.CreateLinearGradientBrush(
-            new LinearGradientBrushProperties { StartPoint = new Vector2(_gearC.X, _gearC.Y - _gearR), EndPoint = new Vector2(_gearC.X, _gearC.Y + _gearR) }, stops))
-            ctx.DrawText("\u2699", _gearFormat, rect, fg);
+            double baseA = i * step - Math.PI / 2;          // first tooth points up
+            pts.Add(Polar(baseA - tipHalf, rTip));          // rise -> tip start
+            pts.Add(Polar(baseA + tipHalf, rTip));          // tip flat
+            pts.Add(Polar(baseA + tipHalf, rRoot));         // fall -> valley
+            pts.Add(Polar(baseA + step - tipHalf, rRoot));  // valley flat -> next rise
+        }
+        using (var cog = ctx.Factory.CreatePathGeometry())
+        {
+            using (var sink = cog.Open())
+            {
+                sink.BeginFigure(pts[0], FigureBegin.Hollow);
+                for (int k = 1; k < pts.Count; k++) sink.AddLine(pts[k]);
+                sink.EndFigure(FigureEnd.Closed);
+                sink.Close();
+            }
+            float sw = MathF.Max(2f, _gearR * 0.12f);
+            using var stroke = ctx.CreateSolidColorBrush(Col(0xF2, 0xF2, 0xF7, 0xFF));
+            ctx.DrawGeometry(cog, stroke, sw);
+            ctx.DrawEllipse(new Vortice.Direct2D1.Ellipse(_gearC, rHole, rHole), stroke, sw);
+        }
         ctx.Transform = saved;
     }
 
@@ -2106,7 +2112,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         DisposeSaturnCache();
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
-        _gearFormat?.Dispose(); _gearFormat = null;
         _clockFormat?.Dispose(); _clockFormat = null;
         _dwrite?.Dispose(); _dwrite = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
@@ -2364,7 +2369,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
         _notch?.HideNotch();
         _labelFormat?.Dispose();
-        _gearFormat?.Dispose();
         _clockFormat?.Dispose();
         _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
