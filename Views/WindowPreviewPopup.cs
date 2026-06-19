@@ -215,7 +215,10 @@ internal sealed class WindowPreviewPopup
                         break;
                     default: // Above
                         x = (targetSize.Width - popupSize.Width) / 2.0;
-                        y = -popupSize.Height - gap;
+                        // The main dock (bottom-anchored) is the only caller using
+                        // Above; lift the thumbnail a little further off the icon so
+                        // it doesn't crowd the dock's hover-zoomed glyph.
+                        y = -popupSize.Height - gap - 14;
                         axis = PopupPrimaryAxis.Horizontal;
                         break;
                 }

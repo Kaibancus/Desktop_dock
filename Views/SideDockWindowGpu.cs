@@ -28,6 +28,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
     private const float HoverScale = 1.5f;
+    // Pointer travel (window-DIP, Manhattan) before a press becomes a drag.
+    // Matches the WPF dock's 6 px DragThreshold so small reposition gestures
+    // register as drags instead of being misread as a launch-click.
+    private const float DragThreshold = 6f;
 
     private enum SlotKind { Pinned, Run, Overflow }
 
@@ -1455,7 +1459,14 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 _pressIdx = HitSlot(lx, ly);
                 _dragging = false;
                 if (_pressIdx >= 0)
+                {
+                    // Pin the dock for the whole press-drag-release gesture (parity
+                    // with the WPF dock's Icon_PreviewMouseLeftButtonDown): the edge
+                    // poll fires every 100 ms, so without this a drag that travels
+                    // off the narrow slab could let the poll hide the dock mid-gesture.
+                    SetDragActive(true);
                     SetCapture(_hwnd);
+                }
                 return true;
             }
             case WM_MOUSEMOVE:
@@ -1464,7 +1475,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     return false;
                 (float lx, float ly) = ClientDip(lParam);
                 _dragMain = lx; _dragCross = ly;
-                if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > _gIcon * 0.35f)
+                if (!_dragging && (MathF.Abs(lx - _pressMain) + MathF.Abs(ly - _pressCross)) > DragThreshold)
                 {
                     _dragging = true;
                     _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
@@ -1480,6 +1491,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             case WM_LBUTTONUP:
             {
                 ReleaseCapture();
+                SetDragActive(false);   // release the press-drag hold; edge poll resumes
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
                 (float lx, float ly) = ClientDip(lParam);
