@@ -1969,10 +1969,22 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             }
         }
 
-        // Dragged clear of the slab (with a margin) → unpin / delete.
-        float m = _gIcon * 0.4f;
-        bool outside = lx < _slabX - m || lx > _slabX + _slabW + m
-                    || ly < _slabY - m || ly > _slabY + _slabH + m;
+        // Dragged clear of the dock → unpin / delete. Saturn uses a RADIAL threshold
+        // past the outer ring (mirrors WPF DeleteRadius / IsDeleteDrop), so corner
+        // drops outside the circular disc count as outside; glass uses the slab rect.
+        bool outside;
+        if (_saturn)
+        {
+            float dx = lx - _sg.Cx, dy = ly - _sg.Cy;
+            float delR = _sg.OuterRadius + _gIcon * 1.25f;
+            outside = (dx * dx + dy * dy) > delR * delR;
+        }
+        else
+        {
+            float m = _gIcon * 0.4f;
+            outside = lx < _slabX - m || lx > _slabX + _slabW + m
+                   || ly < _slabY - m || ly > _slabY + _slabH + m;
+        }
         if (outside)
         {
             UnpinPinned(s.Entry);
