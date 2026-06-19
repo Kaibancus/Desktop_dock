@@ -71,13 +71,31 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private IDWriteTextFormat? _gearFormat;
     private IDWriteTextFormat? _clockFormat;   // glass top-left date/time bar
     private int _lastClockMin = -1;            // last rendered minute (forces a clock repaint)
+    private readonly Polaris.Services.WeatherService _weather = new();   // clock weather suffix
+    private bool _weatherHooked;               // Updated event subscribed once
     private float[] _waveCur = Array.Empty<float>();   // smoothed per-icon scale
     private float[] _waveOffX = Array.Empty<float>();  // smoothed spread offset (DIP)
     private float[] _waveOffY = Array.Empty<float>();
     private int _hover = -1;
+    // Hover window-thumbnail preview (parity with the WPF dock / GPU side dock): a
+    // tiny transparent click-through anchor window is parked over the hovered icon and
+    // used as WindowPreviewPopup's placement target. The popup's own dwell timers drive
+    // show/hide as the dock reports hover changes.
+    private System.Windows.Window? _anchorWin;
+    private System.Windows.Controls.Border? _anchorEl;
+    private WindowPreviewPopup? _preview;
+    private Func<List<WindowPreview>>? _previewSource;
+    private int _prevHover = -1;
     private float _runSweep;              // running-icon sweep gradient angle (deg)
     private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8)
     private bool _anyRunning;             // a glass running icon is present (drives sweep render)
+    // New-message attention badges: keys (EffectiveIconSource) of running icons whose
+    // windows are flashing for attention, polled off-thread; a small red dot pulses on
+    // each such icon's lower-left corner (parity with RadialIcon.SetAttention).
+    private volatile System.Collections.Generic.HashSet<string> _flashKeys = new();
+    private float _badgePulse = 1f;       // attention dot pulse scale (1.0..1.18, 1.4s)
+    private long _attnLast;               // last attention poll tick (throttle to ~800ms)
+    private volatile bool _attnBusy;      // an attention poll task is in flight
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
 
     // ---- Stage D interaction state ----
@@ -685,6 +703,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         // Hover only when the pointer is genuinely over an icon's cell.
         _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
+        // Drive the hover thumbnail preview (suppressed while dragging or dismissing).
+        DrivePreview(_dragging || !_shown ? -1 : _hover);
 
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
@@ -729,10 +749,49 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Glass orbit light: a cool lamp drifts around the slab, one rev / 36s.
         if (!_saturn && _visible)
             _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
+        // New-message badges: poll the flashing window set off-thread (~800ms) and
+        // breathe the dot (1.0->1.18, 1.4s) so it pulses like the WPF taskbar flash.
+        if (_visible && _shown && _anyRunning && Environment.TickCount64 - _attnLast > 800)
+        {
+            _attnLast = Environment.TickCount64;
+            PollAttention();
+        }
+        bool anyFlash = _flashKeys.Count > 0;
+        if (anyFlash)
+            _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
         if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
             || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f || _anyRunning
             || (!_saturn && _visible))
             Render();
+    }
+
+    /// <summary>Snapshots the running icons' flashing windows off the UI thread and
+    /// rebuilds <see cref="_flashKeys"/>, the set of icon keys whose windows are
+    /// requesting attention. Reuses AttentionBadges so the icon->window matching is
+    /// identical to the hover previews and the WPF dock.</summary>
+    private void PollAttention()
+    {
+        if (_attnBusy)
+            return;
+        _attnBusy = true;
+        var entries = new List<(string key, string path, string? args)>();
+        foreach (var s in _slots)
+            if (s.Running && s.Entry != null)
+                entries.Add((s.IconKey, s.Entry.Path, s.Entry.Arguments));
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var keys = new System.Collections.Generic.HashSet<string>();
+            try
+            {
+                var flashing = Polaris.Services.AttentionService.SnapshotFlashing();
+                foreach (var (key, path, args) in entries)
+                    if (AttentionBadges.ForEntry(path, args, flashing, "MainDockGpu").flashing)
+                        keys.Add(key);
+            }
+            catch { }
+            _flashKeys = keys;
+            _attnBusy = false;
+        });
     }
 
     /// <summary>Launch-hop offset (px, upward) for the clicked icon: a single damped
@@ -959,6 +1018,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _lastClockMin = DateTime.Now.Minute;
         string text = DateTime.Now.ToString("yyyy\u5e74M\u6708d\u65e5  ddd   H:mm",
             System.Globalization.CultureInfo.GetCultureInfo("zh-CN"));
+        string? wx = _weather.Summary;
+        if (!string.IsNullOrEmpty(wx))
+            text += "     " + wx;
         float x = _slabX + 18f, y = _slabY + 14f;
         var rect = new Vortice.Mathematics.Rect(x, y, _slabW - 36f, _effIcon * 1.2f);
         // Dark halo: a faint offset underlay reads as a soft drop shadow.
@@ -1107,6 +1169,19 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                       * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
         ctx.DrawBitmap(bmp, 1f, InterpolationMode.HighQualityCubic);
         ctx.Transform = Matrix3x2.Identity;
+
+        // New-message attention dot: a small pulsing red disc hugging the icon's
+        // lower-left corner when any of this app's windows is flashing for attention
+        // (parity with RadialIcon's lower-left AttentionBadge).
+        if (s.Running && _flashKeys.Contains(s.IconKey))
+        {
+            float d = Math.Clamp(g * 0.12f, 5f, 10f) * _badgePulse * scale;
+            float bx = cx - (half - d * 0.55f) * scale, by = cy + (half - d * 0.55f) * scale;
+            using (var glow = ctx.CreateSolidColorBrush(Col(0x55, 0xFF, 0x3B, 0x30)))
+                ctx.FillEllipse(new Ellipse { Point = new Vector2(bx, by), RadiusX = d * 0.78f, RadiusY = d * 0.78f }, glow);
+            using (var dot = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0x3B, 0x30)))
+                ctx.FillEllipse(new Ellipse { Point = new Vector2(bx, by), RadiusX = d * 0.5f, RadiusY = d * 0.5f }, dot);
+        }
     }
 
     /// <summary>Floating name label centred just below the magnified focal icon
@@ -1150,6 +1225,87 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         catch { d2d = null; }
         _bmpCache[key] = d2d;
         return d2d;
+    }
+
+    // ---- Hover window-thumbnail preview (parity with the WPF dock) -----------
+    // The polished thumbnail popup (live capture, caching, per-tile close button,
+    // minimized / no-preview fallbacks) lives in WindowPreviewPopup, which anchors to
+    // a WPF FrameworkElement. The GPU dock has no per-icon WPF visuals, so a tiny,
+    // transparent, click-through anchor window is parked over the hovered icon and
+    // used as the popup's placement target. A single popup is reused.
+
+    /// <summary>Called every Tick with the slot under the cursor (or -1). Drives the
+    /// reusable thumbnail popup: re-anchors and re-enters on a slot change, leaves on
+    /// exit. The popup's own dwell timers handle the open/close delays.</summary>
+    private void DrivePreview(int hover)
+    {
+        if (hover == _prevHover)
+            return;
+        if (_prevHover >= 0)
+            _preview?.OnPointerLeave();
+        _prevHover = hover;
+        if (hover < 0 || hover >= _slots.Count)
+            return;
+        var s = _slots[hover];
+        if (s.Entry == null || string.IsNullOrWhiteSpace(s.Entry.Path))
+            return;
+        var path = s.Entry.Path; var args = s.Entry.Arguments;
+        _previewSource = () => WindowPreviewService.GetWindowsForEntry(path, args);
+        EnsureAnchor();
+        AnchorOverSlot(s);
+        _preview!.Placement = PreviewPlacement.Above;   // main dock is bottom-anchored
+        _preview.OnPointerEnter();
+    }
+
+    private void EnsureAnchor()
+    {
+        if (_anchorWin != null)
+            return;
+        _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
+        _anchorWin = new System.Windows.Window
+        {
+            WindowStyle = System.Windows.WindowStyle.None,
+            AllowsTransparency = true,
+            Background = System.Windows.Media.Brushes.Transparent,
+            ShowInTaskbar = false,
+            ShowActivated = false,
+            Topmost = true,
+            ResizeMode = System.Windows.ResizeMode.NoResize,
+            Width = 1, Height = 1, Left = -10000, Top = -10000,
+            Content = _anchorEl,
+        };
+        _anchorWin.Show();
+        // Make the anchor fully click-through / non-activating so it never steals
+        // clicks from the GPU dock icon it sits over.
+        var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
+        int ex = GetWindowLongW(h, GWL_EXSTYLE);
+        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+        _preview = new WindowPreviewPopup(
+            _anchorEl,
+            () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
+            minWindows: 1,
+            onActivated: null);
+    }
+
+    /// <summary>Positions the anchor window so its element overlaps the hovered icon's
+    /// glyph box (screen DIPs), so the popup centres over the icon. The window sits at
+    /// _winX*_dpi and the icon centre is _winX + s.Center in screen DIPs.</summary>
+    private void AnchorOverSlot(in IconSlot s)
+    {
+        if (_anchorWin == null)
+            return;
+        double size = _gIcon;
+        _anchorWin.Width = size;
+        _anchorWin.Height = size;
+        _anchorWin.Left = _winX + s.Center.X - size / 2.0;
+        _anchorWin.Top = _winY + s.Center.Y - size / 2.0;
+    }
+
+    private void ClosePreview()
+    {
+        _preview?.Close();
+        _prevHover = -1;
     }
 
     // ---- Stage D: interaction (click-launch, drag reorder / drag-out delete,
@@ -1478,6 +1634,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool wasVisible = _visible;
         _timer?.Stop();
         CloseSlotMenu();
+        ClosePreview();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
         DisposeSaturnCache();
         _host?.Dispose(); _host = null;
@@ -1650,8 +1807,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         Rebuild();                 // pick up config / running changes; rebuilds visible
         ShowNotchIfSaturn();
+        if (!_weatherHooked) { _weather.Updated += OnWeatherUpdated; _weatherHooked = true; }
+        _ = _weather.RefreshAsync();   // fetch weather promptly on show (self-throttled)
         _timer?.Start();
     }
+
+    /// <summary>Repaint the clock line as soon as fresh weather arrives (the perpetual
+    /// render loop picks the new suffix up on its next frame while shown).</summary>
+    private void OnWeatherUpdated() => _lastClockMin = -1;
 
     /// <summary>Shows the phone-notch date/time panel when the Saturn theme is active
     /// (hidden for any other theme), sitting on the active monitor's top edge — or its
@@ -1684,6 +1847,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Cancel any in-flight drag / menu so they don't outlive the dismiss.
         _pressIdx = -1; _dragging = false; _hover = -1;
         CloseSlotMenu();
+        ClosePreview();
         _notch?.HideNotch();        // retract the Saturn notch with the dock
         PanelDismissed?.Invoke();   // retract the side dock together with the main dock
         _onFaded = onFaded;
@@ -1721,7 +1885,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         _timer?.Stop();
         _timer = null;
+        if (_weatherHooked) { _weather.Updated -= OnWeatherUpdated; _weatherHooked = false; }
         CloseSlotMenu();
+        ClosePreview();
+        if (_anchorWin != null) { try { _anchorWin.Close(); } catch { } _anchorWin = null; _anchorEl = null; _preview = null; }
         _notch?.HideNotch();
         _labelFormat?.Dispose();
         _gearFormat?.Dispose();
@@ -1817,6 +1984,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const int WS_EX_TRANSPARENT = 0x00000020;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int GWL_EXSTYLE = -20;
+    [DllImport("user32.dll")] private static extern int GetWindowLongW(IntPtr h, int idx);
+    [DllImport("user32.dll")] private static extern int SetWindowLongW(IntPtr h, int idx, int val);
     private const uint WS_POPUP = 0x80000000;
     private const int SW_SHOWNOACTIVATE = 4;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
