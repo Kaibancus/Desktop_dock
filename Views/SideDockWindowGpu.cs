@@ -160,7 +160,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void UpdateVisibility()
     {
-        bool want = _byMain || _byEdge || _byDrag || _byPinned;
+        // Keep the dock shown while a hover-thumbnail preview is open (the pointer is
+        // over the floating preview, which sits beyond the slab, so the edge poll would
+        // otherwise retract the dock out from under it — mirrors the WPF hold reasons).
+        bool want = _byMain || _byEdge || _byDrag || _byPinned || (_preview?.IsOpen == true);
         if (want == _shown)
             return;
         if (want) DoShow();
@@ -1659,16 +1662,23 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     }
 
     /// <summary>Positions the anchor window so its element exactly overlaps the
-    /// hovered icon's glyph box (screen DIPs), so the popup centres over the icon.</summary>
+    /// hovered icon's FULLY-MAGNIFIED, popped-out glyph box (screen DIPs), matching the
+    /// WPF preview which anchors to the icon visual carrying the wave's scale + pop. The
+    /// popup then opens clear of the enlarged icon (same vertical clearance as the
+    /// original) instead of overlapping it.</summary>
     private void AnchorOverSlot(in Slot s)
     {
         if (_anchorWin == null)
             return;
-        double size = _gIcon;
+        float scale = HoverScale;
+        Vector2 po = PopOffset((scale - 1f) * _gIcon * 1.18f);
+        double size = _gIcon * scale;
+        double cx = _winX + s.Center.X + po.X;
+        double cy = _winY + s.Center.Y + po.Y;
         _anchorWin.Width = size;
         _anchorWin.Height = size;
-        _anchorWin.Left = _winX + s.Center.X - size / 2.0;
-        _anchorWin.Top = _winY + s.Center.Y - size / 2.0;
+        _anchorWin.Left = cx - size / 2.0;
+        _anchorWin.Top = cy - size / 2.0;
     }
 
     private void ClosePreview()
