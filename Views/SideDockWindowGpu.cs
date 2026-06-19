@@ -69,6 +69,11 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private int _winX, _winY, _winW, _winH;
     private double _dpi = 1.0;
     private int _hover = -1;
+    // Hover-label fade (parity with WPF ShowHoverLabel/HideHoverLabel 110 ms opacity
+    // animation): _labelIdx keeps the slot whose name is showing while it fades out.
+    private int _labelIdx = -1;
+    private float _labelOp;
+    private long _labelLastMs;
     private float _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost;
     private float _gIcon, _cellH;
     private float _seamMain, _bodyCross, _bodyCrossLen;
@@ -632,6 +637,20 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _hover = active && focal >= 0 && best <= _cellH ? focal : -1;
         DrivePreview(_hover);
 
+        // Ease the hover-label opacity toward 1 while an icon is hovered (and not
+        // dragging) and toward 0 otherwise, over ~110 ms (parity with WPF). Retain
+        // the last hovered slot in _labelIdx so the name fades out in place.
+        {
+            if (_hover >= 0 && !_dragging) _labelIdx = _hover;
+            long nowL = Environment.TickCount64;
+            float dtL = Math.Clamp((nowL - _labelLastMs) / 1000f, 0f, 0.1f);
+            _labelLastMs = nowL;
+            float tgtL = (_hover >= 0 && !_dragging) ? 1f : 0f;
+            float kL = 1f - MathF.Exp(-dtL / 0.05f);   // ~110 ms settle
+            _labelOp += (tgtL - _labelOp) * kL;
+            if (_labelOp < 0.01f && tgtL == 0f) { _labelOp = 0f; _labelIdx = -1; }
+        }
+
         // Drag-reorder "push neighbours aside": ease each non-dragged pinned slot's
         // main-axis offset toward its open-gap target (while dragging) or back to rest
         // (after a drop that didn't rebuild), mirroring WPF ArrangeForDrag/AnimateIconTo.
@@ -1095,8 +1114,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 s.Kind, s.IconKey, s.Image, s.Entry, s.Window);
             DrawIcon(ctx, moved, 1.12f, Vector2.Zero);
         }
-        else if (_hover >= 0 && _hover < _slots.Count)
-            DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
+        else if (_labelIdx >= 0 && _labelIdx < _slots.Count && _labelOp > 0.01f)
+            DrawHoverLabel(ctx, _slots[_labelIdx], _waveCur[_labelIdx], _labelOp);
         ctx.EndDraw();
         _host.Present();
         satBlur?.Dispose();
@@ -1203,35 +1222,38 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         ctx.Transform = Matrix3x2.Identity;
     }
 
-    private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s, float scale)
+    private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s, float scale, float labelOp)
     {
         if (_hoverFormat == null || string.IsNullOrEmpty(s.Name))
             return;
-        // Clear the magnified + popped focal icon.
+        // Clear the magnified + popped focal icon. The label's near edge sits right at
+        // the hover-enlarged icon's outer edge with no extra gap (parity with WPF
+        // ShowHoverLabelCore: crossPos = colCenterCross + crossExtent).
         float reach = s.G / 2f * scale + (scale - 1f) * _gIcon * 1.18f;
         float fp = _hoverFontPx;
-        float w = Math.Max(40f, s.Name.Length * fp * 0.95f + 20f), h = fp + 12f, gap = 8f;
+        float w = Math.Max(40f, s.Name.Length * fp * 0.95f + 20f), h = fp + 12f;
         (float lx, float ly) = _side switch
         {
-            DockSide.Left => (s.Center.X + reach + gap + w / 2f, s.Center.Y),
-            DockSide.Right => (s.Center.X - reach - gap - w / 2f, s.Center.Y),
-            DockSide.Top => (s.Center.X, s.Center.Y + reach + gap + h / 2f),
-            _ => (s.Center.X, s.Center.Y - reach - gap - h / 2f),
+            DockSide.Left => (s.Center.X + reach + w / 2f, s.Center.Y),
+            DockSide.Right => (s.Center.X - reach - w / 2f, s.Center.Y),
+            DockSide.Top => (s.Center.X, s.Center.Y + reach + h / 2f),
+            _ => (s.Center.X, s.Center.Y - reach - h / 2f),
         };
         var rect = new Rect(lx - w / 2f, ly - h / 2f, w, h);
+        byte A(byte a) => (byte)Math.Clamp(a * labelOp, 0, 255);
         // The real hover label is just floating text on a barely-there dark tint
         // (ARGB 0x05,1A1A1A) — no visible plate.
-        using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
+        using (var bg = ctx.CreateSolidColorBrush(Col(A(0x05), 0x1A, 0x1A, 0x1A)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
         // 3-D raised lettering: dark offset copies behind the light text give the name
         // depth and a legibility halo, mirroring the WPF DropShadowEffect (black, depth
         // 1.4, direction 315° → a ~1px down-right offset, plus a soft second copy).
-        using (var halo = ctx.CreateSolidColorBrush(Col(0xE6, 0, 0, 0)))
+        using (var halo = ctx.CreateSolidColorBrush(Col(A(0xE6), 0, 0, 0)))
         {
             ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
             ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
         }
-        using (var ink = ctx.CreateSolidColorBrush(Col(0xF2, 0xFF, 0xFF, 0xFF)))
+        using (var ink = ctx.CreateSolidColorBrush(Col(A(0xF2), 0xFF, 0xFF, 0xFF)))
             ctx.DrawText(s.Name, _hoverFormat, rect, ink);
     }
 
