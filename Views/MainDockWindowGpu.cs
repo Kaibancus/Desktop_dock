@@ -56,6 +56,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _iconRaw;                     // raw IconSize (DIP), spread unit
     private Vector2 _gearC;                     // settings-gear button centre (window-local DIP)
     private float _gearR;                        // settings-gear button radius
+    private float _planetHitR;                   // Saturn: planet click radius (settings)
     private bool _pressGear;                     // mouse-down landed on the gear
     private readonly List<IconSlot> _slots = new();
 
@@ -326,11 +327,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _gIcon = icon;             // base draw size; per-slot size in _slotG
         _effIcon = icon;
         _iconRaw = (float)_config.Settings.IconSize;
-        _gearR = _effIcon * 0.30f; // unused on Saturn but keeps _gearFormat sizing valid
+        _gearR = _effIcon * 0.30f; // keeps _gearFormat sizing valid
+        // The centre planet is the settings button on Saturn (mirrors the WPF
+        // DrawCenterButton MouseLeftButtonUp -> RequestOpenSettings).
+        _gearC = new Vector2(_sg.Cx, _sg.Cy);
+        _planetHitR = planetR;
         _opacity = _sg.DiscOpacity;
 
         // Saturn pops in place for now (rings-expand summon lands in Stage 4).
         _riseUnit = 0f;
+
+        // Hit-test / click-outside region: a square box around the ring system
+        // (the glass branch uses _slabX/Y/W/H; reuse it so NCHITTEST + dismiss work).
+        float hitReach = _sg.OuterRadius + _sg.OuterIcon;
+        _slabX = (float)(_sg.Cx - hitReach);
+        _slabY = (float)(_sg.Cy - hitReach);
+        _slabW = hitReach * 2f;
+        _slabH = hitReach * 2f;
 
         // --- Two-ring icon layout (mirror SlotPositionsFor / RingPoint) -------
         var apps = _config.Apps;
@@ -788,7 +801,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             {
                 (float lx, float ly) = ClientDip(lParam);
                 _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
-                _pressGear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= _gearR + 2f;
+                float hitR = _saturn ? _planetHitR : _gearR;
+                _pressGear = Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f;
                 _pressIdx = _pressGear ? -1 : HitSlot(lx, ly);
                 _dragging = false;
                 if (_pressIdx >= 0 || _pressGear)
@@ -822,7 +836,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 _pressGear = false;
                 if (gear)
                 {
-                    if (Vector2.Distance(new Vector2(lx, ly), _gearC) <= _gearR + 2f)
+                    float hitR = _saturn ? _planetHitR : _gearR;
+                    if (Vector2.Distance(new Vector2(lx, ly), _gearC) <= hitR + 2f)
                         RequestOpenSettings?.Invoke();
                 }
                 else if (idx >= 0 && idx < _slots.Count)
