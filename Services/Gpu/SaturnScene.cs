@@ -100,11 +100,30 @@ internal static class SaturnScene
     // ===================================================================
     public static void DrawStaticScene(ID2D1DeviceContext ctx, in Geom g)
     {
-        DrawBackingDisc(ctx, g);
+        DrawStaticInner(ctx, g);
+        DrawStaticOuter(ctx, g);
+    }
+
+    /// <summary>Inner static layer: the backing disc, starfield, the inner D/C/B
+    /// ring group and the centre planet body. Split from the outer A/F/G/E group
+    /// so the summon can scale/fade the inner rings a step before the outer ones,
+    /// making the ring graphic itself bloom inside-out (parity with the WPF
+    /// _innerBandLayer / _outerBandLayer expand stagger, not just the icons).</summary>
+    public static void DrawStaticInner(ID2D1DeviceContext ctx, in Geom g)
+    {
+        DrawBackingBase(ctx, g);
+        DrawRingGroup(ctx, g, outer: false);
         DrawPlanetBody(ctx, g);
     }
 
-    private static void DrawBackingDisc(ID2D1DeviceContext ctx, in Geom g)
+    /// <summary>Outer static layer: the A/F/G/E ring group beyond the Cassini
+    /// division, drawn over the inner layer. Blooms a step after it.</summary>
+    public static void DrawStaticOuter(ID2D1DeviceContext ctx, in Geom g)
+    {
+        DrawRingGroup(ctx, g, outer: true);
+    }
+
+    private static void DrawBackingBase(ID2D1DeviceContext ctx, in Geom g)
     {
         float tilt = g.TiltY;
         float outerIcon = g.OuterIcon;
@@ -133,7 +152,15 @@ internal static class SaturnScene
         // Faint starfield behind the rings (non-twinkling stars only; the
         // twinkling subset is re-drawn each frame by DrawTwinkle).
         DrawStarfieldBase(ctx, g);
+    }
 
+    /// <summary>Draws one ring group: the inner D/C/B zones (<paramref name="outer"/>
+    /// false) or the outer A/F/G/E zones (true). Each group is baked separately so
+    /// the summon can expand them on the inner vs outer bands.</summary>
+    private static void DrawRingGroup(ID2D1DeviceContext ctx, in Geom g, bool outer)
+    {
+        float outerIcon = g.OuterIcon;
+        float r = g.OuterRadius + outerIcon;
         bool hasOuter = g.OuterRadius > g.InnerRadius + 0.5f;
         float icon = g.Icon;
         float rB = g.InnerRadius;
@@ -164,19 +191,24 @@ internal static class SaturnScene
 
         bool extra = Polaris.Services.RenderProfile.SaturnExtraDetail;
 
-        // --- Inner group: D, C, B -------------------------------------------
-        DrawRingZone(ctx, g, MapR(RDin), MapR(RDout), faintD, 0.12, 0.20, icon);
-        DrawRingZone(ctx, g, MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);
-        DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);
-
-        if (extra)
+        if (!outer)
         {
-            double rbi = MapR(RBin), rbo = MapR(RBout), bw = rbo - rbi;
-            AddRinglet(ctx, g, rbi + bw * 0.22, Lighten(paleB, 0.24), 0.30, 1.1);
-            AddRinglet(ctx, g, rbi + bw * 0.46, Darken(paleB, 0.45), 0.26, 1.4);
-            AddRinglet(ctx, g, rbi + bw * 0.70, Lighten(paleB, 0.20), 0.28, 1.1);
+            // --- Inner group: D, C, B -------------------------------------------
+            DrawRingZone(ctx, g, MapR(RDin), MapR(RDout), faintD, 0.12, 0.20, icon);
+            DrawRingZone(ctx, g, MapR(RCin), MapR(RCout), dimC, 0.18, 0.35, icon);
+            DrawRingZone(ctx, g, MapR(RBin), MapR(RBout), paleB, 0.60, 0.66, icon);
+
+            if (extra)
+            {
+                double rbi = MapR(RBin), rbo = MapR(RBout), bw = rbo - rbi;
+                AddRinglet(ctx, g, rbi + bw * 0.22, Lighten(paleB, 0.24), 0.30, 1.1);
+                AddRinglet(ctx, g, rbi + bw * 0.46, Darken(paleB, 0.45), 0.26, 1.4);
+                AddRinglet(ctx, g, rbi + bw * 0.70, Lighten(paleB, 0.20), 0.28, 1.1);
+            }
+            return;
         }
 
+        // --- Outer group: Cassini, A, F, G, E -------------------------------
         if (hasOuter)
         {
             DrawRingZone(ctx, g, MapR(RCassIn), MapR(RCassOut), faintD, 0.03, 0.04, icon);

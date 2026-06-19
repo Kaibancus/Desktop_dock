@@ -144,7 +144,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const double OuterOrbitRatio = 1.3941;
     // Baked Saturn layers (full-window): static rings+disc+planet body, the
     // spinning polar disc (rotated each frame), and the static planet shading.
-    private ID2D1Bitmap1? _satStatic, _satDisc, _satShade, _satInner, _satOuter;
+    private ID2D1Bitmap1? _satStaticInner, _satStaticOuter, _satDisc, _satShade, _satInner, _satOuter;
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -560,7 +560,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var ctx = _host.Context;
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         float bdpi = (float)(96.0 * _dpi);
-        _satStatic = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticScene(c, _sg));
+        // Inner and outer ring layers are baked separately so the summon can
+        // expand them on the inner vs outer bands (the ring graphic itself blooms
+        // inside-out, mirroring the WPF _innerBandLayer / _outerBandLayer stagger).
+        _satStaticInner = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticInner(c, _sg));
+        _satStaticOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticOuter(c, _sg));
         _satDisc = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
         _satShade = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
         // Revolution cues are static apart from their orbit angle, so bake each
@@ -588,7 +592,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private void DisposeSaturnCache()
     {
-        _satStatic?.Dispose(); _satStatic = null;
+        _satStaticInner?.Dispose(); _satStaticInner = null;
+        _satStaticOuter?.Dispose(); _satStaticOuter = null;
         _satDisc?.Dispose(); _satDisc = null;
         _satShade?.Dispose(); _satShade = null;
         _satInner?.Dispose(); _satInner = null;
@@ -903,9 +908,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _satR0 = EffectiveRing0Count(_slots.Count);
             var cen = new Vector2(_sg.Cx, _sg.Cy);
             var satBase = System.Numerics.Matrix3x2.CreateScale(_satInnerScl, _satInnerScl, cen);
+            var outerBase = System.Numerics.Matrix3x2.CreateScale(_satOuterScl, _satOuterScl, cen);
+            // Inner ring layer (backing disc + D/C/B rings + planet body) blooms
+            // on the inner band; the outer A/F/G/E ring layer follows on the outer
+            // band so the whole ring graphic expands inside-out, not just the icons.
             ctx.Transform = satBase;
-            if (_satStatic != null)
-                ctx.DrawBitmap(_satStatic, _satInnerOp, InterpolationMode.Linear);
+            if (_satStaticInner != null)
+                ctx.DrawBitmap(_satStaticInner, _satInnerOp, InterpolationMode.Linear);
+            ctx.Transform = outerBase;
+            if (_satStaticOuter != null)
+                ctx.DrawBitmap(_satStaticOuter, _satOuterOp, InterpolationMode.Linear);
+            ctx.Transform = satBase;
             // Re-revolve the baked cue bitmaps: Rotate(orbit) * Scale(1,tilt) * base.
             // Inner cues bloom with the inner band; outer cues trail on the outer band.
             if (_satInner != null)
@@ -916,7 +929,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             }
             if (_satOuter != null)
             {
-                var outerBase = System.Numerics.Matrix3x2.CreateScale(_satOuterScl, _satOuterScl, cen);
                 ctx.Transform = System.Numerics.Matrix3x2.CreateRotation((float)(_outerAngle * Math.PI / 180.0), cen)
                     * System.Numerics.Matrix3x2.CreateScale(1f, _sg.TiltY, cen) * outerBase;
                 ctx.DrawBitmap(_satOuter, _satOuterOp, InterpolationMode.Linear);
@@ -1632,6 +1644,45 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return Math.Clamp(tgt, 0, n - 1);
     }
 
+    /// <summary>The resident count a glass drop would commit: dragging an icon into
+    /// the framed resident rows promotes it (+1), dragging a resident icon out of
+    /// them demotes it (-1). Mirrors WPF <c>ProspectiveResidentCount</c>. <paramref
+    /// name="src"/> is the dragged entry's index before the move; <paramref
+    /// name="dropY"/> is scroll-adjusted (grid space, like <see cref="_resY"/>).</summary>
+    private int ProspectiveResidentCount(int src, float lx, float dropY)
+    {
+        int resident = DockSync.ResidentCount(_config);
+        bool inResident = _hasResident
+            && dropY >= _resY && dropY <= _resY + _resH
+            && lx >= _resX && lx <= _resX + _resW;
+        bool wasResident = src >= 0 && src < resident;
+        if (inResident && !wasResident && resident < DockSync.MaxResidentCount)
+            return resident + 1;
+        if (!inResident && wasResident && resident > 1)
+            return resident - 1;
+        return resident;
+    }
+
+    /// <summary>Glass slot centres (window-local DIP) for a hypothetical resident
+    /// count, used so a mid-drag reflow animates to the layout the drop will
+    /// actually produce rather than the stale current one (mirrors WPF
+    /// <c>ComputeGlassSlots</c>). Returns null if the prospective count matches the
+    /// current layout (then the live <see cref="_slots"/> positions are used).</summary>
+    private Vector2[]? ComputeGlassSlots(int residentCount)
+    {
+        var scaled = new AppSettings
+        {
+            IconSize = _effIcon,
+            Ring0Count = Math.Clamp(residentCount, 0, _config.Apps.Count),
+        };
+        var pts = ((LiquidGlassTheme)ThemeRegistry.Get("liquidglass"))
+            .ComputeSlots(_config.Apps.Count, new Point(_winW / 2.0, _gridCenterY), scaled, out _);
+        var arr = new Vector2[Math.Min(pts.Count, _slots.Count)];
+        for (int i = 0; i < arr.Length; i++)
+            arr[i] = new Vector2((float)pts[i].X, (float)pts[i].Y);
+        return arr;
+    }
+
     /// <summary>Maps each entry index to the slot it should occupy when the dragged
     /// entry <paramref name="src"/> is reinserted at <paramref name="tgt"/> (mirrors
     /// WPF <c>GridArrangement</c>), producing the neighbour "make room" reflow.</summary>
@@ -1673,6 +1724,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // slots; saturn reflows along its two rings (re-spaced for the prospective
         // inner-ring count) so neighbours make room as the dragged icon orbits.
         int[]? arr = null;          // glass: entry -> slot over the current layout
+        Vector2[]? prospSlots = null; // glass: prospective slot centres when the resident block resizes
         int[]? satSlot = null;      // saturn: entry -> flat slot
         int satN = 0, satR0 = 0;
         if (_dragging && _pressIdx >= 0 && _pressIdx < _slots.Count)
@@ -1688,6 +1740,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
                 int tgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
                 arr = GridArrangement(_pressIdx, tgt);
+                // When the drop would resize the resident block, reflow neighbours to
+                // the prospective layout so an icon dragged in/out of the frame does
+                // not push residents across the stale resident gap (parity with WPF
+                // ReflowGrid's prospectiveResident path).
+                int prosp = ProspectiveResidentCount(_pressIdx, _dragX, dropY);
+                if (prosp != DockSync.ResidentCount(_config))
+                    prospSlots = ComputeGlassSlots(prosp);
             }
         }
 
@@ -1699,7 +1758,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             {
                 if (arr != null && i < arr.Length)
                 {
-                    Vector2 d = _slots[arr[i]].Center - _slots[i].Center;
+                    Vector2 target = prospSlots != null && arr[i] < prospSlots.Length
+                        ? prospSlots[arr[i]]
+                        : _slots[arr[i]].Center;
+                    Vector2 d = target - _slots[i].Center;
                     tx = d.X; ty = d.Y;
                 }
                 else if (satSlot != null && i < satSlot.Length)
@@ -1921,19 +1983,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         // Resident promote/demote (parity with WPF UpdateResidentCountForDrop):
         // dropping an icon inside the framed resident rows grows the resident count
-        // (up to the cap) and dragging a resident icon out of the frame shrinks it,
-        // so the resident region follows what the user drags in/out. Computed from
-        // the ORIGINAL index (before the reorder below), like the WPF reference.
+        // (up to the cap) and dragging a resident icon out of the frame shrinks it.
+        // Uses the same prospective-count helper the live drag preview reflows to, so
+        // the committed layout matches what the neighbours animated toward.
         int resident = DockSync.ResidentCount(_config);
-        bool inResident = _hasResident
-            && dropY >= _resY && dropY <= _resY + _resH
-            && lx >= _resX && lx <= _resX + _resW;
-        bool wasResident = idx < resident;
-        int newResident = resident;
-        if (inResident && !wasResident && resident < DockSync.MaxResidentCount)
-            newResident = resident + 1;
-        else if (!inResident && wasResident && resident > 1)
-            newResident = resident - 1;
+        int newResident = ProspectiveResidentCount(idx, lx, dropY);
 
         bool changed = false;
         if (tgt >= 0 && tgt != idx && idx < _config.Apps.Count && tgt < _config.Apps.Count)
