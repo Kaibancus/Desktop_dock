@@ -143,7 +143,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     // surface; the magnify/render Tick idles while hidden.
     private bool _shown;
     private bool _realized;
-    private bool _byMain, _byEdge, _byDrag, _byPinned, _byMenu;
+    private bool _byMain, _byEdge, _byDrag, _byPinned, _byMenu, _byBounce;
 
     /// <summary>Raised after the dock mutates the shared main-dock app list, so the
     /// host can refresh the main dock (parity with the WPF side dock).</summary>
@@ -175,7 +175,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     public void HideAll()
     {
-        _byMain = _byEdge = _byDrag = _byPinned = _byMenu = false;
+        _byMain = _byEdge = _byDrag = _byPinned = _byMenu = _byBounce = false;
         UpdateVisibility();
     }
 
@@ -189,7 +189,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // Keep the dock shown while a hover-thumbnail preview is open (the pointer is
         // over the floating preview, which sits beyond the slab, so the edge poll would
         // otherwise retract the dock out from under it — mirrors the WPF hold reasons).
-        bool want = _byMain || _byEdge || _byDrag || _byPinned || _byMenu || (_preview?.IsOpen == true);
+        bool want = _byMain || _byEdge || _byDrag || _byPinned || _byMenu || _byBounce || (_preview?.IsOpen == true);
         if (want == _shown)
             return;
         if (want) DoShow();
@@ -1636,20 +1636,43 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private void ClickSlot(int idx)
     {
         var s = _slots[idx];
-        try
+        // Resolve the action to run AFTER the launch bounce plays. Parity with WPF
+        // (SideDockWindow.Bounce/Running): every tile — pinned, running, the Polaris
+        // self-tile — hops first while the dock is held visible, then launches /
+        // activates / toggles. Doing it first would bring the target window over the
+        // dock and hide the bounce.
+        Action? act = null;
+        if (s.Kind == SlotKind.Pinned && s.Entry != null)
         {
-            if (s.Kind == SlotKind.Pinned && s.Entry != null)
-            {
-                _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
-                AppLauncher.Launch(s.Entry, null);
-            }
-            else if (s.Kind == SlotKind.Run && s.Window != IntPtr.Zero)
-                WindowPreviewService.Activate(s.Window);
-            else if (s.Kind == SlotKind.Run && s.Window == IntPtr.Zero
-                     && s.IconKey.StartsWith("polaris:", StringComparison.Ordinal))
-                ToggleDocks?.Invoke();   // the Polaris tile toggles the pinned docks
+            var entry = s.Entry;
+            act = () => { try { AppLauncher.Launch(entry, null); } catch (Exception ex) { Log.Warn("SideDockGpu", "launch failed: " + ex.Message); } };
         }
-        catch (Exception ex) { Log.Warn("SideDockGpu", "launch failed: " + ex.Message); }
+        else if (s.Kind == SlotKind.Run && s.Window != IntPtr.Zero)
+        {
+            var win = s.Window;
+            act = () => { try { WindowPreviewService.Activate(win); } catch (Exception ex) { Log.Warn("SideDockGpu", "activate failed: " + ex.Message); } };
+        }
+        else if (s.Kind == SlotKind.Run && s.Window == IntPtr.Zero
+                 && s.IconKey.StartsWith("polaris:", StringComparison.Ordinal))
+        {
+            act = () => ToggleDocks?.Invoke();   // the Polaris tile toggles the pinned docks
+        }
+        if (act == null)
+            return;
+
+        _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
+        _byBounce = true;                                            // hold the dock open through the hop
+        UpdateVisibility();
+        Render();
+        var hold = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(BounceDurMs) };
+        hold.Tick += (_, _) =>
+        {
+            hold.Stop();
+            act();
+            _byBounce = false;
+            UpdateVisibility();
+        };
+        hold.Start();
     }
 
     // ---- Right-click context menu (parity with the WPF dock) -----------------
