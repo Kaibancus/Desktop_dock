@@ -71,6 +71,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float[] _waveCur = Array.Empty<float>();
     private const float WaveSupport = 2.3f;
 
+    // ---- New-message attention badge (parity with the GPU main dock / WPF) -------
+    private volatile System.Collections.Generic.HashSet<string> _flashKeys = new();
+    private float _badgePulse = 1f;       // attention dot pulse scale (~1.0..1.18, 1.4s)
+    private long _attnLast;               // last attention poll tick (throttle to ~800ms)
+    private volatile bool _attnBusy;      // an attention poll task is in flight
+
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
@@ -479,8 +485,60 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // starfield twinkles and the debris belt drifts (cheap on the GPU).
         bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
         if (!bouncing) _bounceIdx = -1;
-        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown))
+
+        // New-message attention badge: poll flashing windows off-thread (~800ms) while
+        // shown, pulse the dot, and keep rendering while any icon is flashing.
+        if (_shown && Environment.TickCount64 - _attnLast > 800)
+        {
+            _attnLast = Environment.TickCount64;
+            PollAttention();
+        }
+        bool anyFlash = _flashKeys.Count > 0;
+        if (anyFlash)
+            _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
+
+        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || anyFlash)
             Render();
+    }
+
+    /// <summary>Snapshots the running icons' flashing windows off the UI thread and
+    /// rebuilds <see cref="_flashKeys"/>, the set of icon keys whose windows are
+    /// requesting attention. Reuses <see cref="PreviewSourceFor"/> so the icon→window
+    /// matching is identical to the hover previews and the WPF dock. Skips the
+    /// window enumeration entirely when nothing is flashing (the common case).</summary>
+    private void PollAttention()
+    {
+        if (_attnBusy)
+            return;
+        _attnBusy = true;
+        var sources = new List<(string key, Func<List<WindowPreview>> src)>();
+        foreach (var s in _slots)
+        {
+            if (!s.Running) continue;
+            var src = PreviewSourceFor(s);
+            if (src != null) sources.Add((s.IconKey, src));
+        }
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var keys = new System.Collections.Generic.HashSet<string>();
+            try
+            {
+                var flashing = Polaris.Services.AttentionService.SnapshotFlashing();
+                if (flashing.Count > 0)
+                    foreach (var (key, src) in sources)
+                    {
+                        try
+                        {
+                            foreach (var w in src())
+                                if (flashing.Contains(w.Handle)) { keys.Add(key); break; }
+                        }
+                        catch { }
+                    }
+            }
+            catch { }
+            _flashKeys = keys;
+            _attnBusy = false;
+        });
     }
 
     private const long BounceDurMs = 480;
@@ -788,6 +846,20 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 ctx.FillEllipse(new Ellipse(center, glow / 2f, glow / 2f), gl);
             using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
                 ctx.FillEllipse(new Ellipse(center, dot / 2f, dot / 2f), co);
+        }
+
+        // New-message attention dot: a small pulsing red disc hugging the icon's
+        // lower-left corner when any of this app's windows is flashing for attention
+        // (parity with RadialIcon's lower-left AttentionBadge and the GPU main dock).
+        if (s.Running && _flashKeys.Contains(s.IconKey))
+        {
+            ctx.Transform = wave;
+            float d = Math.Clamp(g * 0.12f, 5f, 10f) * _badgePulse;
+            var bp = new Vector2(cx - half + d * 0.55f, cy + half - d * 0.55f);
+            using (var glow = ctx.CreateSolidColorBrush(Col(0x55, 0xFF, 0x3B, 0x30)))
+                ctx.FillEllipse(new Ellipse(bp, d * 0.78f, d * 0.78f), glow);
+            using (var rd = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0x3B, 0x30)))
+                ctx.FillEllipse(new Ellipse(bp, d * 0.5f, d * 0.5f), rd);
         }
         ctx.Transform = Matrix3x2.Identity;
     }
