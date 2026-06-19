@@ -1625,7 +1625,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                         if (DragQueryFileW(hDrop, i, sb, len + 1) > 0)
                             paths.Add(sb.ToString());
                     }
-                    HandleDropFiles(paths);
+                    // DragQueryPoint gives a client-relative point in physical pixels;
+                    // convert to window-local DIPs to match the icon-slot geometry.
+                    HandleDropFiles(paths, (float)(pt.X / _dpi), (float)(pt.Y / _dpi));
                 }
                 catch (Exception ex) { Log.Warn("MainDockGpu", "drop-in failed: " + ex.Message); }
                 finally { DragFinish(hDrop); }
@@ -2065,32 +2067,88 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     }
 
     /// <summary>Pins shortcuts / executables dropped from Explorer / the desktop,
-    /// inserting each at the pointer's grid position (mirrors the WPF dock OnDrop).</summary>
-    private void HandleDropFiles(List<string> paths)
+    /// inserting each at the grid/ring slot nearest the drop point (mirrors the WPF
+    /// dock OnDropPanel: cursor-slot insertion + resident/inner-ring growth).</summary>
+    private void HandleDropFiles(List<string> paths, float lx, float ly)
     {
         var entries = new List<AppEntry>();
         foreach (var p in paths)
         {
-            try { var e = ShortcutResolver.CreateEntry(p); if (e != null) entries.Add(e); }
+            try { var e = ShortcutResolver.CreateEntry(p); if (e != null && !string.IsNullOrWhiteSpace(e.Path)) entries.Add(e); }
             catch { /* skip an unresolvable drop */ }
         }
         if (entries.Count == 0)
             return;
-        bool changed = false;
-        int at = DockSync.ResidentCount(_config);
+
         int cap = ThemeRegistry.Get(_config.Settings.Theme).MaxIcons;
+        int n = _config.Apps.Count;
+
+        // Insert at the slot nearest the pointer so the icon lands where it was
+        // dropped rather than always at the resident boundary (parity with WPF).
+        int insertIdx;
+        bool intoInner;   // saturn: inner ring · glass: framed resident rows
+        if (_saturn)
+        {
+            int r0 = EffectiveRing0Count(n);
+            var (ring, pos) = ComputeSaturnDragTarget(lx, ly, -1);
+            if (ring == 0) { intoInner = true; insertIdx = Math.Clamp(pos, 0, r0); }
+            else { intoInner = false; insertIdx = Math.Clamp(r0 + pos, r0, n); }
+        }
+        else
+        {
+            float dropY = _scrollable ? ly + (float)_glassScroll : ly;
+            insertIdx = ComputeGridInsertIndex(lx, dropY);
+            intoInner = _hasResident
+                && dropY >= _resY && dropY <= _resY + _resH
+                && lx >= _resX && lx <= _resX + _resW;
+        }
+
+        bool changed = false;
         foreach (var entry in entries)
         {
             if (_config.Apps.Count >= cap)
                 break;   // theme capacity reached (glass 42 / Saturn 42) — stop pinning
             if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) >= 0)
                 continue;   // already present — don't duplicate
-            DockSync.InsertResident(_config, entry, at);
-            at++;
+            insertIdx = Math.Clamp(insertIdx, 0, _config.Apps.Count);
+            _config.Apps.Insert(insertIdx, entry);
+            insertIdx++;
+            if (intoInner)
+            {
+                if (_saturn)
+                {
+                    // Auto mode (Ring0Count == 0) already fills the inner ring first,
+                    // so only an explicit count needs bumping (parity with WPF).
+                    if (_config.Settings.Ring0Count > 0)
+                        _config.Settings.Ring0Count = Math.Min(Ring0Cap, _config.Settings.Ring0Count + 1);
+                }
+                else if (DockSync.ResidentCount(_config) < DockSync.MaxResidentCount)
+                {
+                    _config.Settings.Ring0Count = DockSync.ResidentCount(_config) + 1;
+                }
+            }
             changed = true;
         }
         if (changed)
             PersistAndRebuild();
+    }
+
+    /// <summary>Grid insertion index (0..n) at a window-local point, allowing a drop
+    /// past the last icon to append. Mirrors WPF <c>ComputeGridInsertIndex</c>.</summary>
+    private int ComputeGridInsertIndex(float px, float py)
+    {
+        int n = _slots.Count;
+        if (n == 0) return 0;
+        float half = (float)(_glassCellH / 2.0);
+        int before = 0;
+        for (int i = 0; i < n; i++)
+        {
+            var s = _slots[i].Center;
+            float dy = py - s.Y;
+            bool isBefore = dy > half ? true : dy < -half ? false : px > s.X;
+            if (isBefore) before++;
+        }
+        return Math.Clamp(before, 0, n);
     }
 
     private void UnpinPinned(AppEntry entry)
