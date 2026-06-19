@@ -67,6 +67,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private DispatcherTimer? _timer;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
+    private float _labelFontPx = 13f;
     private IDWriteTextFormat? _gearFormat;
     private IDWriteTextFormat? _clockFormat;   // glass top-left date/time bar
     private int _lastClockMin = -1;            // last rendered minute (forces a clock repaint)
@@ -359,8 +360,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        // Match WPF ShowGlassHoverLabel: a fixed 11.5pt label that lived inside the
+        // icon visual tree and read as ~11.5*HoverScale once the icon zoomed.
+        _labelFontPx = (float)(11.5 * DockTuning.HoverScale * FontScale.Current);
         _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, Vortice.DirectWrite.FontWeight.SemiBold,
-            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, 13f, "zh-cn");
+            FontStyle.Normal, Vortice.DirectWrite.FontStretch.Normal, _labelFontPx, "zh-cn");
         _labelFormat.TextAlignment = Vortice.DirectWrite.TextAlignment.Center;
         _labelFormat.ParagraphAlignment = ParagraphAlignment.Center;
         _gearFormat = _dwrite.CreateTextFormat("Segoe UI Symbol", null, Vortice.DirectWrite.FontWeight.Normal,
@@ -632,6 +636,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         float push = _iconRaw * SpreadPush;
         float maxDelta = 0f;
 
+        // While dragging, neighbours reflow to make room: compute the prospective
+        // reading-order arrangement and steer each non-dragged icon toward the slot
+        // it would occupy, so icons part around the dragged one (WPF push-aside).
+        int[]? dragArrange = null;
+        if (!_saturn && _dragging && _pressIdx >= 0 && _pressIdx < _slots.Count)
+        {
+            float dropY = _scrollable ? _dragY + (float)_glassScroll : _dragY;
+            int dtgt = ComputeGridTarget(_dragX, dropY, _pressIdx);
+            dragArrange = GridArrangement(_pressIdx, dtgt);
+        }
+
         for (int i = 0; i < _slots.Count; i++)
         {
             float d = active ? Vector2.Distance(_slots[i].Center, cur) : 0f;
@@ -641,7 +656,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             maxDelta = Math.Max(maxDelta, Math.Abs(target - c));
 
             float tx = 0f, ty = 0f;
-            if (active && focal >= 0 && i != focal && focalF > 0.001f)
+            if (dragArrange != null && i != _pressIdx)
+            {
+                // Slide toward the slot this icon takes in the make-room arrangement.
+                Vector2 v = _slots[dragArrange[i]].Center - _slots[i].Center;
+                tx = v.X; ty = v.Y;
+            }
+            else if (active && focal >= 0 && i != focal && focalF > 0.001f)
             {
                 Vector2 v = _slots[i].Center - fp;
                 float vd = v.Length();
@@ -1092,7 +1113,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
             return;
         float zoomedHalf = _gIcon / 2f * scale;
-        float w = Math.Max(48f, s.Name.Length * 13f * 0.95f + 20f), h = 24f;
+        float h = _labelFontPx + 10f;
+        float w = Math.Max(48f, s.Name.Length * _labelFontPx * 0.95f + 20f);
         float lx = s.Center.X, ly = s.Center.Y + zoomedHalf + 2f + h / 2f;
         var rect = new Vortice.Mathematics.Rect(lx - w / 2f, ly - h / 2f, w, h);
         using (var bg = ctx.CreateSolidColorBrush(Col(0x05, 0x1A, 0x1A, 0x1A)))
@@ -1284,6 +1306,50 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return best;
     }
 
+    /// <summary>Reading-order (row first, then column) insertion index for the dragged
+    /// icon <paramref name="src"/> at grid-space point (<paramref name="px"/>,
+    /// <paramref name="py"/>). Mirrors WPF <c>ComputeGridTarget</c>: a slot is "before"
+    /// the cursor if it sits on an earlier row band (one cell-pitch tall) or, within the
+    /// same band, to the left of the cursor. The dragged icon is removed first, so its
+    /// own "before" count is discounted. This makes vertical drags switch rows reliably
+    /// instead of snapping to the raw nearest centre.</summary>
+    private int ComputeGridTarget(float px, float py, int src)
+    {
+        int n = _slots.Count;
+        if (n == 0) return 0;
+        float half = (float)(_glassCellH / 2.0);
+        int before = 0; bool srcBefore = false;
+        for (int i = 0; i < n; i++)
+        {
+            var s = _slots[i].Center;
+            float dy = py - s.Y;
+            bool isBefore = dy > half ? true : dy < -half ? false : px > s.X;
+            if (isBefore) { before++; if (i == src) srcBefore = true; }
+        }
+        int tgt = before;
+        if (src >= 0 && src < n && srcBefore) tgt--;
+        return Math.Clamp(tgt, 0, n - 1);
+    }
+
+    /// <summary>Maps each entry index to the slot it should occupy when the dragged
+    /// entry <paramref name="src"/> is reinserted at <paramref name="tgt"/> (mirrors
+    /// WPF <c>GridArrangement</c>), producing the neighbour "make room" reflow.</summary>
+    private int[] GridArrangement(int src, int tgt)
+    {
+        int n = _slots.Count;
+        var order = new List<int>(n);
+        for (int i = 0; i < n; i++) order.Add(i);
+        if (src >= 0 && src < n)
+        {
+            order.Remove(src);
+            order.Insert(Math.Clamp(tgt, 0, order.Count), src);
+        }
+        var slotOfEntry = new int[n];
+        for (int slot = 0; slot < order.Count; slot++)
+            slotOfEntry[order[slot]] = slot;
+        return slotOfEntry;
+    }
+
     private void ClickSlot(int idx)
     {
         var s = _slots[idx];
@@ -1330,14 +1396,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             return;
         }
 
-        // Otherwise reorder to the slot nearest the drop point (2-D grid).
+        // Otherwise reorder using the same reading-order hit test as the live drag
+        // preview so the icon lands at the grid cell the pointer is actually over.
         float dropY = _scrollable ? ly + (float)_glassScroll : ly;
-        int tgt = -1; float bestD = float.MaxValue;
-        for (int i = 0; i < _slots.Count; i++)
-        {
-            float d = Vector2.Distance(_slots[i].Center, new Vector2(lx, dropY));
-            if (d < bestD) { bestD = d; tgt = i; }
-        }
+        int tgt = ComputeGridTarget(lx, dropY, idx);
         if (tgt >= 0 && tgt != idx && idx < _config.Apps.Count && tgt < _config.Apps.Count)
         {
             var e = _config.Apps[idx];
