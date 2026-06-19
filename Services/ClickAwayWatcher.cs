@@ -29,11 +29,15 @@ internal sealed class ClickAwayWatcher
     private IntPtr _hook = IntPtr.Zero;
     private LowLevelMouseProc? _proc;          // keep alive while hooked
     private volatile bool _active;
+    private volatile bool _pressWasOutside;   // gesture started off all our dock surfaces
     private readonly uint _ownPid;
 
-    /// <summary>Raised (on the hook thread) when a left button-down lands on a
-    /// window that does not belong to this process while <see cref="Active"/> is
-    /// set. Handlers must marshal to the UI thread before touching WPF.</summary>
+    /// <summary>Raised (on the hook thread) when a left-button gesture both STARTS
+    /// and ENDS outside every window of this process while <see cref="Active"/> is
+    /// set — i.e. a real click-away on release, not on press. Deferring to the
+    /// button-up lets a press that begins outside be dragged ONTO a dock (e.g. an
+    /// icon from Explorer/the desktop) and dropped without the press first dismissing
+    /// the docks. Handlers must marshal to the UI thread before touching WPF.</summary>
     public event Action? ClickedOutside;
 
     public ClickAwayWatcher()
@@ -102,34 +106,53 @@ internal sealed class ClickAwayWatcher
 
     private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && (int)wParam == WM_LBUTTONDOWN && _active)
+        if (nCode >= 0 && _active)
         {
-            try
+            int msg = (int)wParam;
+            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
             {
-                // MSLLHOOKSTRUCT: pt.x@0, pt.y@4, mouseData@8, flags@12.
-                int px = Marshal.ReadInt32(lParam, 0);
-                int py = Marshal.ReadInt32(lParam, 4);
-                uint flags = (uint)Marshal.ReadInt32(lParam, 12);
-                // Ignore programmatically-injected clicks (e.g. our own).
-                if ((flags & LLMHF_INJECTED) == 0)
+                try
                 {
-                    // Decide whether the press landed on one of OUR dock surfaces.
-                    // WindowFromPoint only yields the single topmost window, which is
-                    // unreliable when two of our own overlapping dock windows (the main
-                    // dock and the side dock) both span the press point: it can return
-                    // the wrong one (whose transparent padding hit-tests HTTRANSPARENT)
-                    // and a press ON the side dock's icon strip is then misjudged as a
-                    // click "outside", dismissing both docks. Instead, query EVERY visible
-                    // top-level window of our process directly: if any claims the point
-                    // with a non-transparent hit-test, the press is on one of our docks
-                    // and must NOT dismiss. Only when no own window claims it (truly empty
-                    // space, or our docks' transparent headroom) do we treat it as outside.
-                    bool ownSurface = OwnWindowClaimsPoint(px, py);
-                    if (!ownSurface)
-                        ClickedOutside?.Invoke();   // non-blocking: handler marshals to UI
+                    // MSLLHOOKSTRUCT: pt.x@0, pt.y@4, mouseData@8, flags@12.
+                    int px = Marshal.ReadInt32(lParam, 0);
+                    int py = Marshal.ReadInt32(lParam, 4);
+                    uint flags = (uint)Marshal.ReadInt32(lParam, 12);
+                    // Ignore programmatically-injected clicks (e.g. our own).
+                    if ((flags & LLMHF_INJECTED) == 0)
+                    {
+                        // Decide whether this point landed on one of OUR dock surfaces.
+                        // WindowFromPoint only yields the single topmost window, which is
+                        // unreliable when two of our own overlapping dock windows (the main
+                        // dock and the side dock) both span the point: it can return the
+                        // wrong one (whose transparent padding hit-tests HTTRANSPARENT) and
+                        // a press ON the side dock's icon strip is then misjudged as
+                        // "outside". Instead, query EVERY visible top-level window of our
+                        // process directly: if any claims the point with a non-transparent
+                        // hit-test, the point is on one of our docks.
+                        bool outside = !OwnWindowClaimsPoint(px, py);
+                        if (msg == WM_LBUTTONDOWN)
+                        {
+                            // Record whether the gesture STARTED outside our docks, but do
+                            // NOT dismiss yet: dismissing on press would cancel a press-
+                            // outside-then-drag-onto-the-dock gesture (dragging an external
+                            // icon in). The decision is finalised on the button-up.
+                            _pressWasOutside = outside;
+                        }
+                        else // WM_LBUTTONUP
+                        {
+                            // Dismiss only when a gesture that began outside also ENDS
+                            // outside — a genuine click-away. A press that started outside
+                            // but is released ON a dock is a drag-in (keep the docks open so
+                            // the drop lands); a press that started on a dock owns its own
+                            // drag (reorder / drag-out) and never triggers click-away.
+                            if (_pressWasOutside && outside)
+                                ClickedOutside?.Invoke();   // non-blocking: handler marshals to UI
+                            _pressWasOutside = false;
+                        }
+                    }
                 }
+                catch (Exception ex) { Log.Debug("ClickAwayWatcher", "mouse hook handler failed", ex); }
             }
-            catch (Exception ex) { Log.Debug("ClickAwayWatcher", "mouse hook handler failed", ex); }
         }
         // Never swallow the click — the user's click should still reach whatever
         // they clicked; we only dismiss the dock alongside it.
@@ -170,6 +193,7 @@ internal sealed class ClickAwayWatcher
 
     private const int WH_MOUSE_LL = 14;
     private const int WM_LBUTTONDOWN = 0x0201;
+    private const int WM_LBUTTONUP = 0x0202;
     private const uint LLMHF_INJECTED = 0x00000001;
     private const uint WM_QUIT = 0x0012;
     private const uint GA_ROOT = 2;
