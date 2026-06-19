@@ -113,6 +113,7 @@ internal static class SaturnScene
     {
         DrawBackingBase(ctx, g);
         DrawRingGroup(ctx, g, outer: false);
+        DrawPlanetGlow(ctx, g);
         DrawPlanetBody(ctx, g);
     }
 
@@ -613,6 +614,34 @@ internal static class SaturnScene
     private static readonly Rgb Amber = new(0xE2, 0xBE, 0x82);
     private static readonly Rgb AmberDark = new(0x7A, 0x5C, 0x36);
     private static readonly Rgb AmberLight = new(0xFC, 0xEF, 0xCC);
+
+    /// <summary>Warm bloom halo + soft dark shadow behind the planet, baked once under
+    /// the planet body. Mirrors the WPF planet's RadialGradient bloom (BlurEffect 24)
+    /// and black drop shadow (BlurEffect 12) so the planet glows warmly and reads as
+    /// lifted off the rings instead of flat.</summary>
+    private static void DrawPlanetGlow(ID2D1DeviceContext ctx, in Geom g)
+    {
+        float r = g.PlanetR;
+        var c = new Vector2(g.Cx, g.Cy);
+        // Warm amber bloom extending ~1.4x the planet radius.
+        float halo = r * 1.4f;
+        using (var stops = Stops(ctx,
+            (0f, new Color4(0xF2 / 255f, 0xD4 / 255f, 0x96 / 255f, 95 / 255f)),
+            (0.46f, new Color4(0xDA / 255f, 0xB2 / 255f, 0x72 / 255f, 48 / 255f)),
+            (1f, new Color4(0xDA / 255f, 0xB2 / 255f, 0x72 / 255f, 0f))))
+        using (var bloom = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = c, RadiusX = halo, RadiusY = halo }, stops))
+            ctx.FillEllipse(new Ellipse(c, halo, halo), bloom);
+        // Soft black drop shadow: solid core fading just past the planet edge.
+        float sr = r * 1.16f;
+        using (var stops = Stops(ctx,
+            (0f, new Color4(0, 0, 0, 128 / 255f)),
+            (0.74f, new Color4(0, 0, 0, 128 / 255f)),
+            (1f, new Color4(0, 0, 0, 0f))))
+        using (var sh = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = c, RadiusX = sr, RadiusY = sr }, stops))
+            ctx.FillEllipse(new Ellipse(c, sr, sr), sh);
+    }
 
     private static void DrawPlanetBody(ID2D1DeviceContext ctx, in Geom g)
     {
