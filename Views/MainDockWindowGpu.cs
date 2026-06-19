@@ -65,6 +65,16 @@ internal sealed class MainDockWindowGpu : IDisposable
     private float[] _waveOffY = Array.Empty<float>();
     private int _hover = -1;
 
+    // ---- Stage D interaction state ----
+    private int _pressIdx = -1;          // slot under the mouse-down, or -1
+    private bool _dragging;              // press has crossed the drag threshold
+    private float _pressX, _pressY;      // mouse-down point (window-local DIP)
+    private float _dragX, _dragY;        // current drag point (window-local DIP)
+    private int _bounceIdx = -1;         // slot playing the launch hop, or -1
+    private long _bounceStart;
+    private const long BounceDurMs = 480;
+    private System.Windows.Controls.Primitives.Popup? _slotMenu;
+
     private readonly struct IconSlot
     {
         public readonly Vector2 Center;       // window-local DIP
@@ -72,8 +82,9 @@ internal sealed class MainDockWindowGpu : IDisposable
         public readonly string Name;
         public readonly bool Running;
         public readonly BitmapSource? Image;
-        public IconSlot(Vector2 c, string key, string name, bool running, BitmapSource? img)
-        { Center = c; IconKey = key; Name = name; Running = running; Image = img; }
+        public readonly AppEntry? Entry;
+        public IconSlot(Vector2 c, string key, string name, bool running, BitmapSource? img, AppEntry? entry)
+        { Center = c; IconKey = key; Name = name; Running = running; Image = img; Entry = entry; }
     }
 
     public MainDockWindowGpu(AppConfig config) => _config = config;
@@ -163,7 +174,7 @@ internal sealed class MainDockWindowGpu : IDisposable
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
-                entry.EffectiveIconSource, entry.Name, run, img));
+                entry.EffectiveIconSource, entry.Name, run, img, entry));
         }
 
         // Magnify wave state starts at rest (scale 1, no spread).
@@ -179,6 +190,7 @@ internal sealed class MainDockWindowGpu : IDisposable
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
 
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
@@ -218,7 +230,7 @@ internal sealed class MainDockWindowGpu : IDisposable
 
         bool active = false;
         Vector2 cur = default;
-        if (GetCursorPos(out POINT p))
+        if (!_dragging && GetCursorPos(out POINT p))
         {
             cur = new Vector2((float)(p.X / _dpi - _winX), (float)(p.Y / _dpi - _winY));
             float nearest = float.MaxValue;
@@ -277,8 +289,25 @@ internal sealed class MainDockWindowGpu : IDisposable
         // Hover only when the pointer is genuinely over an icon's cell.
         _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
 
-        if (active || maxDelta > 0.001f)
+        bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
+        if (!bouncing) _bounceIdx = -1;
+        if (active || _dragging || bouncing || maxDelta > 0.001f)
             Render();
+    }
+
+    /// <summary>Launch-hop offset (px, upward) for the clicked icon: a single damped
+    /// hop over <see cref="BounceDurMs"/> ms, mirroring the WPF/side-dock macOS bounce.</summary>
+    private float BounceOffset(int i)
+    {
+        if (i != _bounceIdx)
+            return 0f;
+        long el = Environment.TickCount64 - _bounceStart;
+        if (el < 0 || el > BounceDurMs)
+            return 0f;
+        float t = el / (float)BounceDurMs;
+        float hop = MathF.Sin(MathF.PI * t);
+        float settle = -0.12f * MathF.Sin(MathF.PI * 2f * t) * (1f - t);
+        return _gIcon * 0.5f * (hop + settle);
     }
 
     private void Render()
@@ -304,13 +333,27 @@ internal sealed class MainDockWindowGpu : IDisposable
             ctx.DrawRoundedRectangle(slab, rim, 1.4f);
 
         // Draw smallest-first so the magnified (focal) icon sits on top of its neighbours.
+        // The dragged icon is skipped here and drawn last, lifted under the cursor.
+        int dragIdx = _dragging ? _pressIdx : -1;
         var order = new int[_slots.Count];
         for (int i = 0; i < order.Length; i++) order[i] = i;
         Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
         foreach (int i in order)
-            DrawIcon(ctx, _slots[i], _waveCur[i], new Vector2(_waveOffX[i], _waveOffY[i]));
+        {
+            if (i == dragIdx)
+                continue;
+            var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i));
+            DrawIcon(ctx, _slots[i], _waveCur[i], off);
+        }
 
-        if (_hover >= 0 && _hover < _slots.Count)
+        if (dragIdx >= 0 && dragIdx < _slots.Count)
+        {
+            // The dragged icon follows the cursor, lifted 1.12x with no spread.
+            var s = _slots[dragIdx];
+            var moved = new IconSlot(new Vector2(_dragX, _dragY), s.IconKey, s.Name, s.Running, s.Image, s.Entry);
+            DrawIcon(ctx, moved, 1.12f, Vector2.Zero);
+        }
+        else if (_hover >= 0 && _hover < _slots.Count)
             DrawHoverLabel(ctx, _slots[_hover], _waveCur[_hover]);
 
         ctx.EndDraw();
@@ -395,10 +438,362 @@ internal sealed class MainDockWindowGpu : IDisposable
         return d2d;
     }
 
+    // ---- Stage D: interaction (click-launch, drag reorder / drag-out delete,
+    //       right-click menu, drop-files-to-pin) -------------------------------
+
+    /// <summary>Routes the window messages this dock cares about. Returns true (with
+    /// <paramref name="result"/>) when handled; false defers to DefWindowProc.</summary>
+    private bool HandleMessage(uint msg, IntPtr wParam, IntPtr lParam, out IntPtr result)
+    {
+        result = IntPtr.Zero;
+        switch (msg)
+        {
+            case WM_NCHITTEST:
+            {
+                // lParam = SCREEN coords. Inside the glass slab → grab the click;
+                // the empty headroom around it passes through to the desktop.
+                int sx = unchecked((short)((long)lParam & 0xFFFF));
+                int sy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
+                float lx = (float)(sx / _dpi - _winX), ly = (float)(sy / _dpi - _winY);
+                float m = _gIcon * 0.5f;
+                bool inside = lx >= _slabX - m && lx <= _slabX + _slabW + m
+                           && ly >= _slabY - m && ly <= _slabY + _slabH + m;
+                result = inside ? HTCLIENT : HTTRANSPARENT;
+                return true;
+            }
+            case WM_LBUTTONDOWN:
+            {
+                (float lx, float ly) = ClientDip(lParam);
+                _pressX = lx; _pressY = ly; _dragX = lx; _dragY = ly;
+                _pressIdx = HitSlot(lx, ly);
+                _dragging = false;
+                if (_pressIdx >= 0)
+                    SetCapture(_hwnd);
+                return true;
+            }
+            case WM_MOUSEMOVE:
+            {
+                if (_pressIdx < 0)
+                    return false;
+                (float lx, float ly) = ClientDip(lParam);
+                _dragX = lx; _dragY = ly;
+                if (!_dragging && (MathF.Abs(lx - _pressX) + MathF.Abs(ly - _pressY)) > _gIcon * 0.35f)
+                    _dragging = true;
+                if (_dragging)
+                    Render();
+                return true;
+            }
+            case WM_LBUTTONUP:
+            {
+                ReleaseCapture();
+                int idx = _pressIdx;
+                bool wasDrag = _dragging;
+                (float lx, float ly) = ClientDip(lParam);
+                _pressIdx = -1;
+                _dragging = false;
+                if (idx >= 0 && idx < _slots.Count)
+                {
+                    if (!wasDrag) ClickSlot(idx);
+                    else DropSlot(idx, lx, ly);
+                }
+                if (_hwnd != IntPtr.Zero)
+                    Render();
+                return true;
+            }
+            case WM_RBUTTONUP:
+            {
+                (float lx, float ly) = ClientDip(lParam);
+                int idx = HitSlot(lx, ly);
+                if (idx >= 0 && idx < _slots.Count)
+                    ShowSlotMenu(idx);
+                return true;
+            }
+            case WM_DROPFILES:
+            {
+                IntPtr hDrop = wParam;
+                try
+                {
+                    uint count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+                    DragQueryPoint(hDrop, out POINT pt);
+                    var paths = new List<string>();
+                    for (uint i = 0; i < count; i++)
+                    {
+                        uint len = DragQueryFileW(hDrop, i, null, 0);
+                        var sb = new System.Text.StringBuilder((int)len + 1);
+                        if (DragQueryFileW(hDrop, i, sb, len + 1) > 0)
+                            paths.Add(sb.ToString());
+                    }
+                    HandleDropFiles(paths);
+                }
+                catch (Exception ex) { Log.Warn("MainDockGpu", "drop-in failed: " + ex.Message); }
+                finally { DragFinish(hDrop); }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private (float lx, float ly) ClientDip(IntPtr lParam)
+    {
+        int cx = unchecked((short)((long)lParam & 0xFFFF));
+        int cy = unchecked((short)(((long)lParam >> 16) & 0xFFFF));
+        return ((float)(cx / _dpi), (float)(cy / _dpi));
+    }
+
+    /// <summary>Index of the icon under the (window-local DIP) point, or -1.</summary>
+    private int HitSlot(float lx, float ly)
+    {
+        int best = -1; float bestD = _gIcon * 0.6f;
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            var c = _slots[i].Center;
+            float d = MathF.Abs(lx - c.X) + MathF.Abs(ly - c.Y);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    private void ClickSlot(int idx)
+    {
+        var s = _slots[idx];
+        if (s.Entry == null)
+            return;
+        try
+        {
+            _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
+            AppLauncher.Launch(s.Entry, null);
+        }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
+    }
+
+    /// <summary>Drop after a drag: outside the slab → unpin; otherwise reorder to the
+    /// grid slot nearest the drop point.</summary>
+    private void DropSlot(int idx, float lx, float ly)
+    {
+        var s = _slots[idx];
+        if (s.Entry == null) { Render(); return; }
+
+        // Dragged clear of the slab (with a margin) → unpin / delete.
+        float m = _gIcon * 0.4f;
+        bool outside = lx < _slabX - m || lx > _slabX + _slabW + m
+                    || ly < _slabY - m || ly > _slabY + _slabH + m;
+        if (outside)
+        {
+            UnpinPinned(s.Entry);
+            return;
+        }
+
+        // Otherwise reorder to the slot nearest the drop point (2-D grid).
+        int tgt = -1; float bestD = float.MaxValue;
+        for (int i = 0; i < _slots.Count; i++)
+        {
+            float d = Vector2.Distance(_slots[i].Center, new Vector2(lx, ly));
+            if (d < bestD) { bestD = d; tgt = i; }
+        }
+        if (tgt >= 0 && tgt != idx && idx < _config.Apps.Count && tgt < _config.Apps.Count)
+        {
+            var e = _config.Apps[idx];
+            _config.Apps.RemoveAt(idx);
+            _config.Apps.Insert(tgt, e);
+            PersistAndRebuild();
+        }
+        else
+        {
+            Render();
+        }
+    }
+
+    /// <summary>Pins shortcuts / executables dropped from Explorer / the desktop,
+    /// inserting each at the pointer's grid position (mirrors the WPF dock OnDrop).</summary>
+    private void HandleDropFiles(List<string> paths)
+    {
+        var entries = new List<AppEntry>();
+        foreach (var p in paths)
+        {
+            try { var e = ShortcutResolver.CreateEntry(p); if (e != null) entries.Add(e); }
+            catch { /* skip an unresolvable drop */ }
+        }
+        if (entries.Count == 0)
+            return;
+        bool changed = false;
+        int at = DockSync.ResidentCount(_config);
+        foreach (var entry in entries)
+        {
+            if (_config.Apps.FindIndex(a => DockSync.Matches(a, entry)) >= 0)
+                continue;   // already present — don't duplicate
+            DockSync.InsertResident(_config, entry, at);
+            at++;
+            changed = true;
+        }
+        if (changed)
+            PersistAndRebuild();
+    }
+
+    private void UnpinPinned(AppEntry entry)
+    {
+        int idx = _config.Apps.FindIndex(e => DockSync.Matches(e, entry));
+        if (idx >= 0)
+        {
+            int resident = Math.Min(DockSync.ResidentCount(_config), _config.Apps.Count);
+            bool wasResident = idx < resident;
+            _config.Apps.RemoveAt(idx);
+            if (wasResident)
+                _config.Settings.Ring0Count = Math.Max(0, resident - 1);
+        }
+        PersistAndRebuild();
+    }
+
+    private void PersistAndRebuild()
+    {
+        try
+        {
+            DockSync.MirrorResidentToLeft(_config);
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
+        Rebuild();
+    }
+
+    private void Rebuild()
+    {
+        _timer?.Stop();
+        CloseSlotMenu();
+        if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
+        _host?.Dispose(); _host = null;
+        _labelFormat?.Dispose(); _labelFormat = null;
+        _dwrite?.Dispose(); _dwrite = null;
+        if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
+        foreach (var b in _bmpCache.Values) b?.Dispose();
+        _bmpCache.Clear();
+        _hover = -1; _pressIdx = -1; _dragging = false;
+        try { Build(); }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "rebuild failed: " + ex); }
+    }
+
+    // ---- Right-click context menu (dock-styled WPF popup, parity with WPF dock) ----
+
+    private void ShowSlotMenu(int idx)
+    {
+        var s = _slots[idx];
+        if (s.Entry == null)
+            return;
+        var entry = s.Entry;
+        var items = new List<(string text, Action action)>
+        {
+            ("从常驻区取消固定", () => UnpinPinned(entry)),
+        };
+        if (s.Running)
+            items.Add(("关闭窗口", () => CloseSlotWindows(s)));
+        BuildAndShowSlotMenu(s, items);
+    }
+
+    private void BuildAndShowSlotMenu(in IconSlot s, List<(string text, Action action)> items)
+    {
+        CloseSlotMenu();
+        bool light = SystemTheme.IsLight;
+        var textColor   = light ? System.Windows.Media.Color.FromArgb(0xF0, 0x1B, 0x1B, 0x1F) : System.Windows.Media.Color.FromArgb(0xF0, 0xFF, 0xFF, 0xFF);
+        var hoverColor  = light ? System.Windows.Media.Color.FromArgb(0x14, 0x00, 0x00, 0x00) : System.Windows.Media.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF);
+        var shellColor  = light ? System.Windows.Media.Color.FromArgb(0xF4, 0xF3, 0xF3, 0xF6) : System.Windows.Media.Color.FromArgb(0xF2, 0x1E, 0x1E, 0x22);
+        var borderColor = light ? System.Windows.Media.Color.FromArgb(0x22, 0x00, 0x00, 0x00) : System.Windows.Media.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+
+        var panel = new System.Windows.Controls.StackPanel();
+        foreach (var (text, action) in items)
+        {
+            var label = new System.Windows.Controls.TextBlock
+            {
+                Text = text,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontSize = 13 * FontScale.Current,
+                Foreground = new SolidColorBrush(textColor),
+            };
+            var row = new System.Windows.Controls.Border
+            {
+                CornerRadius = new System.Windows.CornerRadius(6),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Padding = new System.Windows.Thickness(13, 7, 18, 7),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Child = label,
+            };
+            row.MouseEnter += (_, _) => row.Background = new SolidColorBrush(hoverColor);
+            row.MouseLeave += (_, _) => row.Background = System.Windows.Media.Brushes.Transparent;
+            var act = action;
+            row.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                CloseSlotMenu();
+                try { act(); } catch (Exception ex) { Log.Warn("MainDockGpu", "menu action failed: " + ex.Message); }
+            };
+            panel.Children.Add(row);
+        }
+
+        var shell = new System.Windows.Controls.Border
+        {
+            Background = new SolidColorBrush(shellColor),
+            CornerRadius = new System.Windows.CornerRadius(10),
+            BorderBrush = new SolidColorBrush(borderColor),
+            BorderThickness = new System.Windows.Thickness(1),
+            Padding = new System.Windows.Thickness(5),
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 20, ShadowDepth = 3, Direction = 270,
+                Opacity = light ? 0.28 : 0.5, Color = System.Windows.Media.Colors.Black,
+            },
+            Child = panel,
+        };
+
+        // Anchor above the icon (the dock sits at the screen bottom). All coords are
+        // layout DIPs; the window is positioned at _winX*_dpi, and WPF Popup.Absolute
+        // offsets are screen DIPs → screen-DIP icon centre = _winX + s.Center.
+        shell.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var ds = shell.DesiredSize;
+        double half = _gIcon / 2.0; const double gap = 4.0;
+        double px = _winX + s.Center.X - ds.Width / 2.0;
+        double py = _winY + s.Center.Y - half - gap - ds.Height;
+        var popup = new System.Windows.Controls.Primitives.Popup
+        {
+            Child = shell,
+            StaysOpen = false,
+            AllowsTransparency = true,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Absolute,
+            HorizontalOffset = px,
+            VerticalOffset = py,
+            PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.Fade,
+        };
+        popup.Closed += (_, _) => { if (ReferenceEquals(_slotMenu, popup)) _slotMenu = null; };
+        _slotMenu = popup;
+        popup.IsOpen = true;
+    }
+
+    private void CloseSlotMenu()
+    {
+        if (_slotMenu != null) { _slotMenu.IsOpen = false; _slotMenu = null; }
+    }
+
+    /// <summary>Closes every window of the slot's app (right-click "关闭窗口").</summary>
+    private void CloseSlotWindows(in IconSlot s)
+    {
+        if (s.Entry == null)
+            return;
+        List<WindowPreview> wins;
+        try
+        {
+            wins = !string.IsNullOrWhiteSpace(s.Entry.Path)
+                ? WindowPreviewService.GetWindowsForEntry(s.Entry.Path, s.Entry.Arguments)
+                : new List<WindowPreview>();
+        }
+        catch { wins = new List<WindowPreview>(); }
+        foreach (var w in wins)
+            WindowPreviewService.CloseWindow(w.Handle);
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+        t.Tick += (o, _) => { ((DispatcherTimer)o!).Stop(); if (_hwnd != IntPtr.Zero) Rebuild(); };
+        t.Start();
+    }
+
     public void Dispose()
     {
         _timer?.Stop();
         _timer = null;
+        CloseSlotMenu();
         _labelFormat?.Dispose();
         _dwrite?.Dispose();
         foreach (var b in _bmpCache.Values) b?.Dispose();
@@ -455,7 +850,11 @@ internal sealed class MainDockWindowGpu : IDisposable
     private static ushort s_atom;
 
     private static IntPtr WndProcImpl(IntPtr h, uint m, IntPtr w, IntPtr l)
-        => DefWindowProcW(h, m, w, l);
+    {
+        if (s_instances.TryGetValue(h, out var self) && self.HandleMessage(m, w, l, out var res))
+            return res;
+        return DefWindowProcW(h, m, w, l);
+    }
 
     private static IntPtr CreateWindow(int w, int h)
     {
@@ -470,9 +869,11 @@ internal sealed class MainDockWindowGpu : IDisposable
             };
             s_atom = RegisterClassExW(ref wc);
         }
-        // Click-through for Stage A (WS_EX_TRANSPARENT); interaction lands later.
+        // Interactive window (Stage D): receives mouse + WM_DROPFILES. WM_NCHITTEST
+        // returns HTTRANSPARENT outside the glass slab so the empty headroom passes
+        // clicks through to the desktop. Still WS_EX_NOACTIVATE so it never steals focus.
         return CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST |
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             "PolarisMainDockGpu", string.Empty, WS_POPUP,
             0, 0, w, h, IntPtr.Zero, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
@@ -513,4 +914,14 @@ internal sealed class MainDockWindowGpu : IDisposable
     private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, System.Text.StringBuilder? buf, uint cch);
+    [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out POINT pt);
+    [DllImport("shell32.dll")] private static extern void DragFinish(IntPtr hDrop);
+
+    private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202;
+    private const uint WM_RBUTTONUP = 0x0205, WM_NCHITTEST = 0x0084, WM_DROPFILES = 0x0233;
+    private const int HTTRANSPARENT = -1, HTCLIENT = 1;
 }
