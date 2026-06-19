@@ -130,6 +130,13 @@ public partial class App : Application
     // loop); the owner only toggles its Active flag. See ClickAwayWatcher.cs.
     private readonly Polaris.Services.ClickAwayWatcher _clickAway = new();
 
+    // Tick of the last click-away dismiss. Clicking the tray icon while the docks
+    // are open fires the click-away hook (the tray belongs to another process, so
+    // it reads as "outside") which hides the docks — then NotifyIcon.MouseClick
+    // runs TogglePinnedDock and would re-open them. We suppress that re-open for a
+    // short window so a tray click while open simply closes (a real toggle).
+    private long _lastClickAwayDismiss;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -284,6 +291,7 @@ public partial class App : Application
                 if (_panel?.IsShown == true)
                 {
                     _clickAway.Active = false;
+                    _lastClickAwayDismiss = Environment.TickCount64;
                     _panel.HidePanel();   // also retracts the left dock via PanelDismissed
                 }
             });
@@ -410,6 +418,11 @@ public partial class App : Application
         }
         else
         {
+            // If a click-away dismiss just fired (e.g. this very tray click closed the
+            // docks via the global mouse hook), don't immediately re-open — let the
+            // click act as a plain toggle-off.
+            if (Environment.TickCount64 - _lastClickAwayDismiss < 350)
+                return;
             // If the settings window is open, close it first so the summoned
             // dock does not stack on top of it and block interaction.
             CloseSettingsIfOpen();
