@@ -79,6 +79,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private long _attnLast;               // last attention poll tick (throttle to ~800ms)
     private volatile bool _attnBusy;      // an attention poll task is in flight
 
+    // ---- Running-icon flow border + glass orbit light (parity with the GPU main dock) ----
+    private float _runSweep;              // running-icon sweep gradient angle (deg, 4.2s/rev)
+    private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8, 2.2s breathe)
+    private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
+    private bool _anyRunning;             // any slot is running (gates the sweep/pulse)
+
     // ---- Saturn dark-slab styling (black smoked dock + flame + debris + stars) ----
     private bool _saturn;
     private float _satBaseEdge, _satSlabMain, _satSlabLen, _flameFeather, _satDriftAmp;
@@ -403,6 +409,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             BuildSaturnField(slabMain, slabMainLen, bodyCross, bodyCrossLen, gIcon, uiScale);
         _waveCur = new float[_slots.Count];
         Array.Fill(_waveCur, 1f);
+        _anyRunning = false;
+        foreach (var sl in _slots) if (sl.Running) { _anyRunning = true; break; }
 
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
@@ -533,7 +541,20 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (anyFlash)
             _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
 
-        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || anyFlash)
+        // Running-icon sweep + glow pulse: breathe the halo (2.2s) so running icons
+        // pulse in both themes; rotate the sweep gradient (4.2s/rev) for the glass
+        // flowing border. Mirrors RadialIcon RunningGlow/RunningBorder + GPU main dock.
+        if (_anyRunning)
+        {
+            double rph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
+            _runPulse = 0.575f + 0.225f * MathF.Sin((float)rph);
+            if (!_saturn)
+                _runSweep = (_runSweep + 16f * 360f / 4200f) % 360f;
+        }
+        if (!_saturn && _shown)
+            _orbitAngle = (_orbitAngle + 16f * 360f / 36000f) % 360f;
+
+        if (active || bouncing || maxDelta > 0.001f || (_saturn && _shown) || (!_saturn && _shown) || anyFlash)
             Render();
     }
 
@@ -905,6 +926,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         else
             GlassSlab.DrawGlass(ctx, _sx, _sy, _sw, _sh, _trayRadius, _opacity, _frost);
+        if (!_saturn)
+            DrawOrbitLight(ctx);
         if (_pinnedVisible > 0)
             DrawSeam(ctx);
 
@@ -939,6 +962,29 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         satSrc?.Dispose();
     }
 
+    /// <summary>Glass orbit light: a cool lamp drifts around the slab (one rev / 36s),
+    /// its radial glow clipped to the rounded glass body — parity with GlassOrbitLight
+    /// and the GPU main dock's DrawOrbitLight.</summary>
+    private void DrawOrbitLight(ID2D1DeviceContext ctx)
+    {
+        float cx = _sx + _sw / 2f, cy = _sy + _sh / 2f;
+        float orbitR = MathF.Max(_sw, _sh) * 0.5f + _gIcon * 1.4f;
+        float lampR = orbitR * 1.3f;
+        float th = _orbitAngle * MathF.PI / 180f;
+        var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
+        using var stops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x3C, 0xCF, 0xEC, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x22, 0x76, 0xC4, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x0A, 0x4C, 0x9E, 0xF0) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
+        });
+        using var brush = ctx.CreateRadialGradientBrush(
+            new RadialGradientBrushProperties { Center = lamp, RadiusX = lampR, RadiusY = lampR }, stops);
+        var slab = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
+        ctx.FillRoundedRectangle(slab, brush);
+    }
+
     private void DrawIcon(ID2D1DeviceContext ctx, in Slot s, float scale, Vector2 pop)
     {
         float g = s.G, half = g / 2f, cx = s.Center.X, cy = s.Center.Y;
@@ -946,6 +992,33 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
         ctx.Transform = wave;
         var plate = new Rect(cx - half, cy - half, g, g);
+
+        // Running indicator (glass theme): a soft pulsing cool halo plus a flowing sweep
+        // border — a rounded-rect stroke painted with a linear gradient whose axis rotates
+        // (4.2s/rev), mirroring RadialIcon's RunningBorder/RunningGlow and the GPU main dock.
+        if (s.Running && !_saturn)
+        {
+            float box = g * 0.92f, rr = box * 0.24f;
+            var rrect = new RoundedRectangle { Rect = new Rect(cx - box / 2f, cy - box / 2f, box, box), RadiusX = rr, RadiusY = rr };
+            float pulse = _runPulse;
+            (float sw, byte a)[] ring = { (7f, (byte)(0x22 * pulse)), (4.5f, (byte)(0x44 * pulse)) };
+            foreach (var (sw, a) in ring)
+                using (var br = ctx.CreateSolidColorBrush(Col(a, 0x3F, 0xA9, 0xFF)))
+                    ctx.DrawRoundedRectangle(rrect, br, sw);
+            float ang = _runSweep * MathF.PI / 180f, R = box * 0.6f;
+            var dir = new Vector2(MathF.Cos(ang) * R, MathF.Sin(ang) * R);
+            using (var stops = ctx.CreateGradientStopCollection(new[]
+            {
+                new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.28f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.5f,  Color = Col(0xFF, 0x6F, 0xD3, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.72f, Color = Col(0x66, 0x57, 0xC8, 0xFF) },
+                new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x10, 0x3D, 0xA9, 0xFF) },
+            }))
+            using (var sweep = ctx.CreateLinearGradientBrush(
+                new LinearGradientBrushProperties { StartPoint = new Vector2(cx - dir.X, cy - dir.Y), EndPoint = new Vector2(cx + dir.X, cy + dir.Y) }, stops))
+                ctx.DrawRoundedRectangle(rrect, sweep, 2.5f);
+        }
 
         if (s.Kind == SlotKind.Overflow)
         {
@@ -980,18 +1053,22 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             };
             // Soft halo via a radial gradient (green core → transparent) instead of a
             // hard-edged disc, so it reads as the same subtle breathing glow as the
-            // WPF dock's blurred ellipse rather than an oversized solid blob.
+            // WPF dock's blurred ellipse rather than an oversized solid blob. The halo
+            // breathes with _runPulse (2.2s) and the glow radius swells slightly so the
+            // dot pulses like the WPF ambient-driven RunningDot rather than sitting flat.
+            float breath = _runPulse / 0.575f;                 // ~0.61..1.39, centred on 1
+            float gr = glow / 2f * (0.85f + 0.18f * breath);   // swell the halo radius
             var center = new Vector2(dx, dy);
             using (var stops = ctx.CreateGradientStopCollection(new[]
             {
-                new Vortice.Direct2D1.GradientStop { Position = 0f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.45f) },
-                new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.18f) },
+                new Vortice.Direct2D1.GradientStop { Position = 0f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.45f * breath) },
+                new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0.18f * breath) },
                 new Vortice.Direct2D1.GradientStop { Position = 1f, Color = new Color4(0x5C / 255f, 1f, 0x7A / 255f, 0f) },
             }))
             using (var gl = ctx.CreateRadialGradientBrush(
-                new RadialGradientBrushProperties { Center = center, GradientOriginOffset = Vector2.Zero, RadiusX = glow / 2f, RadiusY = glow / 2f },
+                new RadialGradientBrushProperties { Center = center, GradientOriginOffset = Vector2.Zero, RadiusX = gr, RadiusY = gr },
                 stops))
-                ctx.FillEllipse(new Ellipse(center, glow / 2f, glow / 2f), gl);
+                ctx.FillEllipse(new Ellipse(center, gr, gr), gl);
             using (var co = ctx.CreateSolidColorBrush(new Color4(0x4C / 255f, 0xE0 / 255f, 0x6B / 255f, 1f)))
                 ctx.FillEllipse(new Ellipse(center, dot / 2f, dot / 2f), co);
         }
