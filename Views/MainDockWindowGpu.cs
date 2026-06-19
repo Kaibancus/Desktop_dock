@@ -317,13 +317,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         var slots = ((LiquidGlassTheme)ThemeRegistry.Get("liquidglass"))
             .ComputeSlots(apps.Count, new Point(centerX, dockCenterY), scaledSettings, out _);
         var running = RunningAppTracker.SnapshotRunning();
-        var noTitles = new List<string>();
-        var noAumids = new HashSet<string>();
+        var (explorerTitles, runningAumids) = SnapshotRunningExtras();
         for (int i = 0; i < count && i < slots.Count; i++)
         {
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
-            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, explorerTitles, runningAumids);
             if (run) _anyRunning = true;
             _slots.Add(new IconSlot(new Vector2((float)slots[i].X, (float)slots[i].Y),
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
@@ -438,6 +437,21 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
 
+    /// <summary>Open Explorer window titles + running packaged-app AUMIDs — both REQUIRED
+    /// by RunningAppTracker.IsEntryRunning to light shell-hosted launchers (File Explorer,
+    /// This PC…) and UWP/Store apps. Mirrors the WPF dock's RefreshRunning so the GPU dock's
+    /// green running dots never miss File Explorer or packaged apps.</summary>
+    private static (List<string> titles, HashSet<string> aumids) SnapshotRunningExtras()
+    {
+        List<string> titles;
+        try { titles = WindowPreviewService.GetExplorerWindowTitles(); }
+        catch { titles = new List<string>(); }
+        HashSet<string> aumids;
+        try { aumids = WindowPreviewService.SnapshotRunningAumids(); }
+        catch { aumids = new HashSet<string>(); }
+        return (titles, aumids);
+    }
+
     /// <summary>Saturn theme layout: a screen-centred overlay sized to the ring disc,
     /// two concentric icon rings (inner B ring + outer F ringlet) and the Direct2D
     /// ring/planet geometry. Mirrors RadialWindow's Saturn sizing + ComputeLayout.</summary>
@@ -506,8 +520,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         int count = apps.Count;
         int r0 = EffectiveRing0Count(count);
         var running = RunningAppTracker.SnapshotRunning();
-        var noTitles = new List<string>();
-        var noAumids = new HashSet<string>();
+        var (explorerTitles, runningAumids) = SnapshotRunningExtras();
         int ring1 = Math.Max(0, count - r0);
         var sizes = new List<float>(count);
         for (int i = 0; i < count; i++)
@@ -522,7 +535,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
             var entry = apps[i];
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
-            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, explorerTitles, runningAumids);
             _slots.Add(new IconSlot(new Vector2(sx, sy),
                 entry.EffectiveIconSource, entry.Name, run, img, entry));
             sizes.Add(icon * (inner ? SaturnInnerIconScale : SaturnOuterIconScale));

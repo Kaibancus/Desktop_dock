@@ -433,14 +433,22 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         };
 
         var running = RunningAppTracker.SnapshotRunning();
-        var noTitles = new List<string>();
-        var noAumids = new HashSet<string>();
+        // Explorer window titles + running AUMIDs are REQUIRED by IsEntryRunning to
+        // light shell-hosted launchers (File Explorer, This PC…) and packaged/UWP
+        // apps. Without them File Explorer never shows its green running dot even
+        // when open. Mirrors the WPF side dock's RefreshRunning (SideDockWindow.Running.cs).
+        List<string> explorerTitles;
+        try { explorerTitles = WindowPreviewService.GetExplorerWindowTitles(); }
+        catch { explorerTitles = new List<string>(); }
+        HashSet<string> runningAumids;
+        try { runningAumids = WindowPreviewService.SnapshotRunningAumids(); }
+        catch { runningAumids = new HashSet<string>(); }
         for (int i = 0; i < pinnedVisible && i < apps.Count; i++)
         {
             var entry = apps[i];
             double mainC = pinnedAreaMain + i * cellH + cellH / 2.0;
             (float cx, float cy) = ToLocal(_side, mainC, colCenterCross, _winW, _winH);
-            bool run = RunningAppTracker.IsEntryRunning(entry, running, noTitles, noAumids);
+            bool run = RunningAppTracker.IsEntryRunning(entry, running, explorerTitles, runningAumids);
             var img = IconExtractor.GetCached(entry.EffectiveIconSource, _iconCache);
             _slots.Add(new Slot(new Vector2(cx, cy), (float)gIcon, entry.Name, run,
                 SlotKind.Pinned, entry.EffectiveIconSource, img, entry, IntPtr.Zero));
@@ -1328,6 +1336,26 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 }
                 try { var fn = System.IO.Path.GetFileName(ta.Path); if (!string.IsNullOrWhiteSpace(fn) && excludeNames.Contains(fn)) continue; }
                 catch { /* unreadable path */ }
+                // Folder de-dup for launcher pins whose running main exe lives in a
+                // (version) subfolder, e.g. resident UU\uu_launcher.exe vs the running
+                // UU\5224\uu.exe. Mirrors the WPF side dock's RefreshRunning filter and
+                // the green-light IsSameOrChildInstallFolder, so one app never shows both
+                // a pinned icon and a duplicate running tile.
+                bool inPinnedFolder = false;
+                if (!string.IsNullOrWhiteSpace(ta.Path))
+                {
+                    foreach (var a in pinned)
+                    {
+                        if (!string.IsNullOrWhiteSpace(a.Path)
+                            && RunningAppTracker.IsSameOrChildInstallFolder(a.Path, ta.Path))
+                        {
+                            inPinnedFolder = true;
+                            break;
+                        }
+                    }
+                }
+                if (inPinnedFolder)
+                    continue;
                 filtered.Add(ta);
             }
 
