@@ -164,6 +164,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private Action? _onFaded;            // deferred callback once a dismiss finishes
     private const float SummonInSec = 0.32f;
     private const float SummonOutSec = 0.20f;
+    // Content fade (DComp visual opacity): summon eases the whole dock from 0->1 over
+    // FadeInMs (CubicEaseOut); dismiss is a PURE fade-out 1->0 over FadeOutMs (no slide /
+    // scale), mirroring the WPF RootGrid opacity animation in both themes.
+    private float _fadeOpacity = 1f;     // current window opacity pushed to the compositor
+    private int _fadeDir;                // +1 fading in, -1 fading out, 0 idle
+    private long _fadeStart;             // fade start timestamp (ms)
+    private float _fadeFrom = 1f;        // opacity the current fade started from
+    private const float FadeInMs = 160f;
+    private const float FadeOutMs = 170f;
 
     public event Action? RequestOpenSettings;
     public event Action? PanelDismissed;
@@ -604,6 +613,29 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             }
         }
 
+        // Drive the content fade (DComp visual opacity). Summon eases in (CubicEaseOut);
+        // dismiss is a pure fade-out and owns the SW_HIDE once fully transparent so the
+        // dock disappears exactly like the WPF RootGrid fade (no slide on the way out).
+        bool fading = _fadeDir != 0;
+        if (fading)
+        {
+            long nowMs = Environment.TickCount64;
+            if (_fadeDir > 0)
+            {
+                float t = Math.Clamp((nowMs - _fadeStart) / FadeInMs, 0f, 1f);
+                _fadeOpacity = _fadeFrom + (1f - _fadeFrom) * CubicEaseOut(t);
+                if (t >= 1f) { _fadeOpacity = 1f; _fadeDir = 0; }
+                _host?.SetIntro(0f, 0f, _fadeOpacity);
+            }
+            else
+            {
+                float t = Math.Clamp((nowMs - _fadeStart) / FadeOutMs, 0f, 1f);
+                _fadeOpacity = _fadeFrom * (1f - t);
+                _host?.SetIntro(0f, 0f, _fadeOpacity);
+                if (t >= 1f) { _fadeOpacity = 0f; _fadeDir = 0; OnDismissComplete(); return; }
+            }
+        }
+
         bool active = false;
         bool planetHover = false;
         Vector2 cur = default;
@@ -760,7 +792,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool anyFlash = _flashKeys.Count > 0;
         if (anyFlash)
             _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
-        if (_saturn || animating || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
+        if (_saturn || animating || fading || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
             || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f || _anyRunning
             || (!_saturn && _visible))
             Render();
@@ -819,21 +851,31 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.Clear(Col(0, 0, 0, 0));
 
         // Summon slide: translate the whole scene down past the screen edge while
-        // dismissed and let it ease up into its docked rest position. BackEase-out
-        // on the way in gives a soft settle overshoot; ease-in on the way out.
-        float pos = _summonDir < 0 ? EaseInCubic(_summon) : BackEaseOut(_summon);
+        // dismissed and let it ease up into its docked rest position with a soft BackEase-out
+        // overshoot. Dismiss no longer slides (pure fade), so _summon stays at 1 and this is
+        // a no-op on the way out.
+        float pos = BackEaseOut(_summon);
         float riseOff = (1f - pos) * _riseUnit;
         bool slid = riseOff > 0.01f;
         float satScl = 1f;   // Saturn summon zoom (set in the _saturn branch)
-        if (slid)
-            ctx.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff);
+        // Glass vertical squash/stretch: the slab springs from 0.94 -> 1.0 about its
+        // bottom-centre (ElasticEase Osc=1 Spring=4), mirroring the WPF AnimateGlassRise
+        // stretch so the dock reads as a fluid blob settling rather than a rigid slide.
+        float stretchY = 0.94f + 0.06f * ElasticEaseOut(_summon);
+        bool stretching = !_saturn && MathF.Abs(stretchY - 1f) > 0.001f;
+        if (slid || stretching)
+        {
+            var pivot = new Vector2(_slabX + _slabW * 0.5f, _slabY + _slabH);
+            ctx.Transform = System.Numerics.Matrix3x2.CreateScale(1f, stretchY, pivot)
+                * System.Numerics.Matrix3x2.CreateTranslation(0f, riseOff);
+        }
 
         if (_saturn)
         {
             // Summon "rings expand": grow the whole scene out from the centre with
             // a soft BackEase-out settle (mirrors the WPF AnimateRingsExpand burst),
             // collapsing back in on dismiss. Self-consistent zoom about the planet.
-            float satPos = _summonDir < 0 ? EaseInCubic(_summon) : BackEaseOut(_summon);
+            float satPos = BackEaseOut(_summon);
             satScl = 0.72f + 0.28f * satPos;
             var cen = new Vector2(_sg.Cx, _sg.Cy);
             var satBase = System.Numerics.Matrix3x2.CreateScale(satScl, satScl, cen);
@@ -942,7 +984,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (!_saturn && _scrollable)
             DrawScrollBar(ctx);
 
-        if (slid)
+        if (slid || stretching)
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
         ctx.EndDraw();
         _host.Present();
@@ -957,6 +999,27 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     }
 
     private static float EaseInCubic(float t) => t * t * t;
+
+    private static float CubicEaseOut(float t)
+    {
+        float u = 1f - Math.Clamp(t, 0f, 1f);
+        return 1f - u * u * u;
+    }
+
+    // ElasticEase EaseOut (Oscillations=1, Springiness=4) — springs slightly past the
+    // target then relaxes back, matching the WPF glass-rise vertical stretch.
+    private static float ElasticEaseOut(float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        return 1f - ElasticEaseIn(1f - t);
+    }
+
+    private static float ElasticEaseIn(float t)
+    {
+        const float osc = 1f, spring = 4f;
+        float expo = (MathF.Exp(spring * t) - 1f) / (MathF.Exp(spring) - 1f);
+        return expo * MathF.Sin((MathF.PI * 2f * osc + MathF.PI * 0.5f) * t);
+    }
 
     /// <summary>Settings gear: a frosted disc with a ⚙ glyph in the slab's top-right
     /// corner; the glyph spins while hovered and the disc dips on press, mirroring the
@@ -1806,9 +1869,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         Realize();
         _shown = true;
         _pinned = pinned;
-        // Start fully dismissed (off-screen) so the very first frame after the
-        // rebuild slides in rather than popping at rest.
+        // Start fully dismissed (off-screen + transparent) so the very first frame after
+        // the rebuild slides + fades in rather than popping at rest.
         _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
+        _fadeOpacity = 0f; _fadeFrom = 0f; _fadeDir = +1; _fadeStart = Environment.TickCount64;
         if (!_visible)
         {
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
@@ -1816,6 +1880,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
         SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         Rebuild();                 // pick up config / running changes; rebuilds visible
+        _host?.SetIntro(0f, 0f, 0f);   // first frame fully transparent before the fade-in
         ShowNotchIfSaturn();
         if (!_weatherHooked) { _weather.Updated += OnWeatherUpdated; _weatherHooked = true; }
         _ = _weather.RefreshAsync();   // fetch weather promptly on show (self-throttled)
@@ -1861,7 +1926,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _notch?.HideNotch();        // retract the Saturn notch with the dock
         PanelDismissed?.Invoke();   // retract the side dock together with the main dock
         _onFaded = onFaded;
-        _summonDir = -1; _summonLast = Environment.TickCount64;
+        // Dismiss is a PURE fade-out in both themes (no slide / scale) — mirrors the
+        // WPF RootGrid 170ms opacity animation. Leave _summon at rest so the scene holds
+        // its docked position while the compositor fades the whole visual to transparent.
+        _summonDir = 0;
+        _fadeFrom = _fadeOpacity; _fadeDir = -1; _fadeStart = Environment.TickCount64;
         _timer?.Start();
     }
 
