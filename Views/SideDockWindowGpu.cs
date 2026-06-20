@@ -73,7 +73,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float _labelFitFp, _labelFitW;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
-    private DispatcherTimer? _timer;
+    private Polaris.Services.Gpu.FrameClock? _timer;
 
     private readonly List<Slot> _slots = new();
     private DockSide _side;
@@ -577,8 +577,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
         Render();
 
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-        _timer.Tick += (_, _) => Tick();
+        _timer = new Polaris.Services.Gpu.FrameClock();
+        _timer.Tick += Tick;
         _timer.Start();
     }
 

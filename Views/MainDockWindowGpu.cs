@@ -67,7 +67,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private readonly List<IconSlot> _slots = new();
 
     // ---- Stage B magnify wave state ----
-    private DispatcherTimer? _timer;
+    private Polaris.Services.Gpu.FrameClock? _timer;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private float _labelFontPx = 13f;
@@ -464,8 +464,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         Render();
 
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-        _timer.Tick += (_, _) => Tick();
+        _timer = new Polaris.Services.Gpu.FrameClock();
+        _timer.Tick += Tick;
         _visible = visible;
         if (visible) _timer.Start();
     }
