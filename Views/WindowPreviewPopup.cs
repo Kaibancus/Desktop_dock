@@ -98,7 +98,18 @@ internal sealed class WindowPreviewPopup
         {
             var windows = _getWindows();
             if (windows.Count < _minWindows)
+            {
+                // The pointer moved onto a target with nothing to preview (e.g. a pinned
+                // app that isn't running). A prior OnPointerEnter for this target stopped
+                // the close timer, so without this the previous icon's popup would stay
+                // stuck open. Close it (unless the pointer is now over the popup itself).
+                _target.Dispatcher.BeginInvoke(() =>
+                {
+                    if (token == _previewToken && !_pointerInPopup)
+                        Close();
+                });
                 return;
+            }
 
             // Seed each tile with any thumbnail we already cached from a previous
             // hover so the popup can pop up INSTANTLY (after the open delay)

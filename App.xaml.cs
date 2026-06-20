@@ -263,11 +263,12 @@ public partial class App : Application
         // is docked at the bottom (so they never overlap).
         _panel.BottomDockReserve = GetBottomDockReserve;
         // Keep the left dock in step when the main dock's resident region changes.
-        _panel.AppsChanged = () =>
-        {
-            if (DockSync.MirrorResidentToLeft(_config))
-                _sideDock?.RefreshFromConfig();
-        };
+        // Always refresh: the main dock's PersistAndRebuild already mirrored the resident
+        // region before raising AppsChanged, so a conditional MirrorResidentToLeft here would
+        // return "unchanged" and the side dock would never pick up the new resident count.
+        // RefreshFromConfig relayouts in place (no flash) and is cheap, so refreshing on every
+        // main-dock app change is fine.
+        _panel.AppsChanged = () => _sideDock?.RefreshFromConfig();
         // Keep the left dock visible while a glass icon is being dragged.
         _panel.GlassDragActiveChanged = active => _sideDock?.SetDragActive(active);
         // Retract the left dock together with the main dock (e.g. when launching

@@ -279,7 +279,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     public void RefreshFromConfig()
     {
         try { DockSync.MirrorResidentToLeft(_config); } catch { }
-        if (_realized) Rebuild();
+        // Relayout in place (no window teardown) so the resident count updates without the
+        // side dock flashing/vanishing — used on every main-dock resident change.
+        if (_realized) RelayoutInPlace();
     }
 
     public void RefreshLayout()
@@ -2409,6 +2411,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         try
         {
             DockSync.MirrorResidentToLeft(_config);
+            ThemeRegistry.SaveAppearance(_config.Settings);   // keep the per-theme resident count in sync so it survives restart
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
@@ -2428,6 +2431,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         try
         {
             DockSync.MirrorResidentToLeft(_config);
+            ThemeRegistry.SaveAppearance(_config.Settings);   // persist the per-theme resident count
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
@@ -2453,12 +2457,20 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             {
                 int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
                 int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
-                SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
+                // Resize the swap chain and PAINT the new content BEFORE moving/resizing the
+                // window. A horizontal dock re-centres (its X shifts) when an icon is added or
+                // removed; if the window moved first, the OS would composite the just-resized
+                // (blank, pre-Present) swap chain at the new position for a frame → a visible
+                // flash. Presenting first means the window move only ever reveals ready pixels.
                 _host.Resize(pw, ph);
                 foreach (var b in _bmpCache.Values) b?.Dispose();
                 _bmpCache.Clear();
                 DisposeRockResources();   // debris cache is window-sized; rebuilt lazily on render
-                Render();
+                SyncShim();   // reposition the shim + re-apply the window region for the new geometry
+                Render();     // paint the new content into the resized swap chain (window still at old rect)
+                // Now move + resize the window to match; SWP_NOZORDER avoids a re-raise flash.
+                SetWindowPos(_hwnd, IntPtr.Zero, px, py, pw, ph, SWP_NOACTIVATE | SWP_NOZORDER);
+                Render();     // final crisp paint at the exact new size
                 return;
             }
             catch (Exception ex)
@@ -2566,6 +2578,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                 cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
                 lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
                 hInstance = GetModuleHandleW(null),
+                hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),   // else the OS shows the busy/AppStarting cursor on summon
                 lpszClassName = "PolarisSideDockGpu",
             };
             s_atom = RegisterClassExW(ref wc);
@@ -2592,7 +2605,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private const int SW_HIDE = 0;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
-    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004;
 
     [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
 
@@ -2608,6 +2621,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW c);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
+    private static readonly IntPtr IDC_ARROW = (IntPtr)32512;
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);

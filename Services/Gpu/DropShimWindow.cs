@@ -59,6 +59,7 @@ internal sealed class DropShimWindow : IDisposable
                 cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
                 lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
                 hInstance = GetModuleHandleW(null),
+                hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),   // standard arrow, not the busy/AppStarting cursor
                 hbrBackground = GetStockObject(BLACK_BRUSH),   // alpha 1 over black ≈ invisible
                 lpszClassName = "PolarisDropShim",
             };
@@ -182,6 +183,8 @@ internal sealed class DropShimWindow : IDisposable
     }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
+    private static readonly IntPtr IDC_ARROW = (IntPtr)32512;
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);

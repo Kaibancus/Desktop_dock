@@ -2464,6 +2464,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         try
         {
             DockSync.MirrorResidentToLeft(_config);
+            ThemeRegistry.SaveAppearance(_config.Settings);   // keep the per-theme resident count in sync so it survives restart
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
@@ -2482,6 +2483,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         try
         {
             DockSync.MirrorResidentToLeft(_config);
+            ThemeRegistry.SaveAppearance(_config.Settings);   // persist the per-theme resident count
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("MainDockGpu", "persist failed: " + ex.Message); }
@@ -2881,6 +2883,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
                 cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
                 lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
                 hInstance = GetModuleHandleW(null),
+                hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),   // else the OS shows the busy/AppStarting cursor over the dock
                 lpszClassName = "PolarisMainDockGpu",
             };
             s_atom = RegisterClassExW(ref wc);
@@ -2934,6 +2937,8 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW c);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
+    private static readonly IntPtr IDC_ARROW = (IntPtr)32512;
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
