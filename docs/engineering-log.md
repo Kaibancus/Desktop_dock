@@ -17,7 +17,7 @@
 ## ⚠️ 调查结论 / 已知限制
 
 ### GPU Dock 帧率上限 ~38-40fps 的根因 = UI 线程定时器 / WPF 渲染时钟；60fps 需独立渲染线程
-- **背景**：本机为 59Hz 共享 VM（Intel Arc）。GPU Dock 单帧 draw 仅 4-5ms、`Present(1)` 仅 0.1ms
+- **背景**：本机为真实 **Surface Laptop 6 for Business**（Intel Core Ultra 7 165H + 集成 **Intel Arc** iGPU，59Hz 显示，平衡电源）。注：`HypervisorPresent=True` 是开启 Windows **VBS/HVCI** 安全特性所致，**非来宾虚拟机**（早期曾误判为「VM/虚拟 GPU」，此处更正）。GPU Dock 单帧 draw 仅 4-5ms、`Present(1)` 仅 0.1ms
   （DComp flip 交换链 2 缓冲，低于刷新率时队列不满故不阻塞、不起节流作用），帧预算充裕但帧率仍只
   ~38fps。瓶颈在「谁以多高频率调用 Render」，而非 GPU 绘制本身。
 - **逐方案实测**（`POLARIS_GPUFPS=1`，含 worst_gap 与内存列）：
@@ -29,7 +29,8 @@
   | FrameClock(CompositionTarget.Rendering) | ~38fps（修内存泄漏后 44-53fps） | — | vsync 对齐，最平滑 |
 - **根因**：①`DispatcherTimer` 由 `WM_TIMER` 驱动，分辨率被系统 ~15.6ms tick 钳制，`timeBeginPeriod(1)`
   只影响 Sleep/多媒体/可等待定时器、**不影响 WM_TIMER**；②`CompositionTarget.Rendering` 走 WPF
-  `MediaContext` 渲染时钟，在虚拟/受限 GPU 上被降频到 ~38Hz。两者都在 UI 线程，且与鼠标消息泵竞争。
+  `MediaContext` 渲染时钟，未对我们的独立 DComp 窗口稳定锁到显示 vblank；叠加笔记本平衡电源下 iGPU
+  动态降频，cadence 不均（实测秒级 25→59 抖动，非显卡算力不足）。两者都在 UI 线程，且与鼠标消息泵竞争。
 - **其他应用如何做到 60fps/刷新率**：独立渲染线程 + DXGI 可等待交换链
   （`FRAME_LATENCY_WAITABLE_OBJECT`+`WaitForSingleObject`）或 `DCompositionWaitForCompositorClock`，
   或专用线程上真正阻塞的 `Present(1)`，把节拍对齐到 GPU/显示 vblank，脱离 UI 线程与 WPF 时钟。
@@ -100,7 +101,7 @@
     释放停止集合（D2D 中 brush 创建时已 AddRef 该集合，本地句柄可安全释放、brush 仍有效）；
     9 处渐变创建（DrawGlass 7 + DrawDark 2）全部改走辅助方法。
   - **效果**：active 悬停 priv 由泄漏到 2.7 GB → **全程稳定 ~400 MB（降幅 ~85%）**；并且消除每帧
-    原生纹理 churn 后，FrameClock 帧率由 ~38fps → **44-53fps**（**虚拟 GPU/共享 VM 环境实测**，逼近该环境 59Hz 虚拟显示上限；为软件 vs GPU 的相对值，非真实硬件绝对值）。旁证：
+    原生纹理 churn 后，FrameClock 帧率由 ~38fps → **44-53fps（双 Dock）/ 触及 59fps（单 Dock）**（实测于**真实 Surface Laptop 6 + 集成 Intel Arc iGPU、59Hz、平衡电源**；`HypervisorPresent` 为 VBS 安全特性，非来宾 VM）。旁证：
     SaturnScene 与侧 Dock 内其余 `CreateGradientStopCollection` 调用方均已用 `using`、不泄漏；
     `GlassPrototypeWindow.cs` 有同样模式但仅 `POLARIS_GLASS_PROTO=1` dev 标志启用，非生产路径。
   - 配套：新增 `Services/GpuFrameStats.cs`（`POLARIS_GPUFPS=1` 开启的逐 Dock fps/帧间最差 gap/
