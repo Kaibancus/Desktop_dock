@@ -59,6 +59,25 @@
 
 ## 🐛 BUG 修复
 
+- **一批 Dock 交互 BUG（光标/同步/预览/常驻）**（`089015f`、`eb42a81`）：
+  - **侧边 Dock 召唤时鼠标转圈（AppStarting 光标）**：Dock 与 drop-shim 的 `WNDCLASSEXW` 未设
+    `hCursor`，OS 在窗口上显示忙碌光标。修复：窗口类设标准箭头 `LoadCursorW(IDC_ARROW)`。
+  - **主 Dock 删除常驻图标后侧边 Dock 不更新**：主 Dock 在触发 `AppsChanged` 前已
+    `MirrorResidentToLeft`，故 App 里 `if (MirrorResidentToLeft(...))` 返回 false →
+    `RefreshFromConfig` 被跳过。修复：`AppsChanged` 改为无条件刷新侧边 Dock。
+  - **侧边 Dock 更新时消失重刷（闪烁）**：`RefreshFromConfig` 改用就地 relayout 后仍闪——横向
+    Dock 增删图标会重新居中(窗口横移)，交换链 `ResizeBuffers` 与窗口移动间露出空白帧。修复：
+    先 resize 交换链并渲染好新内容，**再**移动窗口；并补 `SyncShim` 同步 region。
+  - **鼠标移到无运行窗口的图标时旧悬浮缩略窗卡住不关**：移入新目标的 `OnPointerEnter` 取消了关闭
+    定时器，但新目标无窗口不显示 → 旧弹窗滞留。修复：打开定时器发现新目标无窗口时关闭弹窗。
+  - **每次启动把常驻区强行塞满**：拖拽/删除改变 `Ring0Count` 只存了 `_config.Settings`，未回写
+    per-theme 的 `ThemeAppearances[theme].Ring0Count`；启动 `LoadAppearance` 用旧值(0=auto=14)
+    覆盖。修复：常驻数变化时同步 `SaveAppearance` 持久化 per-theme。
+  - **此电脑/文件资源管理器悬停缩略图相同**：二者都跑在共享 explorer.exe 内，按进程/AUMID 无法区分
+    → 此电脑预览空、资源管理器预览所有窗口(含此电脑)。修复：shell 文件夹固定项(`::CLSID`)按窗口
+    标题包含匹配只显示自己的窗口(对齐运行灯 `IsShellItemRunning`)；通用文件资源管理器取所有
+    explorer 窗口再排除被其他 shell 文件夹固定项认领(标题命中)的窗口。
+
 - **从桌面拖图标进 GPU Dock 时图标抓不起来（鼠标按下被 Dock 吞掉）**（`5e8db52`）：GPU
   Dock 是合成窗口（`WS_EX_NOREDIRECTIONBITMAP`），且窗口尺寸远大于可见内容（含拖拽/阴影
   留白，土星主题几乎全屏）。这圈透明余量属于置顶窗口，**会拦截本该落到下方桌面图标的鼠标
