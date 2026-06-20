@@ -106,9 +106,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private float _pressX, _pressY;      // mouse-down point (window-local DIP)
     private float _dragX, _dragY;        // current drag point (window-local DIP)
     private long _dragArrangeLastMs;     // last drag-reflow advance (time-based ease)
-    private int _bounceIdx = -1;         // slot playing the launch hop, or -1
-    private long _bounceStart;
-    private const long BounceDurMs = 480;
+    // Launch animation: the clicked icon first eases back to its REST size (a visible
+    // de-magnify), THEN swells past rest (an "enlarge" pop) before the dock fades — the
+    // original main-dock launch order ("restore to normal size, then enlarge, then close").
+    private int _pressLaunchIdx = -1;    // slot playing the launch animation, or -1
+    private long _pressLaunchStart;
+    private float _pressFromScale = 1f;  // the icon's magnify scale captured at click
+    private bool _launching;             // a launch animation is in flight (suppress hover-magnify)
+    private const long PressLaunchMs = 260;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
     private int _menuIdx = -1;   // slot the right-click menu is anchored to (-1 = none)
 
@@ -254,9 +259,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         double dockW = gridW + icon + padX * 2;
 
         // Bottom-docked margin: slab bottom rests above the system taskbar, and
-        // lifts further when the side dock reserves space at the bottom edge.
+        // lifts further when the side dock reserves space at the bottom edge. A small
+        // extra gap (icon * 0.2) lifts the glass dock slightly clear of the edge.
         double taskbarH = Math.Max(0.0, mon.Bottom - wa.Bottom);
-        double bottomMargin = Math.Max(taskbarH + icon * 0.12, BottomDockReserve?.Invoke() ?? 0.0);
+        double bottomMargin = Math.Max(taskbarH + icon * 0.12, BottomDockReserve?.Invoke() ?? 0.0) + icon * 0.1;
 
         // Dock heights (mirror RadialWindow glass geometry).
         double padY = icon * 0.95;
@@ -738,6 +744,12 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         else
             _gearHover = false;
 
+        // While dismissing (the click-launch fade-out) or while a launch press is playing,
+        // force hover-magnify off so the clicked icon shrinks back toward its own centre
+        // instead of staying magnified under the cursor (parity with the WPF dock's
+        // HidePanel → ResetMagnify on launch).
+        if (!_shown || _launching) active = false;
+
         // Gear button: spin the glyph while hovered (1.7s/rev, WPF parity) and coast
         // to rest on leave; ease the press-scale toward 0.8 while held.
         if (!_saturn)
@@ -803,13 +815,22 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_dragging)
             maxDelta = Math.Max(maxDelta, AdvanceDragArrange());
 
+        // Launch press: override the clicked icon's scale with the button-press curve
+        // (compress past rest, then spring back to 1.0) while the launch hold runs, so the
+        // click reads as a tactile push. Other icons de-magnify (active was forced off
+        // above); _launching clears in the hold timer as the press finishes at scale 1.
+        if (_launching && _pressLaunchIdx >= 0 && _pressLaunchIdx < _waveCur.Length)
+        {
+            float pt = Math.Clamp((Environment.TickCount64 - _pressLaunchStart) / (float)PressLaunchMs, 0f, 1f);
+            float ps = PressScale(pt);
+            maxDelta = Math.Max(maxDelta, Math.Abs(ps - _waveCur[_pressLaunchIdx]));
+            _waveCur[_pressLaunchIdx] = ps;
+        }
+
         // Hover only when the pointer is genuinely over an icon's cell.
         _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
         // Drive the hover thumbnail preview (suppressed while dragging or dismissing).
         DrivePreview(_dragging || !_shown ? -1 : _hover);
-
-        bool bouncing = _bounceIdx >= 0 && (Environment.TickCount64 - _bounceStart) <= BounceDurMs;
-        if (!bouncing) _bounceIdx = -1;
 
         // Ease the grid scroll toward its wheel/scrollbar target (tau ~70ms) so the
         // whole grid glides rather than jumping a row at a time.
@@ -862,7 +883,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         bool anyFlash = _flashKeys.Count > 0;
         if (anyFlash)
             _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
-        if (_saturn || animating || fading || active || _dragging || bouncing || scrolling || _barDrag || maxDelta > 0.001f
+        if (_saturn || animating || fading || active || _dragging || scrolling || _barDrag || maxDelta > 0.001f
             || _gearHover || MathF.Abs(_gearScale - 1f) > 0.002f || _anyRunning
             || (!_saturn && _visible))
             Render();
@@ -895,21 +916,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             _flashKeys = keys;
             _attnBusy = false;
         });
-    }
-
-    /// <summary>Launch-hop offset (px, upward) for the clicked icon: a single damped
-    /// hop over <see cref="BounceDurMs"/> ms, mirroring the WPF/side-dock macOS bounce.</summary>
-    private float BounceOffset(int i)
-    {
-        if (i != _bounceIdx)
-            return 0f;
-        long el = Environment.TickCount64 - _bounceStart;
-        if (el < 0 || el > BounceDurMs)
-            return 0f;
-        float t = el / (float)BounceDurMs;
-        float hop = MathF.Sin(MathF.PI * t);
-        float settle = -0.12f * MathF.Sin(MathF.PI * 2f * t) * (1f - t);
-        return _gIcon * 0.5f * (hop + settle);
     }
 
     private void Render()
@@ -1046,7 +1052,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         {
             if (i == dragIdx)
                 continue;
-            var off = new Vector2(_waveOffX[i], _waveOffY[i] - BounceOffset(i) - scrollY);
+            var off = new Vector2(_waveOffX[i], _waveOffY[i] - scrollY);
             float gi = _saturn && i < _slotG.Length ? _slotG[i] : 0f;
             if (_saturn && (_satInnerScl != 1f || _satOuterScl != 1f))
             {
@@ -2214,18 +2220,50 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return newIdx;
     }
 
+    /// <summary>Launch scale at normalised time t∈[0,1]: the icon first eases from its
+    /// captured magnify scale back to rest (1.0) — a visible de-magnify — then swells past
+    /// rest to an "enlarge" peak that it holds into the dismiss fade. Mirrors the original
+    /// main-dock launch ("restore to normal size, then enlarge, then close the docks").</summary>
+    private float PressScale(float t)
+    {
+        const float tSettle = 0.30f;        // de-magnify portion (restore to rest)
+        const float enlargePeak = MagnifyPeak;  // swell back to the hover-magnified size
+        if (t < tSettle)
+        {
+            float u = t / tSettle;
+            float e = 1f - (1f - u) * (1f - u);              // QuadraticEaseOut: quick restore to rest
+            return _pressFromScale + (1f - _pressFromScale) * e;
+        }
+        float v = (t - tSettle) / (1f - tSettle);
+        float e2 = 1f - (1f - v) * (1f - v);                 // QuadraticEaseOut: grow to the launch peak
+        return 1f + (enlargePeak - 1f) * e2;                 // 1 → enlargePeak, held into the fade
+    }
+
     private void ClickSlot(int idx)
     {
         var s = _slots[idx];
         if (s.Entry == null)
             return;
-        try
+        // Original launch order: the clicked icon first eases back to REST size (a visible
+        // de-magnify), then swells past rest to an "enlarge" peak, and only THEN does the dock
+        // launch + fade — so the restore→enlarge plays out fully instead of being cut off. The
+        // animation is scale-only and centred (no hop), so it never drifts off the icon centre.
+        _pressLaunchIdx = idx;
+        _pressLaunchStart = Environment.TickCount64;
+        _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
+        _launching = true;
+        _timer?.Start();
+        var entry = s.Entry;
+        var hold = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PressLaunchMs) };
+        hold.Tick += (_, _) =>
         {
-            _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
-            // Launching dismisses the dock (and, via PanelDismissed, the side dock).
-            AppLauncher.Launch(s.Entry, () => HidePanel());
-        }
-        catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
+            hold.Stop();
+            _launching = false;
+            _pressLaunchIdx = -1;
+            try { AppLauncher.Launch(entry, () => HidePanel()); }
+            catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
+        };
+        hold.Start();
     }
 
     /// <summary>Drop after a drag: outside the slab → unpin; otherwise reorder to the

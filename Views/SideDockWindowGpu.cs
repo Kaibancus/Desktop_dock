@@ -64,6 +64,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private IDWriteTextFormat? _labelFormat;
     private IDWriteTextFormat? _hoverFormat;   // floating hover name (SemiBold, hover-scaled)
     private float _hoverFontPx = 16f;
+    // Hover-label auto-fit (vertical docks): shrink the font so a long name still fits the
+    // window thickness without clipping (parity with WPF FitFontSize). Cached by name so the
+    // DWrite measure only runs when the hovered slot changes, not every render frame.
+    private IDWriteTextFormat? _fitFormat;
+    private float _fitFormatFp;
+    private string? _labelFitName;
+    private float _labelFitFp, _labelFitW;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
     private DispatcherTimer? _timer;
@@ -148,6 +155,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private bool _shown;
     private bool _realized;
     private bool _byMain, _byEdge, _byDrag, _byPinned, _byMenu, _byBounce;
+    private bool _dismissing;   // launch committed: block hover re-magnify through the dismiss fade (WPF parity)
 
     /// <summary>Raised after the dock mutates the shared main-dock app list, so the
     /// host can refresh the main dock (parity with the WPF side dock).</summary>
@@ -194,6 +202,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // over the floating preview, which sits beyond the slab, so the edge poll would
         // otherwise retract the dock out from under it — mirrors the WPF hold reasons).
         bool want = _byMain || _byEdge || _byDrag || _byPinned || _byMenu || _byBounce || (_preview?.IsOpen == true);
+        if (want) _dismissing = false;   // any reason to stay/become visible ends a launch dismiss
         if (want == _shown)
             return;
         if (want) DoShow();
@@ -270,6 +279,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (ft >= 1f)
         {
             _introMode = 0;
+            _dismissing = false;   // dock fully hidden — clear the launch-dismiss latch
             if (_hwnd != IntPtr.Zero) ShowWindow(_hwnd, SW_HIDE);
             return false;
         }
@@ -552,6 +562,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat?.Dispose();
         _hoverFormat?.Dispose();
+        _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;   // geometry changed → re-fit on next hover
         _labelFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.Normal,
             FontStyle.Normal, FontStretch.Normal, 13f, "zh-cn");
         _labelFormat.TextAlignment = TextAlignment.Center;
@@ -827,6 +838,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             }
         }
 
+        // During the launch bounce — and through the dismiss fade that follows the hop
+        // — keep hover-magnify fully off so the clicked icon de-magnifies, falls back
+        // cleanly, and never re-magnifies under the still-stationary cursor (parity with
+        // the WPF dock's ResetWave + _dismissing on launch).
+        if (_byBounce || _dismissing || !_shown) active = false;
+
         float k = 1f - (float)Math.Exp(-0.016 / 0.045);   // tau 45ms
         float maxDelta = 0f;
         int focal = -1; float best = float.MaxValue;
@@ -964,26 +981,76 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         });
     }
 
-    private const long BounceDurMs = 480;
+    private const long BounceDurMs = 520;   // match WPF DockBounce.Total
+    private const long SideSettleMs = 130;  // visible de-magnify before the hop starts
     private int _bounceIdx = -1;
     private long _bounceStart;
 
-    /// <summary>Extra outward "pop" (in the dock's pop direction) for the launch
-    /// bounce: the clicked icon leaps off the dock surface and falls back over
-    /// <see cref="BounceDurMs"/> ms — a single damped hop (sin half-cycle with a
-    /// gentle settle), mirroring the WPF dock's macOS-style launch hop.</summary>
+    /// <summary>Normalised launch-bounce curve (0 → 1 at the apex → 0 with a springy
+    /// landing), mirroring WPF DockBounce: a quick QuadraticEaseOut leap to the apex at
+    /// ~33% of the duration, then a BounceEaseOut(2, 2.4) fall with two settling bounces.
+    /// Drives both the upward hop and the scale "pop" so the icon leaps and swells like
+    /// the original macOS-style dock bounce.</summary>
+    private static float BounceCurve01(float t)
+    {
+        if (t <= 0f || t >= 1f) return 0f;
+        const float apex = 170f / 520f;   // WPF ApexAt / Total
+        if (t < apex)
+        {
+            float u = t / apex;
+            return 1f - (1f - u) * (1f - u);   // QuadraticEaseOut: 0 → 1
+        }
+        float p = (t - apex) / (1f - apex);
+        return 1f - BounceEaseOut(p);          // 1 → 0 with two landing bounces
+    }
+
+    private static float BounceEaseOut(float t) => 1f - BounceEaseIn(1f - t);
+
+    /// <summary>WPF BounceEase core (Bounces = 2, Bounciness = 2.4, EaseIn) ported to
+    /// procedural math so the GPU hop lands with the exact original spring.</summary>
+    private static float BounceEaseIn(float t)
+    {
+        const float bounces = 2f, bounciness = 2.4f;
+        float pow = MathF.Pow(bounciness, bounces);
+        float oneMinusB = 1f - bounciness;
+        float sumOfUnits = (1f - pow) / oneMinusB + pow * 0.5f;
+        float unitAtT = t * sumOfUnits;
+        float bounceAtT = MathF.Log(-unitAtT * oneMinusB + 1f) / MathF.Log(bounciness);
+        float start = MathF.Floor(bounceAtT);
+        float end = start + 1f;
+        float startTime = (1f - MathF.Pow(bounciness, start)) / (oneMinusB * sumOfUnits);
+        float endTime = (1f - MathF.Pow(bounciness, end)) / (oneMinusB * sumOfUnits);
+        float midTime = (startTime + endTime) * 0.5f;
+        float trp = t - midTime;
+        float radius = midTime - startTime;
+        float amplitude = MathF.Pow(1f / bounciness, bounces - start);
+        return (-amplitude / (radius * radius)) * (trp - radius) * (trp + radius);
+    }
+
+    /// <summary>Normalised progress (0..1) of the clicked icon's launch bounce, or -1
+    /// when this slot is not bouncing / the hop has finished.</summary>
+    private float BounceT(int i)
+    {
+        if (i != _bounceIdx) return -1f;
+        long el = Environment.TickCount64 - _bounceStart;
+        if (el < 0 || el > BounceDurMs) return -1f;
+        return el / (float)BounceDurMs;
+    }
+
+    /// <summary>Upward hop offset (px, in the dock's pop direction) for the clicked icon
+    /// during its launch bounce — mirrors WPF DockBounce.BuildTranslate(GIcon*0.6).</summary>
     private float BounceOffset(int i)
     {
-        if (i != _bounceIdx)
-            return 0f;
-        long el = Environment.TickCount64 - _bounceStart;
-        if (el < 0 || el > BounceDurMs)
-            return 0f;
-        float t = el / (float)BounceDurMs;
-        // Up fast, fall back with a small overshoot for a springy settle.
-        float hop = MathF.Sin(MathF.PI * t);
-        float settle = -0.12f * MathF.Sin(MathF.PI * 2f * t) * (1f - t);
-        return _gIcon * 0.6f * (hop + settle);
+        float t = BounceT(i);
+        return t < 0f ? 0f : _gIcon * 0.6f * BounceCurve01(t);
+    }
+
+    /// <summary>Scale "pop" delta (added to the icon's draw scale) synced to the hop, so
+    /// the icon swells to ~1.2x at the apex — mirrors WPF DockBounce.BuildScale(1.2).</summary>
+    private float BounceScale(int i)
+    {
+        float t = BounceT(i);
+        return t < 0f ? 0f : 0.2f * BounceCurve01(t);
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -1301,7 +1368,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // being dragged is skipped here and drawn last at the cursor.
         var order = new int[_slots.Count];
         for (int i = 0; i < order.Length; i++) order[i] = i;
-        Array.Sort(order, (a, b) => _waveCur[a].CompareTo(_waveCur[b]));
+        Array.Sort(order, (a, b) => (_waveCur[a] + BounceScale(a)).CompareTo(_waveCur[b] + BounceScale(b)));
         int dragIdx = _dragging ? _pressIdx : -1;
         foreach (int i in order)
         {
@@ -1312,7 +1379,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             if (i < _dragShift.Length && _dragShift[i] != 0f)
                 pop += (_side is DockSide.Left or DockSide.Right)
                     ? new Vector2(0f, _dragShift[i]) : new Vector2(_dragShift[i], 0f);
-            DrawIcon(ctx, _slots[i], scale, pop);
+            DrawIcon(ctx, _slots[i], scale + BounceScale(i), pop);
         }
 
         if (dragIdx >= 0 && dragIdx < _slots.Count && _ghost == null)
@@ -1436,14 +1503,55 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void DrawHoverLabel(ID2D1DeviceContext ctx, in Slot s, float scale, float labelOp)
     {
-        if (_hoverFormat == null || string.IsNullOrEmpty(s.Name))
+        if (_hoverFormat == null || _dwrite == null || string.IsNullOrEmpty(s.Name))
             return;
+        bool vertical = _side is DockSide.Left or DockSide.Right;
         // Clear the magnified + popped focal icon. The label's near edge sits right at
-        // the hover-enlarged icon's outer edge with no extra gap (parity with WPF
-        // ShowHoverLabelCore: crossPos = colCenterCross + crossExtent).
+        // the hover-enlarged icon's outer edge (parity with WPF ShowHoverLabelCore).
         float reach = s.G / 2f * scale + (scale - 1f) * _gIcon * 1.18f;
-        float fp = _hoverFontPx;
-        float w = Math.Max(40f, s.Name.Length * fp * 0.95f + 20f), h = fp + 12f;
+        float baseFp = _hoverFontPx;
+
+        // Auto-fit the font so a long name fits the dock thickness (vertical docks grow the
+        // label along the cross axis toward the interior; a fixed font would overrun the
+        // window). Recompute only when the hovered name changes — DrawHoverLabel runs every
+        // render frame while the label is up.
+        if (!string.Equals(_labelFitName, s.Name, StringComparison.Ordinal))
+        {
+            _labelFitName = s.Name;
+            float naturalW = MeasureLabelWidth(s.Name);
+            float fp = baseFp;
+            if (vertical)
+            {
+                float avail = _side == DockSide.Left
+                    ? _winW - (s.Center.X + reach) - 8f
+                    : (s.Center.X - reach) - 8f;
+                avail = Math.Max(40f, avail);
+                float minFp = (float)(7.5 * HoverScale * FontScale.Current);
+                const float pad = 18f;
+                if (naturalW + pad > avail)
+                    fp = Math.Max(minFp, baseFp * (avail - pad) / Math.Max(1f, naturalW));
+            }
+            _labelFitFp = fp;
+            _labelFitW = naturalW * fp / baseFp + 18f;
+        }
+
+        float fpUse = _labelFitFp;
+        float w = Math.Max(40f, _labelFitW), h = fpUse + 12f;
+        // Pick the format: the shared base format unless the name was shrunk, in which case a
+        // cached fitted-size format (recreated only when the fitted size changes).
+        IDWriteTextFormat fmt = _hoverFormat;
+        if (Math.Abs(fpUse - baseFp) > 0.5f)
+        {
+            if (_fitFormat == null || Math.Abs(_fitFormatFp - fpUse) > 0.5f)
+            {
+                _fitFormat?.Dispose();
+                _fitFormat = _dwrite.CreateTextFormat("Microsoft YaHei UI", null, FontWeight.SemiBold,
+                    FontStyle.Normal, FontStretch.Normal, fpUse, "zh-cn");
+                _fitFormat.ParagraphAlignment = ParagraphAlignment.Center;
+                _fitFormatFp = fpUse;
+            }
+            fmt = _fitFormat;
+        }
         (float lx, float ly) = _side switch
         {
             DockSide.Left => (s.Center.X + reach + w / 2f, s.Center.Y),
@@ -1454,9 +1562,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var rect = new Rect(lx - w / 2f, ly - h / 2f, w, h);
         // Hug the icon edge: for vertical docks the label grows toward the interior, so align
         // the text to the icon side of its box (leading on the left dock, trailing on the
-        // right) instead of centring it — centred text in the width-estimated box reads as
-        // floating too far from the icon. Horizontal docks stay centred over the icon.
-        _hoverFormat.TextAlignment = _side switch
+        // right) instead of centring it. Horizontal docks stay centred over the icon.
+        fmt.TextAlignment = _side switch
         {
             DockSide.Left => TextAlignment.Leading,
             DockSide.Right => TextAlignment.Trailing,
@@ -1472,11 +1579,23 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // 1.4, direction 315° → a ~1px down-right offset, plus a soft second copy).
         using (var halo = ctx.CreateSolidColorBrush(Col(A(0xE6), 0, 0, 0)))
         {
-            ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
-            ctx.DrawText(s.Name, _hoverFormat, new Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
+            ctx.DrawText(s.Name, fmt, new Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
+            ctx.DrawText(s.Name, fmt, new Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
         }
         using (var ink = ctx.CreateSolidColorBrush(Col(A(0xF2), 0xFF, 0xFF, 0xFF)))
-            ctx.DrawText(s.Name, _hoverFormat, rect, ink);
+            ctx.DrawText(s.Name, fmt, rect, ink);
+    }
+
+    /// <summary>Natural (unconstrained) DIP width of the name at the base hover font, used to
+    /// decide whether the label must shrink to fit a vertical dock's thickness.</summary>
+    private float MeasureLabelWidth(string text)
+    {
+        try
+        {
+            using var layout = _dwrite!.CreateTextLayout(text, _hoverFormat!, 10000f, 200f);
+            return layout.Metrics.Width;
+        }
+        catch { return text.Length * _hoverFontPx * 0.95f; }
     }
 
     private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
@@ -1731,6 +1850,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         DisposeRockResources();
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
+        _fitFormat?.Dispose(); _fitFormat = null;
         EndDragGhost();
         _dropShim?.Dispose(); _dropShim = null;
         _host?.Dispose();
@@ -1916,16 +2036,27 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (act == null)
             return;
 
-        _bounceIdx = idx; _bounceStart = Environment.TickCount64;   // launch hop
+        // Original launch order: the clicked icon first eases back to its REST size (a brief,
+        // visible de-magnify), THEN hops up and falls back. _byBounce forces the magnify wave
+        // off (Tick) so it settles to 1.0 during the settle window, and the hop only begins
+        // once _bounceStart is reached (BounceT returns -1 until then).
+        _bounceIdx = idx; _bounceStart = Environment.TickCount64 + SideSettleMs;   // settle, then hop
         _byBounce = true;                                            // hold the dock open through the hop
         UpdateVisibility();
         Render();
-        var hold = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(BounceDurMs) };
+        var hold = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(SideSettleMs + BounceDurMs) };
         hold.Tick += (_, _) =>
         {
             hold.Stop();
             act();
             _byBounce = false;
+            // Retract the dock after the hop (parity with the WPF dock's
+            // SetEdgeShown(false) on launch) and latch _dismissing so the wave cannot
+            // re-magnify the clicked icon under the still-stationary cursor while the
+            // dock fades out. _dismissing clears once the dock is hidden (DriveIntro) or
+            // any fresh show reason appears (UpdateVisibility).
+            _byEdge = false;
+            _dismissing = true;
             UpdateVisibility();
         };
         hold.Start();

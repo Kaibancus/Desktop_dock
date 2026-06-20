@@ -59,6 +59,24 @@
 
 ## 🐛 BUG 修复
 
+- **GPU 双 Dock 点击启动动画与原版不一致**：
+  - **现象**：①侧边 Dock 点击图标后图标卡在放大弹出状态，弹跳回落后又被重新放大；弹跳又矮又慢、
+    无落地回弹、无膨胀。②主 Dock 点击后图标向上跳着缩小（而非朝自身中心），且缩小动画未结束双
+    Dock 就关闭；后续要求改为「先恢复原大小→再放大回悬浮尺寸→才关闭」。
+  - **根因**：①侧 Dock 弹跳期间未压制悬停放大波（光标停在图标上→每帧重新放大）；弹跳后未主动
+    收起也未阻止重放大；弹跳曲线用单正弦半周（apex@50%、无 BounceEase 落地、无 scale pop），且
+    起跳前未把放大 pop 归零，缩小中的 pop 抵消起跳高度→又矮又慢。②主 Dock 误加了向上 hop（WPF
+    原版 `RadialWindow` 启动**无弹跳**），`HidePanel` 纯淡出未先去放大、未 hold 到动画结束。
+  - **修复**（对照 WPF 原版 `SideDockWindow.Bounce`/`DockBounce`/`RadialIcon.PlayLaunchBounce`、
+    `RadialWindow.HidePanel→ResetMagnify` 重做）：
+    - 侧 Dock：点击先**可见去放大**（130ms settle，`_byBounce` 压住放大波）→ 再起跳；弹跳曲线
+      移植 `DockBounce`（520ms、apex@33% QuadEaseOut 上冲 + `BounceEase(2,2.4)` 双段落地 + 同步
+      scale pop 至 1.2x）；弹跳完成置 `_dismissing` 锁并清 `_byEdge` 主动收起，淡出期 Tick 早退
+      不跑放大波，杜绝光标停留导致的重放大。
+    - 主 Dock：移除 hop；改为**先去放大恢复 1.0 → 再放大至 `MagnifyPeak`(1.7x 悬浮尺寸) → hold
+      到结束才淡出关闭**（`PressScale` 两段 QuadEaseOut，`_launching` 期强制 `active=false` 让缩放
+      锚定图标自身中心）。
+
 - **一批 Dock 交互 BUG（光标/同步/预览/常驻）**（`089015f`、`eb42a81`）：
   - **侧边 Dock 召唤时鼠标转圈（AppStarting 光标）**：Dock 与 drop-shim 的 `WNDCLASSEXW` 未设
     `hCursor`，OS 在窗口上显示忙碌光标。修复：窗口类设标准箭头 `LoadCursorW(IDC_ARROW)`。
