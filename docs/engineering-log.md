@@ -173,6 +173,11 @@
 
 ## ✨ 功能优化 / 新增
 
+- **GPU 主/侧 Dock 接通从桌面/资源管理器拖入图标**（`5e8db52` 起）：合成 Dock 窗口无法直接做
+  OLE 拖放目标，故在 Dock 上方叠一个近乎不可见的普通窗口 `DropShimWindow` 承载 OLE
+  `IDropTarget` 并把按下/拖放转发回 Dock；外部拖入支持 CF_HDROP 文件与 CFSTR_SHELLIDLIST
+  shell 项（此电脑/回收站等），并实时显示蓝色"+"跟随标记；拖出图标用独立桌面置顶覆盖窗口
+  `DragGhostWindowGpu` 承载，图标可越过窗口边界漫游不被裁切。主、侧两个 GPU Dock 一致。
 - **精简设置界面**：删除顶部「Polaris 设置」标题与「提示：长按呼出键…」两行（含
   `UpdateHint` 方法及其调用），界面更紧凑。
 - **点击 Polaris 之外区域关闭双 Dock**（`b8c6de3`）：主 Dock 打开时，左键点击任意 Polaris

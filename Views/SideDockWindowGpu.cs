@@ -56,7 +56,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private readonly AppConfig _config;
     private IntPtr _hwnd;
     private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
-    private OleDropTarget? _oleDrop;   // OLE drop target for Explorer/desktop drags
+    private DropShimWindow? _dropShim; // overlay that catches external drags + forwards them
+    private IDragGhost? _ghost;        // independent desktop overlay for the dragged icon
+    private Vector2? _extDragPt;       // window-local point of an in-progress external drag (preview)
     private CompositionHost? _host;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
@@ -209,6 +211,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         {
             ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+            SyncShim(); _dropShim?.Show();
         }
         StartIntro();
     }
@@ -218,6 +221,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _shown = false;
         CloseSlotMenu();
         ClosePreview();
+        EndDragGhost();
+        _dropShim?.Hide();
         _hover = -1; _prevHover = -1;
         // Fade out on the GPU compositor, then SW_HIDE once it completes (DriveIntro
         // mode 2). If there's no live host yet, just hide immediately.
@@ -529,12 +534,19 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
         ShowWindow(_hwnd, _shown ? SW_SHOWNOACTIVATE : SW_HIDE);
-        DragAcceptFiles(_hwnd, true);   // accept desktop shortcuts / files dropped to pin
-        // Full OLE drop target so Explorer/desktop drags (OLE protocol, not WM_DROPFILES)
-        // can drop files AND shell items onto the side dock — parity with WPF AllowDrop.
-        _oleDrop = new OleDropTarget(_hwnd, HandleOleDrop);
-        _oleDrop.Register();
+        // Composition-only windows (WS_EX_NOREDIRECTIONBITMAP) can't be OLE drop targets nor
+        // receive WM_DROPFILES, so external drags (Explorer / desktop) are caught by a near-
+        // invisible overlay above the dock that hosts the OLE drop target and forwards the
+        // initial mouse press + drops back to us (see DropShimWindow), exactly like the main
+        // dock. The shim is kept ALIVE across rebuilds (only its owner HWND is re-pointed).
+        if (_dropShim == null)
+            _dropShim = new DropShimWindow(_hwnd, ForwardShimInput, HandleOleDrop, OnExternalDragMove);
+        else
+            _dropShim.SetOwner(_hwnd);
         _host = new CompositionHost(_hwnd, pw, ph, (float)(96.0 * _dpi));
+        // Top the shim AFTER creating the CompositionHost (building the DComp swap chain re-
+        // raises the dock above the shim) so external drags land on the shim's drop target.
+        if (_shown) { SyncShim(); _dropShim.Show(); }
         _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
         _labelFormat?.Dispose();
         _hoverFormat?.Dispose();
@@ -556,6 +568,190 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
     }
+
+    // ---- External drag-in (drop shim) + drag-out ghost (parity with the main dock) ----
+
+    /// <summary>Re-maps a mouse message that landed on the drop-shim overlay (SCREEN pixels)
+    /// into this dock's client space and runs it through <see cref="HandleMessage"/>, so a
+    /// press on the shim behaves exactly as a press on the dock (the dock's SetCapture then
+    /// routes the rest of a drag straight here, bypassing the shim).</summary>
+    internal (bool handled, IntPtr result) ForwardShimInput(uint msg, IntPtr wParam, int screenX, int screenY)
+    {
+        int cx = screenX - (int)Math.Round(_winX * _dpi);
+        int cy = screenY - (int)Math.Round(_winY * _dpi);
+        IntPtr lParam = (IntPtr)(((cy & 0xFFFF) << 16) | (cx & 0xFFFF));
+        bool handled = HandleMessage(msg, wParam, lParam, out var res);
+        return (handled, res);
+    }
+
+    /// <summary>Re-raises the drop-shim above the dock when the bare composition dock has come
+    /// to cover it at the slab centre. Throttled to ~150ms so it runs cheaply from Tick.</summary>
+    private void EnsureShimTopmost()
+    {
+        if (_dropShim == null || !_shown) return;
+        long now = Environment.TickCount64;
+        if (now - _shimCheckMs < 150) return;
+        _shimCheckMs = now;
+        try
+        {
+            int cx = (int)Math.Round((_winX + _sx + _sw / 2f) * _dpi);
+            int cy = (int)Math.Round((_winY + _sy + _sh / 2f) * _dpi);
+            IntPtr top = WindowFromPoint(new POINT { X = cx, Y = cy });
+            if (top == _hwnd)
+                _dropShim.Show();
+        }
+        catch { }
+    }
+    private long _shimCheckMs;
+
+    /// <summary>Positions the drop-shim over the dock's interactive surface (the slab plus
+    /// each icon's outward magnify-pop headroom — the same box <see cref="InsideHitRegion"/>
+    /// claims) and carves the window region to match, so external drags land on the shim and
+    /// the surrounding desktop stays reachable.</summary>
+    private void SyncShim()
+    {
+        if (_dropShim == null) return;
+        var (l, t, r, b) = HitBox();
+        int sx = (int)Math.Round((_winX + l) * _dpi);
+        int sy = (int)Math.Round((_winY + t) * _dpi);
+        int sw = Math.Max(1, (int)Math.Ceiling((r - l) * _dpi));
+        int sh = Math.Max(1, (int)Math.Ceiling((b - t) * _dpi));
+        _dropShim.SetBounds(sx, sy, sw, sh);
+        ApplyWindowRegion();
+    }
+
+    /// <summary>The dock's interactive box in window-local DIPs: the slab plus the outward
+    /// magnify-pop headroom on the pop side (matches <see cref="InsideHitRegion"/>).</summary>
+    private (float l, float t, float r, float b) HitBox()
+    {
+        float m = _gIcon * 0.6f;
+        float mPop = (HoverScale - 1f) * _gIcon * 1.18f + _gIcon * 1.2f;
+        float l = _sx - m, r = _sx + _sw + m, t = _sy - m, b = _sy + _sh + m;
+        switch (_side)
+        {
+            case DockSide.Left: r = _sx + _sw + mPop; break;
+            case DockSide.Right: l = _sx - mPop; break;
+            case DockSide.Top: b = _sy + _sh + mPop; break;
+            default: t = _sy - mPop; break;
+        }
+        return (l, t, r, b);
+    }
+
+    /// <summary>Carves the composition window down to its interactive box with SetWindowRgn,
+    /// so the transparent reserve around the dock is no longer part of the (topmost) window
+    /// and never intercepts a press meant for a desktop icon under it. OS-level, render-
+    /// thread-independent passthrough — see the main dock's ApplyWindowRegion for the full
+    /// rationale (WS_EX_TRANSPARENT is a no-op on a composition window; NCHITTEST is racy).</summary>
+    private void ApplyWindowRegion()
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        try
+        {
+            var (l, t, r, b) = HitBox();
+            float left = Math.Max(0f, l), top = Math.Max(0f, t);
+            float right = Math.Min(_winW, r), bottom = Math.Min(_winH, b);
+            IntPtr rgn = CreateRectRgn((int)Math.Floor(left * _dpi), (int)Math.Floor(top * _dpi),
+                (int)Math.Ceiling(right * _dpi), (int)Math.Ceiling(bottom * _dpi));
+            SetWindowRgn(_hwnd, rgn, true);
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "ApplyWindowRegion failed: " + ex.Message); }
+    }
+
+    /// <summary>True when a window-local DIP point is within the slab box (plus icon margin)
+    /// where an OLE drop actually registers.</summary>
+    private bool InDropRegion(float lx, float ly)
+    {
+        float m = _gIcon * 0.5f;
+        return lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
+    }
+
+    /// <summary>Lifts the icon at <paramref name="idx"/> into an independent topmost desktop
+    /// overlay pinned to the cursor, so the dragged icon roams the whole desktop and never
+    /// clips at the narrow side-dock window's edge (parity with the main dock / WPF).</summary>
+    private void StartDragGhost(int idx)
+    {
+        EndDragGhost();
+        if (idx < 0 || idx >= _slots.Count) return;
+        var img = _slots[idx].Image;
+        if (img == null) return;   // text/no-bitmap tile — keep the in-window draw
+        try
+        {
+            double dip = _gIcon * 1.12;
+            int targetPx = Math.Max(1, (int)Math.Round(dip * _dpi));
+            BitmapSource src = img;
+            if (src.PixelWidth != targetPx)
+            {
+                double sx = targetPx / (double)src.PixelWidth, sy = targetPx / (double)src.PixelHeight;
+                var scaled = new TransformedBitmap(src, new System.Windows.Media.ScaleTransform(sx, sy));
+                scaled.Freeze();
+                src = scaled;
+            }
+            double dipW = src.PixelWidth / _dpi, dipH = src.PixelHeight / _dpi;
+            _ghost = new DragGhostWindowGpu(src, dipW, dipH);
+            MoveDragGhost(_dragMain, _dragCross);
+            _ghost.Show();
+        }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "drag ghost start failed: " + ex.Message); _ghost = null; }
+    }
+
+    private void MoveDragGhost(float lx, float ly)
+    {
+        if (_ghost == null) return;
+        _ghost.MoveCenterTo(_winX + lx, _winY + ly);
+        // Fade while over the unpin zone (dragged clear of the icon column).
+        float cross = _side switch
+        {
+            DockSide.Left => lx,
+            DockSide.Right => _winW - lx,
+            DockSide.Top => ly,
+            _ => _winH - ly,
+        };
+        bool unpinZone = MathF.Abs(cross - _colCenterCross) > _slabCrossLen * 0.85f;
+        _ghost.GhostOpacity = unpinZone ? 0.4 : 1.0;
+    }
+
+    private void EndDragGhost()
+    {
+        if (_ghost == null) return;
+        try { _ghost.Close(); } catch { }
+        _ghost = null;
+    }
+
+    /// <summary>Called continuously while an external file/shell drag hovers the dock (null on
+    /// leave/drop). Tracks the window-local cursor point so the render draws a drag-follow
+    /// marker where a drop will register.</summary>
+    private void OnExternalDragMove((int x, int y)? screenPt)
+    {
+        if (screenPt is { } p)
+        {
+            float lx = (float)(p.x / _dpi - _winX);
+            float ly = (float)(p.y / _dpi - _winY);
+            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
+        }
+        else
+            _extDragPt = null;
+        try { Render(); } catch { }
+    }
+
+    /// <summary>Soft ring + plus drawn at the cursor while an external drag hovers the slab.</summary>
+    private void DrawDragMarker(ID2D1DeviceContext ctx, Vector2 p)
+    {
+        float r = _gIcon * 0.42f;
+        using (var fill = ctx.CreateSolidColorBrush(Col(0x33, 0x5A, 0xC8, 0xFF)))
+            ctx.FillEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, fill);
+        using (var ring = ctx.CreateSolidColorBrush(Col(0xCC, 0x8F, 0xD6, 0xFF)))
+            ctx.DrawEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, ring, 2f);
+        using (var plus = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
+        {
+            float a = r * 0.5f;
+            ctx.DrawLine(new Vector2(p.X - a, p.Y), new Vector2(p.X + a, p.Y), plus, 2.4f);
+            ctx.DrawLine(new Vector2(p.X, p.Y - a), new Vector2(p.X, p.Y + a), plus, 2.4f);
+        }
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
 
     private float WaveScaleAt(float cursorMain, float iconMain)
     {
@@ -602,6 +798,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     {
         if (_host == null)
             return;
+        EnsureShimTopmost();
         // Drive the show/hide slide+fade. During the hide outro _shown is already
         // false but the fade is still playing, so animate-and-render then bail.
         bool intro = DriveIntro();
@@ -1112,7 +1309,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             DrawIcon(ctx, _slots[i], scale, pop);
         }
 
-        if (dragIdx >= 0 && dragIdx < _slots.Count)
+        if (dragIdx >= 0 && dragIdx < _slots.Count && _ghost == null)
         {
             // The dragged icon follows the cursor, lifted 1.12x with no pop.
             var s = _slots[dragIdx];
@@ -1122,6 +1319,9 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
         else if (_labelIdx >= 0 && _labelIdx < _slots.Count && _labelOp > 0.01f)
             DrawHoverLabel(ctx, _slots[_labelIdx], _waveCur[_labelIdx], _labelOp);
+        // External drag-follow marker (parity with the main dock's live drop feedback).
+        if (_extDragPt is { } dp)
+            DrawDragMarker(ctx, dp);
         ctx.EndDraw();
         _host.Present();
         satBlur?.Dispose();
@@ -1515,7 +1715,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         DisposeRockResources();
         _labelFormat?.Dispose(); _labelFormat = null;
         _hoverFormat?.Dispose(); _hoverFormat = null;
-        _oleDrop?.Revoke(); _oleDrop = null;
+        EndDragGhost();
+        _dropShim?.Dispose(); _dropShim = null;
         _host?.Dispose();
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
     }
@@ -1527,7 +1728,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private const uint WM_DROPFILES = 0x0233;
     private const int HTTRANSPARENT = -1, HTCLIENT = 1;
 
-    [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, System.Text.StringBuilder? buf, uint cch);
     [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out POINT pt);
     [DllImport("shell32.dll")] private static extern void DragFinish(IntPtr hDrop);
@@ -1601,10 +1801,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
                     {
                         _dragging = true;
                         _dragShiftLastMs = Environment.TickCount64;   // seed so first advance dt is small
+                        StartDragGhost(_pressIdx);   // lift the icon into an independent desktop overlay
                     }
                 }
                 if (_dragging)
                 {
+                    MoveDragGhost(lx, ly);
                     UpdateDragGap(lx, ly);
                     AdvanceDragShift();   // keep neighbours in step with the cursor between ticks
                     Render();
@@ -1614,6 +1816,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             case WM_LBUTTONUP:
             {
                 ReleaseCapture();
+                EndDragGhost();   // dismiss the desktop overlay before committing the drop
                 SetDragActive(false);   // release the press-drag hold; edge poll resumes
                 int idx = _pressIdx;
                 bool wasDrag = _dragging;
@@ -2273,8 +2476,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _timer?.Stop();
         CloseSlotMenu();
         ClosePreview();
+        EndDragGhost();
         if (_hwnd != IntPtr.Zero) s_instances.Remove(_hwnd);
-        _oleDrop?.Revoke(); _oleDrop = null;
+        // Keep _dropShim alive across the rebuild (re-owned in CreateHostWindow) so an external
+        // drag started right after a drop never hits a no-drop-target gap.
         _host?.Dispose(); _host = null;
         if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         foreach (var b in _bmpCache.Values) b?.Dispose();
