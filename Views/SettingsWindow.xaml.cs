@@ -208,8 +208,25 @@ public partial class SettingsWindow : Window
     private void OnSettingChanged(object sender, RoutedEventArgs e)
     {
         UpdateSliderLabels();
-        if (_loaded)
-            CommitSettings();
+        if (!_loaded)
+            return;
+        // A slider drag fires ValueChanged every pixel, and CommitSettings writes
+        // config.json to disk + refreshes the dock. Persisting on every tick janks
+        // the drag, so coalesce the commit to ~140 ms after the last change (the %
+        // label above still updates live). Click-to-point (IsMoveToPointEnabled)
+        // and final values are flushed on close.
+        _commitTimer ??= NewCommitTimer();
+        _commitTimer.Stop();
+        _commitTimer.Start();
+    }
+
+    private System.Windows.Threading.DispatcherTimer? _commitTimer;
+
+    private System.Windows.Threading.DispatcherTimer NewCommitTimer()
+    {
+        var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
+        t.Tick += (_, _) => { _commitTimer!.Stop(); CommitSettings(); };
+        return t;
     }
 
     /// <summary>Appends the live percentage to the transparency / icon-size
@@ -427,5 +444,17 @@ public partial class SettingsWindow : Window
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
         int off = 0;
         DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref off, sizeof(int));
+    }
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        // Flush a pending debounced slider commit so a value changed right before
+        // closing the window is not lost.
+        if (_commitTimer is { IsEnabled: true })
+        {
+            _commitTimer.Stop();
+            CommitSettings();
+        }
+        base.OnClosing(e);
     }
 }

@@ -1033,7 +1033,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         {
         // Floating liquid-glass slab (drop shadow on, since the main dock floats above
         // the desktop rather than being flush to a screen edge).
-        GlassSlab.DrawGlass(ctx, _slabX, _slabY, _slabW, _slabH, _radius, _opacity, _frost, shadowExtent: 26f);
+        GlassSlab.DrawGlass(ctx, _slabX, _slabY, _slabW, _slabH, _radius, _opacity, _frost, shadowExtent: 16f);
 
         // Orbit light: a cool lamp circling the slab centre casts an inward glow.
         // Filling the rounded slab with the lamp's radial gradient clips it to the
@@ -1225,14 +1225,14 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     {
         float cx = _slabX + _slabW / 2f, cy = _slabY + _slabH / 2f;
         float orbitR = MathF.Max(_slabW, _slabH) * 0.5f + _effIcon * 1.4f;
-        float lampR = orbitR * 1.3f;                 // lampD = orbitR*2.6
+        float lampR = orbitR * 1.7f;                 // larger soft pool so more of the cool light lands on the glass
         float th = _orbitAngle * MathF.PI / 180f;
         var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
         using var stops = ctx.CreateGradientStopCollection(new[]
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x3C, 0xCF, 0xEC, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x22, 0x76, 0xC4, 0xFF) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x0A, 0x4C, 0x9E, 0xF0) },
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x58, 0xCF, 0xEC, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x3A, 0x76, 0xC4, 0xFF) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x1A, 0x4C, 0x9E, 0xF0) },
             new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
         });
         using var brush = ctx.CreateRadialGradientBrush(

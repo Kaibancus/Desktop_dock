@@ -82,6 +82,12 @@
 
 ## 🐛 BUG 修复
 
+- **设置滑块拖动卡顿、且无法点击滑轨定位**：
+  - **现象**：拖动「面板透明度 / 图标大小 / 字体大小」滑块时不流畅、发涩；点击滑轨某处不会跳到该百分比。
+  - **根因**：① 滑块样式未设 `IsMoveToPointEnabled`，点击滑轨只触发 `DecreaseLarge/IncreaseLarge` 翻页而非定位。② `OnSettingChanged`（滑块 `ValueChanged`）每次变化都同步调用 `CommitSettings → _persist()` **把 config.json 写盘**；拖动每像素触发一次磁盘 I/O 阻塞 UI 线程 → 拖动发卡。
+  - **修复**：① 滑块样式加 `IsMoveToPointEnabled=True`（点击滑轨即定位）。② `OnSettingChanged` 改为**仅即时刷新百分比标签 + 防抖 140ms 后再 `CommitSettings`**（停止拖动才写盘），并在 `OnClosing` flush 未落盘的最后取值，避免丢失。
+  - **效果**：拖动顺滑、可点击定位、百分比实时显示；磁盘写入由"每像素一次"降为"停手一次"。
+
 - **GPU 双 Dock 悬停时私有内存持续暴涨（GB 级原生泄漏）**：
   - **现象**：悬停/活动渲染时进程私有字节（priv）以 ~120 MB/s 持续增长，20 秒涨到 ~2.7 GB 且
     隐藏后不回落；空闲（隐藏）则稳定。`POLARIS_GPUFPS=1` 实测 active 段 priv 169→2666 MB，而

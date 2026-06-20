@@ -64,11 +64,11 @@ internal static class GlassSlab
                 float grow = shadowExtent * i / rings;
                 var sRect = new RoundedRectangle
                 {
-                    Rect = new Rect(x - grow, y - grow + shadowExtent * 0.4f, w + grow * 2, h + grow * 2),
+                    Rect = new Rect(x - grow, y - grow + shadowExtent * 0.55f, w + grow * 2, h + grow * 2),
                     RadiusX = radius + grow,
                     RadiusY = radius + grow,
                 };
-                using var sb = ctx.CreateSolidColorBrush(C(0x06, 0x06, 0x0B, 0x16, 1f));
+                using var sb = ctx.CreateSolidColorBrush(C(0x04, 0x06, 0x0B, 0x16, 1f));
                 ctx.FillRoundedRectangle(sRect, sb);
             }
         }
@@ -89,16 +89,17 @@ internal static class GlassSlab
         // Edge vignette.
         using (var edge = RadialBrush(ctx, Radial(cx, cy, w * 0.72f, h * 0.72f),
             (0f, C(0x00, 0x0A, 0x12, 0x20, op)), (0.6f, C(0x00, 0x0A, 0x12, 0x20, op)),
-            (1f, C(0x20, 0x0A, 0x12, 0x20, op))))
+            (1f, C(0x18, 0x0A, 0x12, 0x20, op))))
             ctx.FillRoundedRectangle(slab, edge);
 
-        // Centre specular bloom.
-        using (var bloom = RadialBrush(ctx, Radial(cx, cy, w * 0.5f, h * 0.62f),
-            (0f, C(0x32, 0xFF, 0xFF, 0xFF, op)), (0.5f, C(0x12, 0xFF, 0xFF, 0xFF, op)),
-            (1f, C(0x00, 0xFF, 0xFF, 0xFF, op))))
-            ctx.FillRoundedRectangle(
-                new RoundedRectangle { Rect = new Rect(x + w * 0.07f, cy - h * 0.275f, w * 0.86f, h * 0.55f), RadiusX = w * 0.43f, RadiusY = w * 0.43f },
-                bloom);
+        // Centre specular bloom: a soft centre-bright glow that fills the whole slab
+        // and fades to zero at the rim, rather than a defined sub-ellipse. This melts
+        // into the body with no visible elliptical boundary — the cheap GPU stand-in
+        // for the WPF bloom's BlurEffect (which diffuses the same highlight).
+        using (var bloom = RadialBrush(ctx, Radial(cx, cy, w * 0.72f, h * 0.72f),
+            (0f, C(0x20, 0xFF, 0xFF, 0xFF, op)), (0.5f, C(0x10, 0xFF, 0xFF, 0xFF, op)),
+            (0.82f, C(0x05, 0xFF, 0xFF, 0xFF, op)), (1f, C(0x00, 0xFF, 0xFF, 0xFF, op))))
+            ctx.FillRoundedRectangle(slab, bloom);
 
         // Diagonal glare streak (parity with WPF GlassChrome glare): a faint tilted
         // bright bar across the upper body. Clipped to the slab's axis-aligned bounds
