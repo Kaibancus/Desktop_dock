@@ -1542,7 +1542,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             case WM_DROPFILES:
             {
                 IntPtr hDrop = wParam;
-                Log.Warn("SideDockGpu", "WM_DROPFILES received");
                 try
                 {
                     uint count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
@@ -2142,7 +2141,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// screen pixels (the IDropTarget POINTL).</summary>
     private void HandleOleDrop(List<string> files, byte[]? shellIdList, int screenX, int screenY)
     {
-        Log.Warn("SideDockGpu", $"HandleOleDrop files={files.Count} shell={(shellIdList?.Length ?? -1)} screen=({screenX},{screenY})");
         var entries = new List<AppEntry>();
         foreach (var f in files)
         {
@@ -2211,7 +2209,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             ConfigStore.Save(_config);
         }
         catch (Exception ex) { Log.Warn("SideDockGpu", "persist failed: " + ex.Message); }
-        Rebuild();
+        // Relayout in place (resizes the window/swap chain without a teardown) so adding /
+        // removing an icon doesn't make the side dock vanish and pop back. Falls back to a
+        // full Rebuild only if the host is gone or the in-place resize fails.
+        RelayoutInPlace();
         MainDockChanged?.Invoke();
     }
 
@@ -2241,8 +2242,28 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         LayoutContent();
         if (_winW != ow || _winH != oh || _winX != ox || _winY != oy)
         {
-            Rebuild();   // geometry changed → window/swapchain must be recreated
-            return;
+            // Geometry changed (an icon was added/removed). Resize the window + swap chain
+            // IN PLACE instead of a full teardown, which makes the side dock vanish + pop
+            // back. The DComp visual stays bound to the same swap chain, so only the back
+            // buffer is reallocated.
+            try
+            {
+                int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
+                int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
+                SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
+                _host.Resize(pw, ph);
+                foreach (var b in _bmpCache.Values) b?.Dispose();
+                _bmpCache.Clear();
+                DisposeRockResources();   // debris cache is window-sized; rebuilt lazily on render
+                Render();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("SideDockGpu", "in-place resize failed, rebuilding: " + ex.Message);
+                Rebuild();
+                return;
+            }
         }
         Render();
     }

@@ -45,6 +45,10 @@ internal sealed class OleDropTarget : IOleDropTarget
     private bool _registered;
     private bool _accepting;
 
+    /// <summary>Optional: invoked on every DragOver with the SCREEN point while a drag is
+    /// over us (and null on leave/drop), so the dock can draw a drag-follow preview.</summary>
+    public Action<(int x, int y)?>? OnDragMove { get; set; }
+
     public OleDropTarget(IntPtr hwnd, Action<List<string>, byte[]?, int, int> onDrop)
     {
         _hwnd = hwnd;
@@ -67,7 +71,8 @@ internal sealed class OleDropTarget : IOleDropTarget
             int oi = OleInitialize(IntPtr.Zero);   // refcounted; harmless if already initialised
             int hr = RegisterDragDrop(_hwnd, this);
             _registered = hr == S_OK;
-            Log.Warn("OleDropTarget", $"Register hwnd={_hwnd:X} OleInit=0x{oi:X8} RegisterDragDrop=0x{hr:X8} CF_SHELLIDLIST={CF_SHELLIDLIST}");
+            if (!_registered)
+                Log.Warn("OleDropTarget", $"RegisterDragDrop failed hr=0x{hr:X8} (OleInit=0x{oi:X8})");
         }
         catch (Exception ex) { Log.Warn("OleDropTarget", "RegisterDragDrop failed: " + ex.Message); }
     }
@@ -80,7 +85,11 @@ internal sealed class OleDropTarget : IOleDropTarget
     {
         if (!_registered)
             return;
-        try { RevokeDragDrop(_hwnd); } catch { /* window already gone */ }
+        try
+        {
+            RevokeDragDrop(_hwnd);
+        }
+        catch { /* window already gone */ }
         _registered = false;
     }
 
@@ -100,19 +109,21 @@ internal sealed class OleDropTarget : IOleDropTarget
         bool sh = pDataObj != null && CF_SHELLIDLIST != 0 && HasFormat(pDataObj, CF_SHELLIDLIST);
         _accepting = hd || sh;
         pdwEffect = _accepting ? DROPEFFECT_COPY : DROPEFFECT_NONE;
-        Log.Warn("OleDropTarget", $"DragEnter pt=({pt.X},{pt.Y}) hdrop={hd} shell={sh} accepting={_accepting}");
+        if (_accepting) OnDragMove?.Invoke((pt.X, pt.Y));
         return S_OK;
     }
 
     int IOleDropTarget.DragOver(int grfKeyState, POINTL pt, ref int pdwEffect)
     {
         pdwEffect = _accepting ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        if (_accepting) OnDragMove?.Invoke((pt.X, pt.Y));
         return S_OK;
     }
 
     int IOleDropTarget.DragLeave()
     {
         _accepting = false;
+        OnDragMove?.Invoke(null);
         return S_OK;
     }
 
@@ -122,7 +133,6 @@ internal sealed class OleDropTarget : IOleDropTarget
         {
             var files = ReadHDrop(pDataObj);
             byte[]? shell = ReadBytes(pDataObj, CF_SHELLIDLIST);
-            Log.Warn("OleDropTarget", $"Drop pt=({pt.X},{pt.Y}) files={files.Count} shell={(shell?.Length ?? -1)}");
             if (files.Count > 0 || shell != null)
             {
                 _onDrop(files, shell, pt.X, pt.Y);
@@ -139,6 +149,7 @@ internal sealed class OleDropTarget : IOleDropTarget
             pdwEffect = DROPEFFECT_NONE;
         }
         _accepting = false;
+        OnDragMove?.Invoke(null);
         return S_OK;
     }
 

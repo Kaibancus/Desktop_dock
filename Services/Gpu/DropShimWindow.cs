@@ -26,19 +26,27 @@ internal sealed class DropShimWindow : IDisposable
     private static readonly WndProc s_wndProc = WndProcImpl;
     private static ushort s_atom;
 
-    private readonly IntPtr _owner;
+    private IntPtr _owner;
     private readonly Func<uint, IntPtr, int, int, (bool handled, IntPtr result)> _forward;
     private readonly Action<List<string>, byte[]?, int, int> _onDrop;
-    private IntPtr _hwnd;
+    private readonly Action<(int x, int y)?>? _onDragMove;
     private OleDropTarget? _ole;
+    private IntPtr _hwnd;
+
+    /// <summary>Re-point the shim at a new owner window (the dock recreates its HWND on
+    /// rebuild). Keeping the single shim alive across rebuilds avoids a dispose/create gap
+    /// during which an external drag would find no drop target.</summary>
+    public void SetOwner(IntPtr owner) => _owner = owner;
 
     public DropShimWindow(IntPtr owner,
         Func<uint, IntPtr, int, int, (bool handled, IntPtr result)> forward,
-        Action<List<string>, byte[]?, int, int> onDrop)
+        Action<List<string>, byte[]?, int, int> onDrop,
+        Action<(int x, int y)?>? onDragMove = null)
     {
         _owner = owner;
         _forward = forward;
         _onDrop = onDrop;
+        _onDragMove = onDragMove;
         Create();
     }
 
@@ -66,8 +74,21 @@ internal sealed class DropShimWindow : IDisposable
         // alpha 1/255: effectively invisible but the window still hit-tests + accepts
         // input/drops (a fully-transparent layered window would be click-through).
         SetLayeredWindowAttributes(_hwnd, 0, 1, LWA_ALPHA);
-        _ole = new OleDropTarget(_hwnd, _onDrop);
+        // The shim is a normal redirected window (unlike the composition dock, which the OS
+        // refuses to route drag-drop to), so it can host a full OLE IDropTarget. OLE gives
+        // real-time DragEnter/DragOver/Drop — needed for the drag-follow preview and for
+        // CFSTR_SHELLIDLIST shell items (This PC / Recycle Bin / File Explorer) that the
+        // legacy WM_DROPFILES path can't carry.
+        Allow(_hwnd);
+        _ole = new OleDropTarget(_hwnd, _onDrop) { OnDragMove = pt => _onDragMove?.Invoke(pt) };
         _ole.Register();
+    }
+
+    /// <summary>Let drag-drop messages through UIPI (no-op if same integrity).</summary>
+    private static void Allow(IntPtr h)
+    {
+        foreach (uint m in new uint[] { WM_DROPFILES, 0x004A /*WM_COPYDATA*/, 0x0049 /*WM_COPYGLOBALDATA*/ })
+            try { ChangeWindowMessageFilterEx(h, m, 1 /*MSGFLT_ALLOW*/, IntPtr.Zero); } catch { }
     }
 
     /// <summary>Position the shim exactly over the owner's interactive box (physical px).</summary>
@@ -86,7 +107,8 @@ internal sealed class DropShimWindow : IDisposable
 
     public void Hide()
     {
-        if (_hwnd != IntPtr.Zero) ShowWindow(_hwnd, SW_HIDE);
+        if (_hwnd != IntPtr.Zero)
+            ShowWindow(_hwnd, SW_HIDE);
     }
 
     public void Dispose()
@@ -144,12 +166,13 @@ internal sealed class DropShimWindow : IDisposable
     private const uint WS_POPUP = 0x80000000;
     private const uint WM_NCHITTEST = 0x0084, WM_MOUSEACTIVATE = 0x0021,
         WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_RBUTTONUP = 0x0205,
-        WM_MOUSEMOVE = 0x0200, WM_MOUSEWHEEL = 0x020A;
+        WM_MOUSEMOVE = 0x0200, WM_MOUSEWHEEL = 0x020A, WM_DROPFILES = 0x0233;
     private const int MA_NOACTIVATE = 3, LWA_ALPHA = 2, SW_SHOWNOACTIVATE = 4, SW_HIDE = 0, BLACK_BRUSH = 4;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOACTIVATE = 0x0010, SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001;
 
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEXW
     {
@@ -171,4 +194,9 @@ internal sealed class DropShimWindow : IDisposable
     [DllImport("user32.dll")] private static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, int flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? name);
     [DllImport("gdi32.dll")] private static extern IntPtr GetStockObject(int i);
+    [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, System.Text.StringBuilder? buf, uint cch);
+    [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out POINT pt);
+    [DllImport("shell32.dll")] private static extern void DragFinish(IntPtr hDrop);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr pChangeFilterStruct);
 }

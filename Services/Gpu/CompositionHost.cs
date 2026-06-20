@@ -30,11 +30,12 @@ internal sealed class CompositionHost : IDisposable
     private readonly ID2D1Factory1 _d2dFactory;
     private readonly ID2D1Device _d2dDevice;
     private readonly ID2D1DeviceContext _d2d;
-    private readonly ID2D1Bitmap1 _targetBitmap;
+    private ID2D1Bitmap1 _targetBitmap;
+    private float _dpi;
 
     public ID2D1DeviceContext Context => _d2d;
-    public int Width { get; }
-    public int Height { get; }
+    public int Width { get; private set; }
+    public int Height { get; private set; }
 
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
@@ -128,6 +129,30 @@ internal sealed class CompositionHost : IDisposable
         // small and anchored to the top-left of a physical-pixel window. Set it so
         // DIP drawing maps 1:1 to the physical back buffer.
         _d2d.SetDpi(dpi, dpi);
+        _dpi = dpi;
+    }
+
+    /// <summary>Resizes the swap chain + D2D target bitmap in place (no window / device
+    /// recreation), so a dock that grows/shrinks by an icon can relayout without the blank
+    /// frame a full teardown produces. The DComp visual content stays bound to the same
+    /// swap chain, so the composition tree is untouched.</summary>
+    public void Resize(int width, int height)
+    {
+        int w = Math.Max(1, width), h = Math.Max(1, height);
+        if (w == Width && h == Height)
+            return;
+        // Release the D2D target that holds a back-buffer reference before resizing.
+        _d2d.Target = null;
+        _targetBitmap.Dispose();
+        _swapChain.ResizeBuffers(2, (uint)w, (uint)h, Format.B8G8R8A8_UNorm, SwapChainFlags.None).CheckError();
+        Width = w; Height = h;
+        using var surface = _swapChain.GetBuffer<IDXGISurface>(0);
+        var props = new BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Format.B8G8R8A8_UNorm, D2DAlphaMode.Premultiplied),
+            _dpi, _dpi, BitmapOptions.Target | BitmapOptions.CannotDraw);
+        _targetBitmap = _d2d.CreateBitmapFromDxgiSurface(surface, props);
+        _d2d.Target = _targetBitmap;
+        _d2d.SetDpi(_dpi, _dpi);
     }
 
     /// <summary>Creates a static premultiplied-BGRA D2D bitmap from raw pixels
