@@ -116,6 +116,11 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const long PressLaunchMs = 260;
     private System.Windows.Controls.Primitives.Popup? _slotMenu;
     private int _menuIdx = -1;   // slot the right-click menu is anchored to (-1 = none)
+    // Hover-name label fade: eased opacity + the retained anchor slot so the focal name
+    // fades in/out in place (~110ms) like WPF Show/HideGlassHoverLabel instead of hard-cutting.
+    private float _labelOp;
+    private int _labelIdx = -1;
+    private long _labelLastMs;
 
     // ---- Glass grid scrolling state (liquid-glass theme, >VisibleRows rows) ----
     private double _glassScroll;          // committed vertical scroll offset (DIP, >=0 scrolls content up)
@@ -829,6 +834,19 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
         // Hover only when the pointer is genuinely over an icon's cell.
         _hover = active && focal >= 0 && best <= _effIcon * 0.85f ? focal : -1;
+        // Ease the hover-label opacity toward 1 while an icon is hovered (not dragging /
+        // dismissing) and toward 0 otherwise (~110ms), retaining the last slot so the name
+        // fades out in place — parity with WPF Show/HideGlassHoverLabel's 110ms opacity fade.
+        {
+            if (_hover >= 0 && !_dragging) _labelIdx = _hover;
+            long nowL = Environment.TickCount64;
+            float dtL = Math.Clamp((nowL - _labelLastMs) / 1000f, 0f, 0.1f);
+            _labelLastMs = nowL;
+            float tgtL = (_hover >= 0 && !_dragging && _shown) ? 1f : 0f;
+            float kL = 1f - MathF.Exp(-dtL / 0.05f);   // ~110 ms settle
+            _labelOp += (tgtL - _labelOp) * kL;
+            if (_labelOp < 0.01f && tgtL == 0f) { _labelOp = 0f; _labelIdx = -1; }
+        }
         // Drive the hover thumbnail preview (suppressed while dragging or dismissing).
         DrivePreview(_dragging || !_shown ? -1 : _hover);
 
@@ -1081,13 +1099,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             var moved = new IconSlot(new Vector2(_dragX, _dragY), s.IconKey, s.Name, s.Running, s.Image, s.Entry);
             DrawIcon(ctx, moved, 1.12f, Vector2.Zero, _saturn && dragIdx < _slotG.Length ? _slotG[dragIdx] : 0f);
         }
-        else if (_hover >= 0 && _hover < _slots.Count)
+        else if (_labelIdx >= 0 && _labelIdx < _slots.Count && _labelOp > 0.01f)
         {
-            var hs = _slots[_hover];
+            var hs = _slots[_labelIdx];
             var hsv = scrollY != 0f
                 ? new IconSlot(new Vector2(hs.Center.X, hs.Center.Y - scrollY), hs.IconKey, hs.Name, hs.Running, hs.Image, hs.Entry)
                 : hs;
-            DrawHoverLabel(ctx, hsv, _waveCur[_hover]);
+            DrawHoverLabel(ctx, hsv, _waveCur[_labelIdx], _labelOp);
         }
 
         if (!_saturn && _scrollable)
@@ -1428,9 +1446,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// (mirrors the WPF glass dock's <c>ShowGlassHoverLabel</c>: barely-there dark tint,
     /// 7px radius, light text). The icon zooms about its centre, so its visible bottom
     /// sits at center + gIcon/2 × scale.</summary>
-    private void DrawHoverLabel(ID2D1DeviceContext ctx, in IconSlot s, float scale)
+    private void DrawHoverLabel(ID2D1DeviceContext ctx, in IconSlot s, float scale, float opacity = 1f)
     {
-        if (_labelFormat == null || string.IsNullOrEmpty(s.Name))
+        if (_labelFormat == null || string.IsNullOrEmpty(s.Name) || opacity <= 0.01f)
             return;
         float zoomedHalf = _gIcon / 2f * scale;
         float h = _labelFontPx + 10f;
@@ -1442,17 +1460,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // floating ShowGlassHoverLabel). Match the per-theme opacity so the saturn
         // label reads as a solid name pill rather than near-transparent.
         byte bgA = _saturn ? (byte)0x26 : (byte)0x05;
-        using (var bg = ctx.CreateSolidColorBrush(Col(bgA, 0x1A, 0x1A, 0x1A)))
+        using (var bg = ctx.CreateSolidColorBrush(Col((byte)(bgA * opacity), 0x1A, 0x1A, 0x1A)))
             ctx.FillRoundedRectangle(new RoundedRectangle { Rect = rect, RadiusX = 7f, RadiusY = 7f }, bg);
         // 3-D raised lettering: dark offset copies behind the light text give the name
         // depth and a legibility halo, mirroring the WPF DropShadowEffect (black, depth
         // 1.4, direction 315° → a ~1px down-right offset, plus a soft second copy).
-        using (var halo = ctx.CreateSolidColorBrush(Col(0xE6, 0, 0, 0)))
+        using (var halo = ctx.CreateSolidColorBrush(Col((byte)(0xE6 * opacity), 0, 0, 0)))
         {
             ctx.DrawText(s.Name, _labelFormat, new Vortice.Mathematics.Rect(rect.X + 1f, rect.Y + 1.2f, rect.Width, rect.Height), halo);
             ctx.DrawText(s.Name, _labelFormat, new Vortice.Mathematics.Rect(rect.X - 0.6f, rect.Y + 0.5f, rect.Width, rect.Height), halo);
         }
-        using (var ink = ctx.CreateSolidColorBrush(Col(0xF2, 0xFF, 0xFF, 0xFF)))
+        using (var ink = ctx.CreateSolidColorBrush(Col((byte)(0xF2 * opacity), 0xFF, 0xFF, 0xFF)))
             ctx.DrawText(s.Name, _labelFormat, rect, ink);
     }
 

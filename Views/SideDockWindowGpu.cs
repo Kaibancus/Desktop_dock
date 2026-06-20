@@ -100,7 +100,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private volatile bool _attnBusy;      // an attention poll task is in flight
 
     // ---- Running-icon glow pulse + glass orbit light (parity with the GPU main dock) ----
-    private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8, 2.2s breathe)
+    private float _runPulse = 0.5f;       // running-icon glow pulse (0.35..0.8, 4.0s breathe)
     private float _orbitAngle;            // glass orbit-light angle (deg, 36s/rev clockwise)
     private bool _anyRunning;             // any slot is running (gates the pulse/orbit)
 
@@ -926,12 +926,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         if (anyFlash)
             _badgePulse = 1.09f + 0.09f * MathF.Sin(Environment.TickCount64 / 1000f * 2f * MathF.PI / 1.4f);
 
-        // Running-icon glow pulse: breathe the running dot's halo (2.2s) in both themes
-        // (mirrors RadialIcon's UpdateRunningDot ambient pulse). The flowing border is a
+        // Running-icon glow pulse: breathe the running dot's halo (4.0s full cycle = WPF
+        // UpdateRunningDot's 2.0s AutoReverse) in both themes. The flowing border is a
         // main-dock-only effect (WPF side dock shows only the dot, no sweep border).
         if (_anyRunning)
         {
-            double rph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
+            double rph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 4.0;
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)rph);
         }
         if (!_saturn && _shown)
@@ -1206,18 +1206,35 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// null when no icon is magnified. Port of WPF UpdateWaveBulge.</summary>
     private ID2D1PathGeometry? BuildFlameGeometry(ID2D1DeviceContext ctx)
     {
-        if (!_curActive)
-            return null;
         bool vertical = _side is DockSide.Left or DockSide.Right;
         float denom = Math.Max(0.0001f, HoverScale - 1f);
         float peak = 0f, wsum = 0f, csum = 0f;
-        for (int i = 0; i < _slots.Count; i++)
+        // Magnify-wave tongue: collapse the per-icon hover wave into one flame (only while
+        // the cursor is actually driving the wave — _byBounce/dismiss force it off).
+        if (_curActive)
         {
-            float a = Math.Clamp((_waveCur[i] - 1f) / denom, 0f, 1f);
-            if (a <= 0f) continue;
-            float w = a * a;
-            float main = vertical ? _slots[i].Center.Y : _slots[i].Center.X;
-            wsum += w; csum += w * main; if (a > peak) peak = a;
+            for (int i = 0; i < _slots.Count; i++)
+            {
+                float a = Math.Clamp((_waveCur[i] - 1f) / denom, 0f, 1f);
+                if (a <= 0f) continue;
+                float w = a * a;
+                float main = vertical ? _slots[i].Center.Y : _slots[i].Center.X;
+                wsum += w; csum += w * main; if (a > peak) peak = a;
+            }
+        }
+        // Launch-bounce tongue: the clicked icon's live hop height drives its own flame so
+        // the tongue leaps up with the icon and falls back with it (parity with WPF
+        // StartBounceFlame / OnBounceFlameTick feeding _bounceFlameAmp into UpdateWaveBulge).
+        float bt = BounceT(_bounceIdx);
+        if (bt >= 0f && _bounceIdx >= 0 && _bounceIdx < _slots.Count)
+        {
+            float ba = Math.Clamp(BounceCurve01(bt), 0f, 1f);
+            if (ba > 0.01f)
+            {
+                float w = ba * ba;
+                float main = vertical ? _slots[_bounceIdx].Center.Y : _slots[_bounceIdx].Center.X;
+                wsum += w; csum += w * main; if (ba > peak) peak = ba;
+            }
         }
         if (peak < 0.05f || wsum <= 0f)
             return null;
