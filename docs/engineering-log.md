@@ -83,6 +83,19 @@
 
 ## 🐛 BUG 修复
 
+- **侧 Dock 悬停图标后 `errors.log` 每帧刷 `SideDockWindowGpu.Tick → NRE`（与主 Dock 同一半初始化陷阱）**：
+  - **现象**：悬停侧 Dock 图标后，`errors.log` 高频（单次会话达 441 次）刷
+    `SideDockWindowGpu.Tick → NullReferenceException`，渲染 Tick 被异常中断。
+  - **根因**：与下条主 Dock 完全相同的时序陷阱——`EnsureAnchor()` 以 `_anchorWin != null` 为「已初始化」
+    判据，但 `_preview` 最后才创建；若中途抛异常（`_anchorWin` 已赋值、`_preview` 仍 null），下次
+    `EnsureAnchor` 因 `_anchorWin!=null` 直接 return → `_preview` 永远 null → `DrivePreview` 里
+    `_preview!.Placement` 每帧 NRE。主 Dock 此前已修，侧 Dock 漏修。
+  - **修复**：移植主 Dock 同款修复——`EnsureAnchor` 改以 `_preview` 为「完成」标志 + 整段 try-catch
+    回滚半成品状态（`_anchorWin?.Close()`、三字段置 null）并 `Log.Warn` 记录原始异常；`DrivePreview`
+    用 `_preview`/`_anchorWin` 前加 null 守卫、去掉不安全的 `_preview!`。
+  - **验证**：两轮自动化压测（反复召唤双 Dock + 横扫悬停主/侧 Dock 图标 + 消散，共 ~35s）后
+    `errors.log` **零新增 NRE**（修复前同类操作必刷）。
+
 - **主 Dock 悬停某些图标后无法点击、伴随系统报错提示音**：
   - **现象**：悬停到（某状态下的）图标后，主 Dock 点击无响应并发出系统报错音；`errors.log` 每帧刷 `MainDockWindowGpu.DrivePreview → NullReferenceException`（经 FrameClock/MediaContext 渲染回调），渲染 Tick 被异常中断，连带吞掉点击。
   - **根因**：`EnsureAnchor()` 以 `_anchorWin != null` 作为「已初始化」判据，但 `_preview` 是该方法**最后**才创建的。若 `_anchorWin.Show()` 或其后步骤抛异常（`_anchorWin` 字段已赋值、`_preview` 仍为 null），下次进入 `EnsureAnchor` 因 `_anchorWin!=null` 直接 return → `_preview` 永远为 null → `DrivePreview` 里 `_preview!.Placement` 的强制解引用每帧 NRE。属预先存在的半初始化时序陷阱（最早 22:43 即出现，与同日的渲染表面裁剪改动无关）。
@@ -269,6 +282,20 @@
 
 ## ✨ 功能优化 / 新增
 
+- **DWM Thumbnail 实时窗口预览**（替换 PrintWindow 截图）：悬停 Dock 图标弹出的窗口预览，
+  由 `PrintWindow` GDI 截图改为 **DWM Thumbnail API**（`DwmRegisterThumbnail`）。
+  - **动机**：`PrintWindow` 对 GPU 合成的浏览器（Edge/Chrome）即使在前台可见也只能截到黑/空帧，
+    最小化窗口更无法截取 → 这些应用预览常年显示「已最小化」占位或黑块（旧的 PrintWindow 缓存方案
+    `ea4826a` 因源帧本就是黑的而注定失败）。
+  - **方案**：新增 `Services/Gpu/DwmThumbnail.cs` 封装 注册/更新/查询尺寸/注销 生命周期；
+    `WindowPreviewPopup` 在弹窗实现自己的 HWND 后，为每个 tile 注册一个 DWM thumbnail 到该 HWND，
+    DWM 直接复用它已为源窗口合成的帧 → **GPU 窗口显示实时内容、且源窗口最小化后仍持续显示最后画面**。
+    注册失败的 tile 回退到原 PrintWindow/图标。
+  - **关键陷阱**：DWM thumbnail 是 DWM 在 dest rect **之上**合成的不透明覆盖层，**不在 WPF 视觉树**、
+    无法被 WPF 圆角/裁切，也**不随 PopupAnimation 淡出**；故切换图标/移开/关闭时必须显式 `Hide`/
+    `Dispose`，否则旧的实时帧会残留在屏幕上。已在 `OnPointerEnter`（切换图标即 `Close` 旧弹窗）、
+    `OnPointerLeave`（指针未落到弹窗时即 `HideDwmThumbnails`）、`ClosePopupUi`/`CloseAnimated`/单 tile
+    关闭 全路径接通 Hide/Dispose。
 - **GPU 主/侧 Dock 接通从桌面/资源管理器拖入图标**（`5e8db52` 起）：合成 Dock 窗口无法直接做
   OLE 拖放目标，故在 Dock 上方叠一个近乎不可见的普通窗口 `DropShimWindow` 承载 OLE
   `IDropTarget` 并把按下/拖放转发回 Dock；外部拖入支持 CF_HDROP 文件与 CFSTR_SHELLIDLIST

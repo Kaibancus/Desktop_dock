@@ -2357,8 +2357,10 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             return;
         _previewSource = src;
         EnsureAnchor();
+        if (_preview == null || _anchorWin == null)
+            return;   // anchor/popup not ready (e.g. creation failed) — skip this hover
         AnchorOverSlot(s);
-        _preview!.Placement = PreviewPlacementForSide();
+        _preview.Placement = PreviewPlacementForSide();
         _preview.OnPointerEnter();
     }
 
@@ -2372,33 +2374,49 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
 
     private void EnsureAnchor()
     {
-        if (_anchorWin != null)
+        // Use _preview (created last) as the "fully initialised" flag, not _anchorWin:
+        // if a previous attempt assigned _anchorWin but then threw before creating
+        // _preview, keying off _anchorWin would skip re-creation forever and leave
+        // _preview null, NRE-ing every frame in DrivePreview (this was the 441x
+        // SideDockWindowGpu.Tick NRE in the log).
+        if (_preview != null)
             return;
-        _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
-        _anchorWin = new System.Windows.Window
+        try
         {
-            WindowStyle = System.Windows.WindowStyle.None,
-            AllowsTransparency = true,
-            Background = System.Windows.Media.Brushes.Transparent,
-            ShowInTaskbar = false,
-            ShowActivated = false,
-            Topmost = true,
-            ResizeMode = System.Windows.ResizeMode.NoResize,
-            Width = 1, Height = 1, Left = -10000, Top = -10000,
-            Content = _anchorEl,
-        };
-        _anchorWin.Show();
-        // Make the anchor fully click-through / non-activating so it never steals
-        // clicks from the GPU dock icon it sits over.
-        var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
-        int ex = GetWindowLongW(h, GWL_EXSTYLE);
-        SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+            _anchorEl = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Transparent };
+            _anchorWin = new System.Windows.Window
+            {
+                WindowStyle = System.Windows.WindowStyle.None,
+                AllowsTransparency = true,
+                Background = System.Windows.Media.Brushes.Transparent,
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                Topmost = true,
+                ResizeMode = System.Windows.ResizeMode.NoResize,
+                Width = 1, Height = 1, Left = -10000, Top = -10000,
+                Content = _anchorEl,
+            };
+            _anchorWin.Show();
+            // Make the anchor fully click-through / non-activating so it never steals
+            // clicks from the GPU dock icon it sits over.
+            var h = new System.Windows.Interop.WindowInteropHelper(_anchorWin).Handle;
+            int ex = GetWindowLongW(h, GWL_EXSTYLE);
+            SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 
-        _preview = new WindowPreviewPopup(
-            _anchorEl,
-            () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
-            minWindows: 1,
-            onActivated: null);
+            _preview = new WindowPreviewPopup(
+                _anchorEl,
+                () => _previewSource?.Invoke() ?? new List<WindowPreview>(),
+                minWindows: 1,
+                onActivated: null);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("SideDockGpu", "preview anchor init failed: " + ex.Message);
+            try { _anchorWin?.Close(); } catch { }
+            _anchorWin = null;
+            _anchorEl = null;
+            _preview = null;
+        }
     }
 
     /// <summary>Positions the anchor window so its element exactly overlaps the

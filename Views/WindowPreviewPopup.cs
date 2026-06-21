@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -49,6 +50,13 @@ internal sealed class WindowPreviewPopup
     // Maps a window handle to its tile's thumbnail host so a background capture
     // can swap in the fresh image once it finishes.
     private readonly Dictionary<IntPtr, Border> _tileHosts = new();
+    // Maps a window handle to its live DWM thumbnail (the preferred preview: works
+    // for GPU-composited and minimized windows). Null entry = DWM registration
+    // failed and the tile uses the PrintWindow still fallback instead.
+    private readonly Dictionary<IntPtr, Polaris.Services.Gpu.DwmThumbnail?> _dwmThumbs = new();
+    // HWND of the open popup's content (the DWM thumbnail destination); the tile
+    // rects are mapped relative to this window's client area.
+    private IntPtr _popupHwnd;
 
     /// <param name="target">Element to anchor the popup to and centre it over.</param>
     /// <param name="getWindows">Returns the previewable windows (runs off the UI thread).</param>
@@ -73,6 +81,13 @@ internal sealed class WindowPreviewPopup
     {
         _pointerInside = true;
         _closeTimer.Stop();
+        // Switching to a DIFFERENT icon: the pointer is now on another icon (it
+        // cannot also be over the old popup), so close the old preview RIGHT NOW
+        // instead of letting its window — and its live DWM overlay — linger through
+        // the close-delay + fade while the new one's open-delay runs. A live DWM
+        // preview is vivid, so any residual frame is very noticeable.
+        if (_previewPopup != null)
+            Close();
         _openTimer.Stop();
         _openTimer.Start();
     }
@@ -82,6 +97,14 @@ internal sealed class WindowPreviewPopup
     {
         _pointerInside = false;
         _openTimer.Stop();
+        // The DWM thumbnails are opaque overlays that don't fade with the WPF popup,
+        // so on hover-away / icon switch they'd stay lit for the close-delay (and on
+        // a switch, for the next open-delay) — looking like the old preview lingers.
+        // Hide them at once. If the pointer is actually travelling onto the popup,
+        // _pointerInPopup is already set (the popup's MouseEnter fires first), so we
+        // keep them shown in that case.
+        if (!_pointerInPopup)
+            HideDwmThumbnails();
         // Defer closing so the pointer can travel from the target onto the popup.
         _closeTimer.Stop();
         _closeTimer.Start();
@@ -226,9 +249,6 @@ internal sealed class WindowPreviewPopup
                         break;
                     default: // Above
                         x = (targetSize.Width - popupSize.Width) / 2.0;
-                        // The main dock (bottom-anchored) is the only caller using
-                        // Above; lift the thumbnail a little further off the icon so
-                        // it doesn't crowd the dock's hover-zoomed glyph.
                         y = -popupSize.Height - gap - 14;
                         axis = PopupPrimaryAxis.Horizontal;
                         break;
@@ -244,6 +264,104 @@ internal sealed class WindowPreviewPopup
         shell.MouseLeave += (_, _) => { _pointerInPopup = false; _closeTimer.Stop(); _closeTimer.Start(); };
 
         _previewPopup.IsOpen = true;
+
+        // Once the popup is realised it has its own HWND; register a live DWM
+        // thumbnail per tile into it (the preferred preview — works for GPU and
+        // minimized windows). Tiles whose registration fails keep the PrintWindow
+        // still / icon fallback already placed in their host. Re-place the
+        // thumbnails on every layout pass so they track the tiles as the popup
+        // sizes/moves; positions are cheap idempotent DwmUpdateThumbnailProperties.
+        shell.LayoutUpdated += OnPopupLayoutUpdated;
+        shell.Dispatcher.BeginInvoke(new Action(() => SetupDwmThumbnails(shell)),
+            DispatcherPriority.Loaded);
+    }
+
+    /// <summary>After the popup is realised, register a live DWM thumbnail for each
+    /// tile into the popup's HWND. Called once on open; tiles that fail keep their
+    /// PrintWindow/icon fallback.</summary>
+    private void SetupDwmThumbnails(Visual shell)
+    {
+        if (PresentationSource.FromVisual(shell) is not HwndSource src)
+            return;
+        _popupHwnd = src.Handle;
+        _hwndRoot = src.RootVisual as UIElement;
+        foreach (var kv in _tileHosts)
+        {
+            IntPtr handle = kv.Key;
+            if (_dwmThumbs.ContainsKey(handle))
+                continue;
+            var thumb = Polaris.Services.Gpu.DwmThumbnail.Create(_popupHwnd, handle);
+            _dwmThumbs[handle] = thumb;   // may be null (registration failed → fallback shows)
+            if (thumb is { IsValid: true })
+            {
+                // A live DWM preview covers the host. Clear the placeholder child
+                // (PrintWindow still / "已最小化" / icon) and the dark background:
+                // when the overlay is hidden on hover-away the host must reveal
+                // NOTHING (so the old preview vanishes cleanly) rather than flashing
+                // the "已最小化" fallback that sat underneath the overlay.
+                kv.Value.Child = null;
+                kv.Value.Background = Brushes.Transparent;
+            }
+        }
+        PlaceDwmThumbnails();
+    }
+
+    private void OnPopupLayoutUpdated(object? sender, EventArgs e) => PlaceDwmThumbnails();
+
+    /// <summary>Maps each tile's thumbnail host to its on-screen rect (physical
+    /// pixels, relative to the popup window's client area) and pushes it to the DWM.
+    /// No-op for tiles without a valid thumbnail (they show the WPF fallback).</summary>
+    private void PlaceDwmThumbnails()
+    {
+        if (_popupHwnd == IntPtr.Zero || _dwmThumbs.Count == 0)
+            return;
+        foreach (var kv in _dwmThumbs)
+        {
+            if (kv.Value is not { IsValid: true } thumb)
+                continue;
+            if (!_tileHosts.TryGetValue(kv.Key, out var host) || !host.IsVisible)
+            {
+                thumb.Hide();
+                continue;
+            }
+            try
+            {
+                // Host rect in its own DIP space → popup-window DIP → physical px.
+                var topLeft = host.TranslatePoint(new Point(0, 0), _hwndRoot ?? host);
+                var dpi = VisualTreeHelper.GetDpi(host);
+                int l = (int)Math.Round(topLeft.X * dpi.DpiScaleX);
+                int t = (int)Math.Round(topLeft.Y * dpi.DpiScaleY);
+                int r = (int)Math.Round((topLeft.X + host.ActualWidth) * dpi.DpiScaleX);
+                int b = (int)Math.Round((topLeft.Y + host.ActualHeight) * dpi.DpiScaleY);
+                if (r > l && b > t)
+                    thumb.SetDestination(l, t, r, b);
+            }
+            catch { thumb.Hide(); }
+        }
+    }
+
+    /// <summary>Root visual of the popup HWND, used to translate tile coordinates
+    /// into the destination window's client space for the DWM thumbnail rect.</summary>
+    private UIElement? _hwndRoot;
+
+    /// <summary>Releases every DWM thumbnail registration.</summary>
+    private void DisposeDwmThumbnails()
+    {
+        foreach (var t in _dwmThumbs.Values)
+            t?.Dispose();
+        _dwmThumbs.Clear();
+        _popupHwnd = IntPtr.Zero;
+        _hwndRoot = null;
+    }
+
+    /// <summary>Immediately hides the live DWM overlays without unregistering, so a
+    /// hover-away / icon switch makes the old preview vanish at once instead of
+    /// lingering for the open-delay (the overlays don't participate in the WPF
+    /// fade). They are fully released later in ClosePopupUi / the next ShowPreview.</summary>
+    private void HideDwmThumbnails()
+    {
+        foreach (var t in _dwmThumbs.Values)
+            t?.Hide();
     }
 
     private UIElement BuildTile(WindowPreview w)
@@ -393,6 +511,11 @@ internal sealed class WindowPreviewPopup
             e.Handled = true;   // don't fall through to the tile's activate handler
             WindowPreviewService.CloseWindow(handle);
             _tileHosts.Remove(handle);
+            if (_dwmThumbs.TryGetValue(handle, out var dt))
+            {
+                dt?.Dispose();
+                _dwmThumbs.Remove(handle);
+            }
             // Remove this tile from the strip; close the whole popup once empty.
             if (tile.Parent is Panel parent)
             {
@@ -408,6 +531,11 @@ internal sealed class WindowPreviewPopup
     /// UI thread once a background capture finishes).</summary>
     private void UpdateTileThumbnail(IntPtr handle, BitmapSource thumb)
     {
+        // A live DWM thumbnail (if it registered) is the preferred preview and sits
+        // as an overlay above this host, so don't bother swapping in the slower
+        // PrintWindow still — it would only show if the DWM overlay later failed.
+        if (_dwmThumbs.TryGetValue(handle, out var dt) && dt is { IsValid: true })
+            return;
         if (!_tileHosts.TryGetValue(handle, out var host))
             return;
         host.Child = new Image
@@ -455,6 +583,10 @@ internal sealed class WindowPreviewPopup
         // Detach so a concurrent hover can't reuse this fading popup, but keep
         // its Child intact so PopupAnimation.Fade has something to fade out.
         _previewPopup = null;
+        // DWM thumbnails are opaque overlays that do NOT participate in the WPF
+        // fade-out, so release them immediately rather than leaving a live preview
+        // hanging over a fading popup.
+        DisposeDwmThumbnails();
         _tileHosts.Clear();
 
         popup.IsOpen = false;       // begins the fade-out
@@ -476,6 +608,7 @@ internal sealed class WindowPreviewPopup
     /// the same capture batch keeps streaming in fresh thumbnails).</summary>
     private void ClosePopupUi()
     {
+        DisposeDwmThumbnails();
         _tileHosts.Clear();
         if (_previewPopup != null)
         {
