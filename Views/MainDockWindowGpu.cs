@@ -281,16 +281,17 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         double shadowPad = 72.0;
         double scrollPad = icon * 1.6;
         double hoverHeadroom = icon * 2.4;
-        // Headroom kept around the slab purely so an in-window drag of a TEXT icon (no
-        // bitmap) has somewhere to roam. Bitmap icons (virtually all of them) lift into
-        // an independent desktop overlay (DragGhostWindowGpu), so they don't need this
-        // surplus. The window's back buffer is the full _winW×_winH and every frame
-        // clears + rasterises all of it, so on a 4K/high-refresh display this transparent
-        // surplus is pure per-frame cost competing with the UI-thread input pump. Trim it
-        // from 1.8→0.6 icon (~20% fewer pixels per frame) while still leaving room for the
-        // text-icon fallback; the icon-pop / hover-label headroom (hoverHeadroom + shadow)
-        // is untouched so magnified icons and labels are never clipped.
-        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * 0.6;
+        // Side headroom kept around the slab so (a) an in-window drag of a TEXT icon (no
+        // bitmap, which keeps the in-window draw) has room to roam, and (b) — more
+        // importantly — the outermost icon column's grab region (WM_NCHITTEST extends the
+        // hit box to _slabX ± _gIcon*0.5) stays INSIDE the window. If this surplus is
+        // narrower than that 0.5*gIcon grab margin, the window's physical edge clips the
+        // outer icons' hit box and a press there falls through to the desktop, so dragging
+        // the outermost icons left/right out of the dock gets blocked. gIcon = icon*1.32,
+        // so 0.5*gIcon = icon*0.66; ThemeScale=0.9, so this factor must be >= 0.66/0.9 ≈
+        // 0.74. Use 0.9 (icon*0.81 > icon*0.66) for a safety margin while still trimming
+        // far below the original 1.8. The icon-pop / hover-label headroom is untouched.
+        double glassDragHeadroom = _config.Settings.IconSize * ThemeScale * 0.9;
         double w = Math.Min(dockW + shadowPad * 2 + scrollPad + glassDragHeadroom * 2, sw);
         double h = Math.Min(totalHeight + bottomMargin + hoverHeadroom + shadowPad + glassDragHeadroom, sh);
 
