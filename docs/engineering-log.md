@@ -282,6 +282,16 @@
 
 ## ✨ 功能优化 / 新增
 
+- **预览缩略图任务栏式关闭按钮**：悬停缩略图**右上角热区**(46×40)时淡入一个红色圆角 ✕ 按钮
+  (`PopupAnimation.Fade`)，点击关闭对应窗口(空了则关整个预览)。
+  - **关键陷阱**：DWM thumbnail 是合成在 tile **之上**的不透明覆盖层，放在 tile 视觉树里的普通
+    WPF 按钮会被它完全盖住(Edge 等 GPU 窗口上尤其明显)。故按钮改放在**独立的 topmost `Popup`**——
+    OS 把它合成在主预览 popup(及其 DWM overlay)之上，得以显示。这是「任何要盖在 DWM 缩略图上的
+    元素都必须是独立更高层 HWND」这一约束的应用。
+  - **交互细节**：①热区检测用 `thumbHost.MouseMove`(DWM overlay 不拦截输入，WPF 仍能收到)；
+    ②按钮 hover 时计入 `_pointerInPopup`，避免指针移到独立按钮 HWND 时主预览被误关；③共享单个
+    Popup 按 hover 的 tile 重新锚定(切换 tile 先关再开让 Fade 重播)；④定位用 `Custom` placement
+    (实测 `Relative` 模式的偏移基准不对会整体左移)，右上角内缩(距右 2px、距上 1px)。
 - **DWM Thumbnail 实时窗口预览**（替换 PrintWindow 截图）：悬停 Dock 图标弹出的窗口预览，
   由 `PrintWindow` GDI 截图改为 **DWM Thumbnail API**（`DwmRegisterThumbnail`）。
   - **动机**：`PrintWindow` 对 GPU 合成的浏览器（Edge/Chrome）即使在前台可见也只能截到黑/空帧，
