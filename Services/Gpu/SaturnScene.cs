@@ -364,6 +364,7 @@ internal static class SaturnScene
         float r = g.OuterRadius + g.OuterIcon;
         int count = (int)Math.Round(104 * Polaris.Services.RenderProfile.SaturnDetailFactor);
         const double twinkleGate = 0.55;
+        using var star = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 250f / 255f, 1f));
         for (int i = 0; i < count; i++)
         {
             if (Hash01(i * 11.1) > twinkleGate) continue;   // twinkler -> drawn dynamically
@@ -374,8 +375,8 @@ internal static class SaturnScene
             double sz = 0.6 + 1.9 * Hash01(i * 7.7);
             double br = (60 + 150 * Hash01(i * 3.3)) / 255.0;
             var e = new Ellipse(new Vector2((float)px, (float)py), (float)(sz / 2), (float)(sz / 2));
-            using var brush = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 250f / 255f, (float)br));
-            ctx.FillEllipse(e, brush);
+            star.Opacity = (float)br;   // reuse one brush (opacity per star) instead of newing per star
+            ctx.FillEllipse(e, star);
         }
     }
 
@@ -386,6 +387,7 @@ internal static class SaturnScene
         float r = g.OuterRadius + g.OuterIcon;
         int count = (int)Math.Round(104 * Polaris.Services.RenderProfile.SaturnDetailFactor);
         const double twinkleGate = 0.55;
+        using var star = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 250f / 255f, 1f));
         for (int i = 0; i < count; i++)
         {
             if (Hash01(i * 11.1) <= twinkleGate) continue;
@@ -400,8 +402,8 @@ internal static class SaturnScene
             double s = 0.5 + 0.5 * Math.Sin((time / period + phase) * Math.PI * 2);
             double br = full * (0.3 + 0.7 * s);
             var e = new Ellipse(new Vector2((float)px, (float)py), (float)(sz / 2), (float)(sz / 2));
-            using var brush = ctx.CreateSolidColorBrush(new Color4(1f, 1f, 250f / 255f, (float)br));
-            ctx.FillEllipse(e, brush);
+            star.Opacity = (float)br;   // reuse one brush (opacity per star) vs newing ~45 brushes/frame
+            ctx.FillEllipse(e, star);
         }
     }
 
