@@ -191,10 +191,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private const double PlanetHoverSpinMul = 20.0;   // hover over the planet -> ~3s period (WPF StartSpin(3.0))
     private const double InnerOrbitRatio = 0.9023;
     private const double OuterOrbitRatio = 1.3941;
-    // Baked Saturn layers (full-window): static rings+disc+planet body, the
-    // spinning polar disc (rotated each frame), and the static planet shading.
+    // Baked Saturn layers: full-window static rings + backing; the planet body/disc/shade are
+    // baked to a planet-centred SUB-REGION (see _satPlanetOx/Oy) — they only span ~1.4*PlanetR,
+    // so a tight bitmap saves ~3 full-window RGBA bitmaps of VRAM/commit on the near-fullscreen
+    // Saturn window. The spinning polar disc is rotated each frame; the static planet shading on top.
     private ID2D1Bitmap1? _satStaticInner, _satStaticOuter, _satDisc, _satShade, _satInner, _satOuter;
     private ID2D1Bitmap1? _satBacking, _satPlanet;
+    private float _satPlanetOx, _satPlanetOy;   // DIP top-left of the planet sub-region bitmaps
     private const float SaturnEnlarge = 1.10f;
     private const float SaturnDiskEnlarge = 1.3f;
     private const float SaturnInnerIconScale = 0.85f / SaturnEnlarge;
@@ -818,10 +821,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // the centre planet is baked separately so it stays full size as well.
         _satBacking = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawBacking(c, _sg));
         _satStaticInner = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawInnerRings(c, _sg));
-        _satPlanet = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanet(c, _sg));
         _satStaticOuter = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawStaticOuter(c, _sg));
-        _satDisc = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
-        _satShade = RenderToBitmap(ctx, pw, ph, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
+        // Planet body + spinning disc + shade only span ~1.4*PlanetR around the centre (the warm
+        // glow halo). Bake them to a planet-centred sub-region (1.5x margin > the 1.4x halo)
+        // instead of a full-window bitmap — on the near-fullscreen Saturn window this saves ~3
+        // full-window RGBA bitmaps of VRAM/commit. The draw places each back via a translation,
+        // and the disc still rotates about the absolute centre, so the spin is unchanged.
+        float pmr = _sg.PlanetR * 1.5f;
+        float pox = Math.Max(0f, _sg.Cx - pmr), poy = Math.Max(0f, _sg.Cy - pmr);
+        float px1 = Math.Min((float)_winW, _sg.Cx + pmr), py1 = Math.Min((float)_winH, _sg.Cy + pmr);
+        _satPlanetOx = pox; _satPlanetOy = poy;
+        float pwid = Math.Max(1f, px1 - pox), phei = Math.Max(1f, py1 - poy);
+        _satPlanet = RenderToBitmapRegion(ctx, pox, poy, pwid, phei, bdpi, c => SaturnScene.DrawPlanet(c, _sg));
+        _satDisc = RenderToBitmapRegion(ctx, pox, poy, pwid, phei, bdpi, c => SaturnScene.DrawPlanetDisc(c, _sg));
+        _satShade = RenderToBitmapRegion(ctx, pox, poy, pwid, phei, bdpi, c => SaturnScene.DrawPlanetShade(c, _sg));
         // Revolution cues are static apart from their orbit angle, so bake each
         // orbit group flat (no tilt, orbit=0) once and re-revolve the bitmap per
         // frame — same trick as the planet disc, keeps the cues near-free.
@@ -840,6 +853,30 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.BeginDraw();
         ctx.Clear(new Color4(0, 0, 0, 0));
         draw(ctx);
+        ctx.EndDraw();
+        _host!.SetDefaultTarget();
+        return bmp;
+    }
+
+    /// <summary>Bakes a localized layer into a tight bitmap covering only the DIP rectangle
+    /// (ox,oy,wDip,hDip) instead of the full window: the draw is translated by (-ox,-oy) so
+    /// absolute-coordinate scene drawing lands inside the sub-bitmap. Callers place it back
+    /// with a matching +(ox,oy) translation at draw time. Saves VRAM/commit for layers (the
+    /// planet) that cover only a small fraction of the near-fullscreen Saturn window.</summary>
+    private ID2D1Bitmap1 RenderToBitmapRegion(ID2D1DeviceContext ctx, float ox, float oy, float wDip, float hDip, float dpi, Action<ID2D1DeviceContext> draw)
+    {
+        int pw = Math.Max(1, (int)Math.Ceiling(wDip * _dpi));
+        int ph = Math.Max(1, (int)Math.Ceiling(hDip * _dpi));
+        var props = new BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied),
+            dpi, dpi, BitmapOptions.Target);
+        var bmp = ctx.CreateBitmap(new Vortice.Mathematics.SizeI(pw, ph), IntPtr.Zero, 0, props);
+        ctx.Target = bmp;
+        ctx.BeginDraw();
+        ctx.Clear(new Color4(0, 0, 0, 0));
+        ctx.Transform = System.Numerics.Matrix3x2.CreateTranslation(-ox, -oy);
+        draw(ctx);
+        ctx.Transform = System.Numerics.Matrix3x2.Identity;
         ctx.EndDraw();
         _host!.SetDefaultTarget();
         return bmp;
@@ -1239,18 +1276,23 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
 
             // Centre planet: full size, full opacity, drawn over the rings (parity with
             // WPF, where the planet is added to PanelCanvas after the ring layers).
-            ctx.Transform = System.Numerics.Matrix3x2.Identity;
+            // Planet/disc/shade are sub-region bitmaps; place each at its baked offset via a
+            // translation (the disc additionally rotates about the absolute centre, so the spin
+            // is identical to the old full-window bake).
+            var planetTf = System.Numerics.Matrix3x2.CreateTranslation(_satPlanetOx, _satPlanetOy);
+            ctx.Transform = planetTf;
             if (_satPlanet != null)
                 ctx.DrawBitmap(_satPlanet, 1f, InterpolationMode.Linear);
             if (_satDisc != null)
             {
-                ctx.Transform = System.Numerics.Matrix3x2.CreateRotation(
+                ctx.Transform = planetTf * System.Numerics.Matrix3x2.CreateRotation(
                     (float)(_spinAngle * Math.PI / 180.0), cen);
                 ctx.DrawBitmap(_satDisc, 1f, InterpolationMode.Linear);
             }
-            ctx.Transform = System.Numerics.Matrix3x2.Identity;
+            ctx.Transform = planetTf;
             if (_satShade != null)
                 ctx.DrawBitmap(_satShade, 1f, InterpolationMode.Linear);
+            ctx.Transform = System.Numerics.Matrix3x2.Identity;
             SaturnScene.DrawTwinkle(ctx, _sg, _saturnTime);
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
         }

@@ -80,6 +80,8 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **土星缓存按子区域烘焙(planet/disc/shade,省 ~45MB VRAM/提交)**:土星主题主dock 显示时 `BuildSaturnCache` 烘焙 **8 张全窗** RGBA 位图——土星窗口被钳到近全屏(~2496×1664 → 每张 ~15.8MB,共 ~126MB)。其中 `_satPlanet`(暖色 glow halo，≤1.4×PlanetR)、`_satDisc`、`_satShade`（≤PlanetR）三层只覆盖中央行星一小块（PlanetR≈103 DIP），却按全窗烘焙、绝大部分是透明像素。**优化**：新增 `RenderToBitmapRegion(ox,oy,wDip,hDip,…)`，把这三层烘焙到**行星中心的子区域**（1.5×PlanetR 余量 > 1.4× glow，clamp 到窗口），烘焙时 `Transform=Translation(-ox,-oy)` 让绝对坐标场景落进子图；绘制时用 `Translation(ox,oy)` 放回原位，disc 仍 `Translation(offset) * Rotation(spin, cen)` 绕**绝对中心**旋转，自旋/明暗完全不变。每张 15.8→0.8MB，**省 ~45MB**。环层/背景星空仍全窗（倾斜椭圆带宽 + 星空铺满，无安全子区域，保守不动）。验证：土星主题行星本体/旋转盘/辉光/阴影渲染正常、无裁切/错位。
+
 - **GPU 双 dock 帧率达刷新率 + 消除 GC 卡顿（渲染线程改默认 + GC 低延迟 + 火焰零分配 + 绘制序缓存）**：在「独立渲染线程」基础设施（见下条）之上，本轮把它**改为默认开启**并修掉稳态周期性卡顿，使两 dock 稳定贴合显示刷新率。
   - **①渲染线程默认开**：`MainDockWindowGpu` + `SideDockWindowGpu` 的 `UseRenderThread` 由 `== "1"`（默认关）改为 `!= "0"`（默认开，仅 `POLARIS_GPU_RENDERTHREAD=0` 退回旧 FrameClock 路径），与 `POLARIS_GPU_MAINDOCK=0` 等退回开关惯例一致。实测渲染线程路径稳态 59-60fps / 32ms，UI 线程 FrameClock 封顶 ~38-53fps。
   - **②GC SustainedLowLatency（消除 gen2 卡顿）**：诊断（`POLARIS_GPUFPS`）发现 GC 堆仅 2-17MB，但 80s 交互内触发 ~26 次 gen2，且**每次 worst-gap 尖峰（203-328ms）都精确落在一次 gen2 上**——每帧画刷/渐变/几何 COM 对象 churn 把对象提升到 gen2，触发频繁阻塞式 gen2 回收。修复：新增 `Services/Gpu/RenderGcScope.cs`（引用计数协调器），任一 dock 活跃渲染时把 `GCSettings.LatencyMode` 设为 `SustainedLowLatency` **推迟** gen2，最后一个 dock 空闲时还原（隐藏托盘态仍正常回收）。`StartDriver`/`StopDriver` 各 Enter/Leave 一次、`_gcActive` 配平。实测稳态悬停 gen2 26→11，长段保持 60fps/32ms 平直。
