@@ -16,6 +16,13 @@
 
 ## ⚠️ 调查结论 / 已知限制
 
+### 帧稳定性深化：召唤 hitch 不在土星 rebake；残留卡顿主要是过渡资源构建 + iGPU 活跃帧（均偏固有）
+- **背景**：稳态已 60fps（见性能优化节「独立渲染线程」）。用 `POLARIS_GPUFPS=1` 进一步排查残留卡顿。
+- **实测**：worst_gap 集中在两处：①**过渡一次性 300-900ms**（side dock 实测 891ms，接近 `CompositionHost.WaitForVBlank` 的 1000ms 超时——首个重土星帧 / 主题切换 rebuild 把合成器/渲染线程堵住：host dispose+recreate + 资源构建跑在渲染线程上）；②**双 dock 土星活跃期 47-78ms**（iGPU 渲染 2 个复杂土星 dock 偶尔 >16ms，硬件容量）。GC 非主因（这些 gap 期间 gen2 稳定不涨、托管堆仅 ~17MB，全是原生 GPU）。
+- **失败实验（已回退）**：把主 dock `Summon` 的 `Rebuild()` 换成保活 host+缓存的 `RelayoutForSummon()`（仿闪烁修复那套），想免掉每次召唤的土星 8 图层 rebake。结果：**召唤未变顺 + 土星「环展开」动画异常**。说明：召唤 hitch 不在土星 rebake（子区域优化后 bake 已很小），且 `Summon` 的 host 重建与环展开动画初始状态有隐式耦合，不能简单跳过——故保留原 `Rebuild()`。
+- **已做安全优化**：`SaturnScene.DrawTwinkle`/`DrawStarfieldBase` 改为复用单个画刷（~45 brush/帧 → 1，commit 23db865，视觉不变）。
+- **结论 / 已知限制**：在**不简化土星视觉、不冒核心召唤路径回归风险**的前提下，安全的帧稳定性优化空间已基本用尽。残留卡顿（过渡资源构建 + iGPU 活跃容量）偏固有；进一步需把过渡期的 GPU 资源构建**异步化/分帧**（较大改造、有复杂度风险）或换更强 GPU。
+
 ### DWM 缩略图预览填充：必须「整窗渲染 + DwmQueryThumbnailSourceSize 比例」才能无黑边
 - **背景**：悬停预览用 DWM Thumbnail，缩略图四周/单边出现黑带。DWM 始终**保持源比例居中**（不拉伸），
   所以单边黑带 = tile 比例 ≠ 实际渲染内容比例。
