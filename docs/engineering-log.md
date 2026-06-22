@@ -118,6 +118,12 @@
 
 ## 🐛 BUG 修复
 
+- **点击悬停预览无法前置提权（高完整性）窗口（任务管理器 / 管理员终端）**：
+  - **现象**：经 explorer.exe 启动的**中完整性** Polaris，点击悬停预览图无法把**提权（High 完整性）窗口**（任务管理器、管理员 Windows Terminal 等）前置；普通（中完整性）窗口正常。激活代码 `RunningAppTracker.ActivateWindow` 为 WPF/GPU dock 共享。
+  - **根因**：`ForceForeground` 用 `AttachThreadInput + SetForegroundWindow`，但**跨完整性的 `AttachThreadInput` 失败、`SetForegroundWindow` 被 UIPI 拒绝**——中完整性进程无法前置高完整性窗口。真任务栏能做是因为 explorer 是注册 shell、有特权。
+  - **修复**：`ForceForeground` 末尾增加 `SwitchToThisWindow(h, true)`（Alt+Tab 任务切换激活路径）兜底——实测可前置**任务管理器**等多数提权窗口。
+  - **已知限制**：Windows Terminal 的 `CASCADIA_HOSTING_WINDOW_CLASS` 现代窗口对该 API 仍不响应（句柄解析正确，是窗口本身特性）。对**所有**提权窗口的彻底解法是 **UIAccess**（exe 签名 + 装入 Program Files 的正式版）或**提权运行 Polaris**（但会破坏从 Explorer 的 drag-drop）——均非中完整性 dev 构建可做。
+
 - **拖拽桌面图标到主 dock 添加时，dock 被点击外部关闭导致放置目标消失**：`ClickAwayWatcher` 原本在 `WM_LBUTTONDOWN` 落在 Polaris 之外时立即触发关闭。而"从桌面/资源管理器拖快捷方式到主 dock 添加"（`RadialWindow.Interaction.cs` 的 `OnDropPanel`，外部 OLE 拖放）的**起始按下就在 Polaris 之外**，于是双 dock 在拖放还没完成时就被关闭，放置目标消失、无法添加。修复：把关闭判定从"按下"**推迟到"抬起"**，且**仅当按下到抬起的位移在系统拖拽阈值（`SM_CXDRAG/SM_CYDRAG`）以内（即一次点击）才关闭**；位移超过阈值（即拖拽）则不关闭，使 dock 在整个拖拽过程中保持为有效放置目标。普通空白处单击仍正常关闭；dock 内部图标拖拽（按下在 Polaris 上）本就不触发，不受影响。
 
 - **GPU 双 dock 新消息红点显示在左下角（应在右上角）且略大**：

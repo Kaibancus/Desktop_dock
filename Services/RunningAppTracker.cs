@@ -41,6 +41,9 @@ public static class RunningAppTracker
     private static extern bool BringWindowToTop(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+
+    [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
@@ -636,6 +639,14 @@ public static class RunningAppTracker
             if (attachedFg)
                 AttachThreadInput(thisThread, fgThread, false);
         }
+
+        // Last-ditch fallback for windows SetForegroundWindow won't pull forward
+        // (the foreground lock, or an elevated/high-integrity target like an admin
+        // terminal or Task Manager that UIPI blocks a medium-integrity dock from
+        // foregrounding): the task-switcher (Alt+Tab) activation path. It may still
+        // be refused for a higher-integrity window, but costs nothing to try.
+        if (GetForegroundWindow() != h)
+            SwitchToThisWindow(h, true);
     }
 
     /// <summary>
