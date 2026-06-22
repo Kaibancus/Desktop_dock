@@ -106,6 +106,11 @@
 
 ## 🐛 BUG 修复
 
+- **双 dock 打开时拖拽侧 dock 图标后主 dock 闪烁**：
+  - **现象**：两个 dock 同时打开时，鼠标拖拽侧 dock 图标（重排/增删）放下后，主 dock 会闪一下。
+  - **根因**：侧 dock 改动 resident 集后经 `MainDockChanged`（300ms 防抖）通知宿主，宿主调用主 dock 的 `RefreshFromConfig()`，而它**无条件 `Rebuild()`**——Rebuild 销毁并重建窗口/GPU 宿主，使 DComp 内容空白一帧 → 闪烁。（侧 dock 反方向的 `RefreshFromConfig` 早已用 `RelayoutInPlace` 原地重排不闪。）
+  - **修复**：主 dock `RefreshFromConfig` 在**显示态改用 `RelayoutInPlace()`**（原地重排、保留窗口/宿主、仅 resize 交换链，不空白 DComp），与侧 dock `RefreshFromConfigCore` 对齐；隐藏态仍 `Rebuild()`（本就不闪，且避免在不可见窗口上唤醒渲染循环）。`RelayoutInPlace` 在宿主丢失时自动回退 `Rebuild`。
+
 - **土星侧 Dock 黑色背景与黑色火焰叠加处变深**：
   - **现象**：土星侧 Dock 把 slab 背景与「黑色火焰」舌头设为同一透明度后，两者**重叠的根部区域颜色更深**，
     形成一道比周围深的接缝。
@@ -113,6 +118,7 @@
     半透明 `SourceOver` 填充，重叠区 alpha 叠成 `a·(2−a)` → 比非重叠区深。
   - **修复**：把 slab 圆角矩形与（裁剪后的）火焰**几何并集（`CombineWithGeometry` Union）成一个几何体，
     只 `FillGeometry` 一次**。单次填充 = 全区均匀 alpha，重叠区不再双重变暗，且仍只羽化一次保持融合外观。
+    （注：该并集每帧分配 ~6 个 COM 几何对象引发 gen2 卡顿，后在「火焰零分配羽化」优化中改为不透明填充 + 一次性 opacity 图层，见性能优化节顶部。）
 
 - **主 Dock 悬停名字标签初次显示模糊**：
   - **现象**：主 Dock 悬停图标弹出的名字标签，在图标放大动画过程中显示发虚/模糊，定住后才清晰。

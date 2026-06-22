@@ -3126,11 +3126,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         catch (Exception ex) { Log.Warn("MainDockGpu", "realize failed: " + ex); }
     }
 
-    /// <summary>Re-read config / running state and rebuild the layout in place.</summary>
+    /// <summary>Re-read config / running state and refresh the layout. While the dock is
+    /// shown this relayouts IN PLACE (no window/host teardown) so a side-dock resident change
+    /// does not make the main dock flash — a full <see cref="Rebuild"/> blanks the DComp
+    /// content for a frame, which the user saw as a flicker when dragging a side-dock icon
+    /// with both docks open. Mirrors the side dock's RefreshFromConfigCore. While hidden a
+    /// plain Rebuild is used (no flash anyway, and the next Summon rebuilds regardless), which
+    /// also avoids waking the render loop on an invisible window.</summary>
     public void RefreshFromConfig()
     {
         if (!_realized) return;
-        Rebuild();
+        if (_shown) RelayoutInPlace();   // live: in-place, no DComp blank/flash
+        else Rebuild();                  // hidden: unchanged behavior, no flash
     }
 
     public void ShowPanel() => Summon(pinned: false);
