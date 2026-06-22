@@ -563,7 +563,12 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
             bodyCrossLen = (colCenterCross - bodyCross) + gIcon / 2.0 + glassPad;
         }
         _trayRadius = (float)(iconSize * uiScale * 0.42);
-        _opacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
+        // Saturn black is remapped denser (50% slider ≈ old 30%); liquid glass keeps
+        // the plain 1 − transparency. _saturn is assigned later (≈l.639), so resolve
+        // the theme directly here.
+        _opacity = ThemeRegistry.Get(_config.Settings.Theme).IsSaturn
+            ? DockTuning.SaturnPanelOpacity(_config.Settings.PanelTransparency)
+            : (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0));
         _frost = (float)GlassChrome.FrostStrengthFor(_config.Settings.PanelTransparency);
 
         _winX = _side switch
@@ -1418,17 +1423,18 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     /// returned blur and disposes both handles after EndDraw.</summary>
     private (ID2D1CommandList src, Vortice.Direct2D1.Effects.GaussianBlur blur) PrepareSaturnSilhouette(ID2D1DeviceContext ctx)
     {
+        // Slab + flame share ONE panel alpha. The flame's root deliberately overlaps
+        // the slab (so the single feather blur fuses them into one mass); two separate
+        // SourceOver fills at this alpha would double-darken that overlap to a*(2-a).
+        // Avoid it by UNION-combining the slab with the (clipped) flame into a single
+        // geometry and filling ONCE — one fill = uniform alpha, no overlap darkening,
+        // while the panel transparency still shows through evenly.
         byte a = (byte)Math.Clamp(255f * _opacity, 0f, 255f);
-        // The broad slab reads LIGHTER than the narrow flame at the same alpha (its large
-        // area lets more bright wallpaper show through), so deepen the slab body toward
-        // opaque to match the flame's density (user parity request: background → flame).
-        // The flame tongue keeps the base alpha.
-        byte slabA = (byte)Math.Clamp(255f * Math.Min(1f, _opacity + 0.30f), 0f, 255f);
         var rr = new RoundedRectangle { Rect = new Rect(_sx, _sy, _sw, _sh), RadiusX = _trayRadius, RadiusY = _trayRadius };
         var flame = BuildFlameGeometry(ctx);
 
-        // Keep the flame tongue clear of the slab's rounded ends (WPF clips the tongue
-        // to a main-axis inset rect); the slab itself covers everything below baseEdge.
+        // Keep the flame tongue clear of the slab's rounded ends: clip it to a main-axis
+        // inset rect before the union (the slab covers everything below baseEdge).
         float m0 = _satSlabMain + _trayRadius, m1 = _satSlabMain + _satSlabLen - _trayRadius;
         Rect tongueClip = _side is DockSide.Left or DockSide.Right
             ? new Rect(0f, m0, _winW, Math.Max(0f, m1 - m0))
@@ -1437,14 +1443,30 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         var src = ctx.CreateCommandList();
         ctx.Target = src;
         ctx.BeginDraw();
-        using (var slabBrush = ctx.CreateSolidColorBrush(Col(slabA, 6, 8, 12)))
-            ctx.FillRoundedRectangle(rr, slabBrush);
-        if (flame != null)
+        using (var brush = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12)))
         {
-            using var flameBrush = ctx.CreateSolidColorBrush(Col(a, 6, 8, 12));
-            ctx.PushAxisAlignedClip(tongueClip, AntialiasMode.PerPrimitive);
-            ctx.FillGeometry(flame, flameBrush);
-            ctx.PopAxisAlignedClip();
+            if (flame != null)
+            {
+                using var slabGeo = ctx.Factory.CreateRoundedRectangleGeometry(rr);
+                using var clipGeo = ctx.Factory.CreateRectangleGeometry(tongueClip);
+                using var flameClipped = ctx.Factory.CreatePathGeometry();
+                using (var fs = flameClipped.Open())
+                {
+                    flame.CombineWithGeometry(clipGeo, CombineMode.Intersect, fs);
+                    fs.Close();
+                }
+                using var fused = ctx.Factory.CreatePathGeometry();
+                using (var us = fused.Open())
+                {
+                    slabGeo.CombineWithGeometry(flameClipped, CombineMode.Union, us);
+                    us.Close();
+                }
+                ctx.FillGeometry(fused, brush);
+            }
+            else
+            {
+                ctx.FillRoundedRectangle(rr, brush);
+            }
         }
         ctx.EndDraw();
         src.Close();

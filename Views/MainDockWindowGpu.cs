@@ -726,7 +726,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
             OuterIcon = outerIcon,
             PlanetR = planetR,
             TiltY = RingTiltY,
-            DiscOpacity = (float)(1.0 - Math.Clamp(_config.Settings.PanelTransparency, 0.0, 1.0)),
+            DiscOpacity = DockTuning.SaturnPanelOpacity(_config.Settings.PanelTransparency),
         };
 
         _gIcon = icon;             // base draw size; per-slot size in _slotG
