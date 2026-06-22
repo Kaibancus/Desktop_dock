@@ -1798,13 +1798,13 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
-        // lower-left corner when any of this app's windows is flashing for attention
-        // (parity with RadialIcon's lower-left AttentionBadge and the GPU main dock).
+        // top-right corner when any of this app's windows is flashing for attention
+        // (mirrors the system taskbar's top-right unread badge and the GPU main dock).
         if (s.Running && _flashKeys.Contains(s.IconKey))
         {
             ctx.Transform = wave;
-            float d = Math.Clamp(g * 0.12f, 5f, 10f) * _badgePulse;
-            var bp = new Vector2(cx - half + d * 0.55f, cy + half - d * 0.55f);
+            float d = Math.Clamp(g * 0.10f, 4.5f, 9f) * _badgePulse;
+            var bp = new Vector2(cx + half - d, cy - half + d);
             using (var glow = ctx.CreateSolidColorBrush(Col(0x55, 0xFF, 0x3B, 0x30)))
                 ctx.FillEllipse(new Ellipse(bp, d * 0.78f, d * 0.78f), glow);
             using (var rd = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0x3B, 0x30)))

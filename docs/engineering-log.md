@@ -106,6 +106,11 @@
 
 ## 🐛 BUG 修复
 
+- **GPU 双 dock 新消息红点显示在左下角（应在右上角）且略大**：
+  - **现象**：新消息提醒红点显示在图标**左下角**、略偏大；应在**右上角**（参照系统任务栏未读角标，也是 WPF RadialIcon 的本意）。
+  - **根因**：GPU 主/侧 dock 红点坐标用的是「左下角」公式（主 dock `bx=cx-(half-…), by=cy+(half-…)`；侧 dock `bp=(cx-half+…, cy+half-…)`），而 WPF RadialIcon 的 AttentionBadge 锚定 `Right/Top`（右上角）。GPU 迁移时放到了相反角。尺寸因子 `g*0.12` + 实心光晕也偏大。
+  - **修复**：两个 GPU dock 改右上角——主 dock `bx=cx+(half-d)*scale, by=cy-(half-d)*scale`，侧 dock `bp=(cx+half-d, cy-half+d)`；内缩系数由 `0.55d` 增到 `d` 让红点贴住图标角、不外溢；尺寸因子 `0.12→0.10`、clamp `(5,10)→(4.5,9)` 略缩小。WPF dock 本就在右上角，不动。（验证：对已固定且运行中的 App 经 `FlashWindowEx` 触发 `HSHELL_FLASH`，红点出现在右上角。）
+
 - **双 dock 打开时拖拽侧 dock 图标后主 dock 闪烁**：
   - **现象**：两个 dock 同时打开时，鼠标拖拽侧 dock 图标（重排/增删）放下后，主 dock 会闪一下。
   - **根因**：侧 dock 改动 resident 集后经 `MainDockChanged`（300ms 防抖）通知宿主，宿主调用主 dock 的 `RefreshFromConfig()`，而它**无条件 `Rebuild()`**——Rebuild 销毁并重建窗口/GPU 宿主，使 DComp 内容空白一帧 → 闪烁。（侧 dock 反方向的 `RefreshFromConfig` 早已用 `RelayoutInPlace` 原地重排不闪。）

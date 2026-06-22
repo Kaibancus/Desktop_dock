@@ -123,7 +123,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private bool _anyRunning;             // a glass running icon is present (drives sweep render)
     // New-message attention badges: keys (EffectiveIconSource) of running icons whose
     // windows are flashing for attention, polled off-thread; a small red dot pulses on
-    // each such icon's lower-left corner (parity with RadialIcon.SetAttention).
+    // each such icon's top-right corner (parity with RadialIcon.SetAttention).
     private volatile System.Collections.Generic.HashSet<string> _flashKeys = new();
     private float _badgePulse = 1f;       // attention dot pulse scale (1.0..1.18, 1.4s)
     private long _attnLast;               // last attention poll tick (throttle to ~800ms)
@@ -1640,12 +1640,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         ctx.Transform = baseTf;
 
         // New-message attention dot: a small pulsing red disc hugging the icon's
-        // lower-left corner when any of this app's windows is flashing for attention
-        // (parity with RadialIcon's lower-left AttentionBadge).
+        // top-right corner when any of this app's windows is flashing for attention
+        // (mirrors the system taskbar's top-right unread badge, parity with the WPF
+        // RadialIcon AttentionBadge anchored Right/Top).
         if (s.Running && _flashKeys.Contains(s.IconKey))
         {
-            float d = Math.Clamp(g * 0.12f, 5f, 10f) * _badgePulse * scale;
-            float bx = cx - (half - d * 0.55f) * scale, by = cy + (half - d * 0.55f) * scale;
+            float d = Math.Clamp(g * 0.10f, 4.5f, 9f) * _badgePulse * scale;
+            float bx = cx + (half - d) * scale, by = cy - (half - d) * scale;
             using (var glow = ctx.CreateSolidColorBrush(Col(0x55, 0xFF, 0x3B, 0x30)))
                 ctx.FillEllipse(new Ellipse { Point = new Vector2(bx, by), RadiusX = d * 0.78f, RadiusY = d * 0.78f }, glow);
             using (var dot = ctx.CreateSolidColorBrush(Col(0xFF, 0xFF, 0x3B, 0x30)))
