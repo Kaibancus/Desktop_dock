@@ -39,11 +39,6 @@ public static class RenderProfile
     /// <summary>The active quality tier (read across the app when (re)building).</summary>
     public static QualityTier Tier { get; private set; } = QualityTier.High;
 
-    /// <summary>Raised when the live governor steps the tier down. The app
-    /// re-applies the frame-rate fields; geometry-scaled knobs (Saturn detail,
-    /// cache scale) take effect on the next rebuild / summon.</summary>
-    public static event Action? Changed;
-
     // ---- Per-tier knobs --------------------------------------------------
     // High == the original values, so a High-tier machine sees no change.
 
@@ -145,74 +140,5 @@ public static class RenderProfile
         }
         catch { /* fall through to a safe default */ }
         return 1920.0 * 1080.0;
-    }
-
-    // ---- Live governor ---------------------------------------------------
-
-    private static double _emaMs;
-    private static double _slowSeconds;
-    private static TimeSpan _last = TimeSpan.MinValue;
-    private static bool _watching;
-
-    /// <summary>Starts watching the live frame time. Call when a dock is shown
-    /// and animating; cheap — it only accumulates an EMA off the render tick the
-    /// shown dock is already driving.</summary>
-    public static void BeginWatch()
-    {
-        if (_watching)
-            return;
-        _watching = true;
-        _last = TimeSpan.MinValue;
-        _slowSeconds = 0;
-        CompositionTarget.Rendering += OnRendering;
-    }
-
-    /// <summary>Stops watching the live frame time (call when the dock is
-    /// dismissed) so an idle app pays nothing.</summary>
-    public static void EndWatch()
-    {
-        if (!_watching)
-            return;
-        _watching = false;
-        CompositionTarget.Rendering -= OnRendering;
-    }
-
-    private static void OnRendering(object? sender, EventArgs e)
-    {
-        if (e is not RenderingEventArgs re)
-            return;
-        TimeSpan t = re.RenderingTime;
-        if (_last == TimeSpan.MinValue)
-        {
-            _last = t;
-            return;
-        }
-        if (t == _last)
-            return;
-        double dt = (t - _last).TotalSeconds;
-        _last = t;
-        if (dt <= 0 || dt > 0.5)
-            return;                       // ignore pauses / outliers
-
-        double ms = dt * 1000.0;
-        _emaMs = _emaMs <= 0 ? ms : _emaMs * 0.9 + ms * 0.1;
-
-        // 60 fps == 16.7 ms. Allow headroom: a sustained EMA above 22 ms
-        // (~<45 fps) for ~2 s of shown animation steps the tier down once.
-        if (_emaMs > 22.0)
-        {
-            _slowSeconds += dt;
-            if (_slowSeconds >= 2.0 && Tier != QualityTier.Low)
-            {
-                Tier = (QualityTier)((int)Tier + 1);
-                _emaMs = 0;
-                _slowSeconds = 0;
-                Changed?.Invoke();
-            }
-        }
-        else
-        {
-            _slowSeconds = Math.Max(0, _slowSeconds - dt);
-        }
     }
 }

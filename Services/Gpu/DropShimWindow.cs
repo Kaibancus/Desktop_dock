@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Polaris.Interop;
 
 namespace Polaris.Services.Gpu;
 
@@ -23,7 +24,6 @@ internal sealed class DropShimWindow : IDisposable
     // lpfnWndProc delegate is never collected — a per-instance delegate would dangle when
     // a shim is disposed on dock rebuild and crash the next window created with the class.
     private static readonly Dictionary<IntPtr, DropShimWindow> s_instances = new();
-    private static readonly WndProc s_wndProc = WndProcImpl;
     private static ushort s_atom;
 
     private IntPtr _owner;
@@ -52,23 +52,11 @@ internal sealed class DropShimWindow : IDisposable
 
     private void Create()
     {
-        if (s_atom == 0)
-        {
-            var wc = new WNDCLASSEXW
-            {
-                cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
-                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
-                hInstance = GetModuleHandleW(null),
-                hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),   // standard arrow, not the busy/AppStarting cursor
-                hbrBackground = GetStockObject(BLACK_BRUSH),   // alpha 1 over black ≈ invisible
-                lpszClassName = "PolarisDropShim",
-            };
-            s_atom = RegisterClassExW(ref wc);
-        }
-        _hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            "PolarisDropShim", string.Empty, WS_POPUP,
-            0, 0, 10, 10, IntPtr.Zero, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
+        _hwnd = Win32.CreateWindow("PolarisDropShim",
+            Win32.WS_EX_LAYERED | Win32.WS_EX_TOPMOST | Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_NOACTIVATE,
+            10, 10, s_wndProc, ref s_atom,
+            Win32.LoadCursorW(IntPtr.Zero, Win32.IDC_ARROW),   // standard arrow, not the busy/AppStarting cursor
+            Win32.GetStockObject(Win32.BLACK_BRUSH));          // alpha 1 over black ≈ invisible
         if (_hwnd == IntPtr.Zero)
             return;
         s_instances[_hwnd] = this;
@@ -96,20 +84,20 @@ internal sealed class DropShimWindow : IDisposable
     public void SetBounds(int x, int y, int w, int h)
     {
         if (_hwnd == IntPtr.Zero) return;
-        SetWindowPos(_hwnd, HWND_TOPMOST, x, y, Math.Max(1, w), Math.Max(1, h), SWP_NOACTIVATE);
+        Win32.SetWindowPos(_hwnd, Win32.HWND_TOPMOST, x, y, Math.Max(1, w), Math.Max(1, h), Win32.SWP_NOACTIVATE);
     }
 
     public void Show()
     {
         if (_hwnd == IntPtr.Zero) return;
-        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-        ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        Win32.SetWindowPos(_hwnd, Win32.HWND_TOPMOST, 0, 0, 0, 0, Win32.SWP_NOACTIVATE | Win32.SWP_NOMOVE | Win32.SWP_NOSIZE);
+        Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
     }
 
     public void Hide()
     {
         if (_hwnd != IntPtr.Zero)
-            ShowWindow(_hwnd, SW_HIDE);
+            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
     }
 
     public void Dispose()
@@ -118,7 +106,7 @@ internal sealed class DropShimWindow : IDisposable
         if (_hwnd != IntPtr.Zero)
         {
             s_instances.Remove(_hwnd);
-            DestroyWindow(_hwnd);
+            Win32.DestroyWindow(_hwnd);
             _hwnd = IntPtr.Zero;
         }
     }
@@ -126,7 +114,7 @@ internal sealed class DropShimWindow : IDisposable
     private static IntPtr WndProcImpl(IntPtr h, uint msg, IntPtr w, IntPtr l)
     {
         if (!s_instances.TryGetValue(h, out var self))
-            return DefWindowProcW(h, msg, w, l);
+            return Win32.DefWindowProcW(h, msg, w, l);
         switch (msg)
         {
             case WM_NCHITTEST:
@@ -141,7 +129,7 @@ internal sealed class DropShimWindow : IDisposable
             {
                 int cx = unchecked((short)((long)l & 0xFFFF));
                 int cy = unchecked((short)(((long)l >> 16) & 0xFFFF));
-                if (GetWindowRect(h, out RECT r))
+                if (Win32.GetWindowRect(h, out Win32.RECT r))
                 {
                     var (handled, res) = self._forward(msg, w, r.Left + cx, r.Top + cy);
                     if (handled) return res;
@@ -157,49 +145,21 @@ internal sealed class DropShimWindow : IDisposable
                 return IntPtr.Zero;
             }
         }
-        return DefWindowProcW(h, msg, w, l);
+        return Win32.DefWindowProcW(h, msg, w, l);
     }
 
-    private delegate IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l);
+    private static readonly Win32.WndProc s_wndProc = WndProcImpl;
 
-    private const int WS_EX_LAYERED = 0x00080000, WS_EX_TOPMOST = 0x00000008,
-        WS_EX_TOOLWINDOW = 0x00000080, WS_EX_NOACTIVATE = 0x08000000;
-    private const uint WS_POPUP = 0x80000000;
     private const uint WM_NCHITTEST = 0x0084, WM_MOUSEACTIVATE = 0x0021,
         WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_RBUTTONUP = 0x0205,
         WM_MOUSEMOVE = 0x0200, WM_MOUSEWHEEL = 0x020A, WM_DROPFILES = 0x0233;
-    private const int MA_NOACTIVATE = 3, LWA_ALPHA = 2, SW_SHOWNOACTIVATE = 4, SW_HIDE = 0, BLACK_BRUSH = 4;
-    private static readonly IntPtr HWND_TOPMOST = new(-1);
-    private const uint SWP_NOACTIVATE = 0x0010, SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001;
+    private const int MA_NOACTIVATE = 3, LWA_ALPHA = 2;
 
-    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WNDCLASSEXW
-    {
-        public uint cbSize; public uint style; public IntPtr lpfnWndProc;
-        public int cbClsExtra, cbWndExtra; public IntPtr hInstance, hIcon, hCursor, hbrBackground;
-        public string? lpszMenuName, lpszClassName; public IntPtr hIconSm;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
-    private static readonly IntPtr IDC_ARROW = (IntPtr)32512;
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
-        int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
-    [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] private static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
-    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint flags);
-    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] private static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, int flags);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? name);
-    [DllImport("gdi32.dll")] private static extern IntPtr GetStockObject(int i);
     [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, System.Text.StringBuilder? buf, uint cch);
-    [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out POINT pt);
+    [DllImport("shell32.dll")] private static extern bool DragQueryPoint(IntPtr hDrop, out Win32.POINT pt);
     [DllImport("shell32.dll")] private static extern void DragFinish(IntPtr hDrop);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool ChangeWindowMessageFilterEx(IntPtr hwnd, uint message, uint action, IntPtr pChangeFilterStruct);
 }

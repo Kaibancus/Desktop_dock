@@ -176,12 +176,6 @@ public partial class App : Application
         // machine, re-apply the frame-rate fields so newly created loop
         // animations tick at the throttled rate. Geometry-scaled knobs (Saturn
         // detail, cache scale) are re-read on the next summon's Rebuild.
-        Services.RenderProfile.Changed += () => Dispatcher.Invoke(() =>
-        {
-            ApplyDisplayProfile();
-            _panel?.RefreshFromConfig();
-        });
-
         // Seed the global dock-text multiplier before any dock renders.
         Polaris.Services.FontScale.SetFromPercent(_config.Settings.FontSizePercent);
 

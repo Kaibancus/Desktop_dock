@@ -483,6 +483,13 @@
 
 ## 🔧 重构 / 工程质量
 
+- **共享 GPU 窗口 interop（`Interop/Win32.cs`）+ 删除死代码（−287 行/6 文件）**：
+  - **背景**：4 个 GPU 表面（主 dock、侧 dock、土星凹口时钟、drop shim）各有一份近乎相同的原始 Win32 窗口机制——`WNDCLASSEXW` 结构体、`RegisterClassExW`/`CreateWindowExW`/`DefWindowProcW` 等 P/Invoke、`WS_EX_*`/`SW_*`/`SWP_*` 常量、register-once 模式各 4 份（`WNDCLASSEXW`×5、`POINT`×8、`ShowWindow`×7、`CreateWindowExW`×5…）。
+  - **改动**：新增 `Interop/Win32.cs`（`internal static class Win32`）集中：共享结构体（`POINT`/`RECT`/`WNDCLASSEXW`）、窗口管理 P/Invoke（`ShowWindow`/`SetWindowPos`/`DestroyWindow`/`GetCursorPos`/`GetWindowRect`/`WindowFromPoint`/`Get|SetWindowLongW`/`LoadCursorW`/`GetModuleHandleW`/`GetStockObject` 等）、窗口常量，以及一个可复用的 `CreateWindow(className, exStyle, w, h, proc, ref atom, hCursor, hbrBackground)` 助手（register-once + 创建）。4 个 GPU 窗口改用它：主/侧/notch 用 `WS_EX_NOREDIRECTIONBITMAP` 合成窗口、drop shim 用 `WS_EX_LAYERED` redirected 窗口（OLE 拖放）。两个大 dock 文件用 `using static Polaris.Interop.Win32;` 让调用点零改动，仅删本地重复声明；dock 专属 P/Invoke（`SetWindowRgn`/`SetCapture`/`Drag*`/`EnumDisplaySettings` 等）保留本地。`WNDCLASSEXW` 5→2、`POINT` 8→6。
+  - **删死代码**：`RenderProfile.BeginWatch/EndWatch`（无调用者）及其支撑的整段「实时降质 governor」（`OnRendering` + EMA 字段 + `Changed` 事件 + App 订阅）——该特性自始未接线（`BeginWatch` 从未被调用）。**保留**启动时的静态质量分级（`Detect()`/`Tier`/`LoopFrameRate`/`SaturnDetailFactor` 等仍在用）。
+  - **未动（评估后保留）**：4 个 Vortice 包全在用、WinForms（托盘 `NotifyIcon`）+ WPF（设置窗/弹窗）必需——无可删 NuGet/框架引用；非 GPU-窗口文件（`ClickAwayWatcher`/`TaskbarGuard`/`MonitorLayout` 等）的本地 `POINT`/`RECT` 各为独立内聚单元，合并收益低/字段大小写分歧风险高，保留；`IMainDock`/`ISideDock`/`INotchClock`/`IDragGhost` 单实现接口保留为干净接缝（利于扩展）。
+  - **验证**：`dotnet build` 0 警告 0 错误（顺带消除一个预存 CS8625）；42 单元测试全过;用户实测召唤/notch/外部拖放/重排/预览均正常。
+
 - **删除 WPF 旧版回退 docks,GPU 成为唯一 dock 渲染器(瘦身 33 文件 / 11,247 行)**：
   - **背景**：GPU(DirectComposition + Direct2D)docks 自 v3.0.0 起已是默认且稳定,WPF 版仅作为 `POLARIS_GPU_MAINDOCK/SIDEDOCK=0` 的回退,维护两套实现的视觉对齐成本高。
   - **删除**：WPF 主 dock `RadialWindow.*`(12 分部 + xaml)、WPF 侧 dock `SideDockWindow.*`(10 分部 + xaml)、`RadialIcon`(两 WPF dock 共用);随之孤立的 WPF 专属服务 `DockBounce`、`GlassOrbitLight`、`FpsProfiler`;GPU spike 评估遗留物 `GpuBenchmark`(`POLARIS_GPU_BENCH`)、`GlassPrototypeWindow`(`POLARIS_GLASS_PROTO`)。

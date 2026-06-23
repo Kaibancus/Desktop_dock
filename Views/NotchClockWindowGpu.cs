@@ -1,8 +1,8 @@
 using System;
 using System.Globalization;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using System.Windows.Threading;
+using Polaris.Interop;
 using Polaris.Services;
 using Polaris.Services.Gpu;
 using Vortice.Direct2D1;
@@ -55,10 +55,10 @@ internal sealed class NotchClockWindowGpu : INotchClock
             int pw = (int)Math.Ceiling(WinW * _dpi), ph = (int)Math.Ceiling(WinH * _dpi);
             int x = (int)Math.Round((mon.Left + (mon.Width - WinW) / 2.0) * _dpi);
             int y = (int)Math.Round((atBottom ? mon.Bottom - WinH : mon.Top) * _dpi);
-            SetWindowPos(_hwnd, HWND_TOPMOST, x, y, pw, ph, SWP_NOACTIVATE);
+            Win32.SetWindowPos(_hwnd, Win32.HWND_TOPMOST, x, y, pw, ph, Win32.SWP_NOACTIVATE);
             if (!_visible)
             {
-                ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+                Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
                 _visible = true;
             }
             Render();
@@ -72,7 +72,7 @@ internal sealed class NotchClockWindowGpu : INotchClock
         _timer.Stop();
         if (_visible)
         {
-            ShowWindow(_hwnd, SW_HIDE);
+            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
             _visible = false;
         }
         // Free the GPU device (a full D3D11 device + its driver worker threads) once the
@@ -90,7 +90,7 @@ internal sealed class NotchClockWindowGpu : INotchClock
         _format?.Dispose(); _format = null;
         _dwrite?.Dispose(); _dwrite = null;
         _host?.Dispose(); _host = null;
-        if (_hwnd != IntPtr.Zero) { DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
+        if (_hwnd != IntPtr.Zero) { Win32.DestroyWindow(_hwnd); _hwnd = IntPtr.Zero; }
         _built = false;
     }
 
@@ -207,61 +207,14 @@ internal sealed class NotchClockWindowGpu : INotchClock
         return geo;
     }
 
-    // ---- Raw Win32 NOREDIRECTIONBITMAP window --------------------------------
+    // ---- Raw Win32 NOREDIRECTIONBITMAP window (shared plumbing in Interop/Win32) ----
 
-    private static readonly WndProc s_wndProc = DefWindowProcW;
+    private static readonly Win32.WndProc s_wndProc = Win32.DefWindowProcW;
     private static ushort s_atom;
 
-    private static IntPtr CreateWindow(int w, int h)
-    {
-        if (s_atom == 0)
-        {
-            var wc = new WNDCLASSEXW
-            {
-                cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
-                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
-                hInstance = GetModuleHandleW(null),
-                lpszClassName = "PolarisNotchGpu",
-            };
-            s_atom = RegisterClassExW(ref wc);
-        }
-        return CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            "PolarisNotchGpu", string.Empty, WS_POPUP,
-            0, 0, w, h, IntPtr.Zero, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
-    }
-
-    private delegate IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l);
-    private const int WS_EX_NOREDIRECTIONBITMAP = 0x00200000;
-    private const int WS_EX_TOPMOST = 0x00000008;
-    private const int WS_EX_TRANSPARENT = 0x00000020;
-    private const int WS_EX_TOOLWINDOW = 0x00000080;
-    private const int WS_EX_NOACTIVATE = 0x08000000;
-    private const uint WS_POPUP = 0x80000000;
-    private const int SW_SHOWNOACTIVATE = 4, SW_HIDE = 0;
-    private static readonly IntPtr HWND_TOPMOST = new(-1);
-    private const uint SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WNDCLASSEXW
-    {
-        public uint cbSize; public uint style; public IntPtr lpfnWndProc;
-        public int cbClsExtra; public int cbWndExtra; public IntPtr hInstance;
-        public IntPtr hIcon; public IntPtr hCursor; public IntPtr hbrBackground;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? lpszMenuName;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpszClassName;
-        public IntPtr hIconSm;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW c);
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
-        int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
-    [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int n);
-    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
+    private static IntPtr CreateWindow(int w, int h) => Win32.CreateWindow(
+        "PolarisNotchGpu",
+        Win32.WS_EX_NOREDIRECTIONBITMAP | Win32.WS_EX_TOPMOST | Win32.WS_EX_TRANSPARENT |
+        Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_NOACTIVATE,
+        w, h, s_wndProc, ref s_atom);
 }

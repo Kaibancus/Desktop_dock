@@ -11,6 +11,8 @@ using System.Windows.Threading;
 using Polaris.Models;
 using Polaris.Services;
 using Polaris.Services.Gpu;
+using Polaris.Interop;
+using static Polaris.Interop.Win32;
 using Vortice.Direct2D1;
 using Vortice.DirectWrite;
 using Vortice.Mathematics;
@@ -3531,7 +3533,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     // ---- Raw Win32 NOREDIRECTIONBITMAP window (click-through for Stage A) ----
 
     private static readonly Dictionary<IntPtr, MainDockWindowGpu> s_instances = new();
-    private static readonly WndProc s_wndProc = WndProcImpl;
+    private static readonly Win32.WndProc s_wndProc = WndProcImpl;
     private static ushort s_atom;
 
     private static IntPtr WndProcImpl(IntPtr h, uint m, IntPtr w, IntPtr l)
@@ -3541,81 +3543,19 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         return DefWindowProcW(h, m, w, l);
     }
 
-    private static IntPtr CreateWindow(int w, int h)
-    {
-        if (s_atom == 0)
-        {
-            var wc = new WNDCLASSEXW
-            {
-                cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
-                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(s_wndProc),
-                hInstance = GetModuleHandleW(null),
-                hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),   // else the OS shows the busy/AppStarting cursor over the dock
-                lpszClassName = "PolarisMainDockGpu",
-            };
-            s_atom = RegisterClassExW(ref wc);
-        }
-        // Pure render surface. The composition dock does NOT intercept the empty headroom
-        // with WS_EX_TRANSPARENT — that style is a no-op for a WS_EX_NOREDIRECTIONBITMAP
-        // window (it needs WS_EX_LAYERED to be click-through, which composition can't use).
-        // Instead the visible content is carved out with SetWindowRgn so the transparent
-        // margins are literally NOT part of the window (OS-level passthrough, thread-
-        // independent — the equivalent of the WPF dock's per-pixel-alpha hit-testing), while
-        // the DropShimWindow overlay catches the slab input + external drops.
-        return CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST |
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            "PolarisMainDockGpu", string.Empty, WS_POPUP,
-            0, 0, w, h, IntPtr.Zero, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
-    }
+    // Pure render surface. The composition dock does NOT intercept the empty headroom with
+    // WS_EX_TRANSPARENT — that style is a no-op for a WS_EX_NOREDIRECTIONBITMAP window (it
+    // needs WS_EX_LAYERED to be click-through, which composition can't use). Instead the
+    // visible content is carved out with SetWindowRgn so the transparent margins are literally
+    // NOT part of the window (OS-level passthrough), while the DropShimWindow overlay catches
+    // the slab input + external drops.
+    private static IntPtr CreateWindow(int w, int h) => Win32.CreateWindow(
+        "PolarisMainDockGpu",
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        w, h, s_wndProc, ref s_atom, LoadCursorW(IntPtr.Zero, IDC_ARROW));
 
-    private delegate IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l);
-    private const int WS_EX_NOREDIRECTIONBITMAP = 0x00200000;
-    private const int WS_EX_TOPMOST = 0x00000008;
-    private const int WS_EX_TRANSPARENT = 0x00000020;
-    private const int WS_EX_TOOLWINDOW = 0x00000080;
-    private const int WS_EX_NOACTIVATE = 0x08000000;
-    private const int GWL_EXSTYLE = -20;
-    [DllImport("user32.dll")] private static extern int GetWindowLongW(IntPtr h, int idx);
-    [DllImport("user32.dll")] private static extern int SetWindowLongW(IntPtr h, int idx, int val);
-    private const uint WS_POPUP = 0x80000000;
-    private const int SW_SHOWNOACTIVATE = 4;
-    private static readonly IntPtr HWND_TOPMOST = new(-1);
-    private const uint SWP_NOACTIVATE = 0x0010;
-    private const uint SWP_NOSIZE = 0x0001;
-    private const uint SWP_NOMOVE = 0x0002;
-    private const uint SWP_NOZORDER = 0x0004;
-    private const int SW_HIDE = 0;
-
-    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
-    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WNDCLASSEXW
-    {
-        public uint cbSize; public uint style; public IntPtr lpfnWndProc;
-        public int cbClsExtra; public int cbWndExtra; public IntPtr hInstance;
-        public IntPtr hIcon; public IntPtr hCursor; public IntPtr hbrBackground;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? lpszMenuName;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpszClassName;
-        public IntPtr hIconSm;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEXW c);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
-    private static readonly IntPtr IDC_ARROW = (IntPtr)32512;
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWindowExW(int ex, string cls, string name, uint style,
-        int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
-    [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int n);
-    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string? n);
-    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr h);
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
     [DllImport("shell32.dll")] private static extern void DragAcceptFiles(IntPtr hwnd, bool accept);
