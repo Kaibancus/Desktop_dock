@@ -101,6 +101,11 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **GPU 共享单设备（每窗各建 D3D11/DXGI/D2D 设备 → 全进程共享一套，减内存 + 减线程）**：原 `CompositionHost` 每个实例（主 dock + 侧 dock + 土星 notch 时钟 + drag ghost，3-4 个活跃面）各自 `D3D11CreateDevice` + DXGI factory + D2D device——每个硬件设备各提交一大块驱动地址空间并各起一组驱动 worker 线程。新增 `Services/Gpu/GpuDevice.cs`（线程安全 `Lazy<GpuDevice>` 单例 `GpuDevice.Shared`），全进程共享**一套** `ID3D11Device` + `IDXGIDevice` + `IDXGIFactory2` + `ID2D1Device`（硬件→WARP 回退、进程生命周期常驻、退出由 OS 回收免去拆除时序风险）。`CompositionHost` 改为只持有**每窗私有**资源：swap chain、DComp device/target/visual、`ID2D1DeviceContext` + target bitmap；`Dispose` 只释放这些，不碰共享设备。
+  - **线程安全**：各 dock 在自己的 `RenderLoop` 线程渲染、并发触达共享设备。共享 `ID3D11Device` 标记 `ID3D11Multithread.SetMultithreadProtected(true)`、D2D factory 用 `FactoryType.MultiThreaded`，让 D3D11/D2D 内部串行化并发访问；DComp 设备/上下文仍每窗各建、只在本窗渲染线程使用（线程亲和不变）。
+  - **实测 A/B（同条件 idle，控 P1.1 notch 释放变量，启动后第 9s 取样）**：私有字节 335→301MB（**-34MB**）、线程 125→101（**-24**，合并 2 组驱动 worker 线程池）、句柄 941→915。土星双 dock 召唤时（3 活跃设备 → 1）收益更大。42 单测全过、0 警告。
+  - **已知取舍**：设备丢失（device-lost / TDR）现在会同时影响全部 dock；改动前每窗独立设备本就**无** device-lost 处理，故非回归，后续如加须在 `GpuDevice` 集中重建。
+
 - **土星缓存子区域扩到环层 + 缓存火焰模糊（再省 ~38MB + 减每帧 churn）**：承接上轮 planet 子区域，把主 dock 的 backing/星空、两个静态环、两个 revolution-cue 共 **5 层**也按**环中心子区域**烘焙（半径 `(OuterRadius+OuterIcon)×1.3`；RingTiltY≈0.97 近圆、星空在 r·0.96 内、含 bloom/牧羊犬卫星余量）——每层 ~16→~8MB，再省 ~38MB（土星主 dock 烘焙缓存 ~126MB → ~30MB）。cue 层因自身经 `RevolveXform` 设 `ctx.Transform`，偏移改由 `baseXform=Translation(-环原点)` 传入；绘制时各层 prepend `ringTf`。验证：内外环/Cassini 缝/微光/辐条/牧羊犬卫星/星空/「环展开」动画全部无裁切。**另**：侧 dock 黑色火焰原本每帧 `new GaussianBlur`，改为缓存 `_satBlurEffect`（随 host 销毁），让 D2D 复用模糊中间纹理、减少每帧效果 COM churn，视觉不变。
   - **关键诊断结论**：dotnet-counters 实测 Polaris **托管堆仅 ~17MB**（gen0 3.3 + gen2 2.4 + LOH 0.4…）；土星双 dock 活跃 ~770–900MB 工作集 / ~1GB commit **几乎全是原生 GPU/驱动内存**（3 个独立 D3D11 设备 + 近全屏 swapchain + 复杂逐帧场景 + 烘焙位图），**非托管堆** —— 故 GC / SustainedLowLatency 不是内存瓶颈，土星比 glass 重 ~3-5× 也源于此。idle-trim 会在光标停在 dock 上不动时就 trim，测活跃内存须保持光标移动否则抓到的是 trim 谷值。
 
@@ -131,6 +136,11 @@
   匹配退化为极端兜底。
 
 ## 🐛 BUG 修复
+
+- **拖文件到 dock 添加时：看不到被拖应用图标 + 主 dock 外围一圈「禁止」光标（GPU）**：
+  - **现象**：①拖入时 dock 上看不到被拖应用的图标（OS 的分层拖拽图像不会渲染在置顶合成 dock 之上），原先只画了一个通用蓝色「+」环标记；②主 dock 可见区外围有一圈显示「禁止」(no-drop) 光标的区域。
+  - **根因**：①「+」环标记被光标处的拖拽内容遮挡 / 并非用户想要的反馈——用户要看到**被拖应用本身的图标**；②主 dock 的 `SetWindowRgn` carve 出的窗口 region 含放大/悬停标签余量（玻璃顶部达 `gIcon×3.2`），而 drop shim 只盖到 `slab + gIcon×0.5`，两者**不一致**：中间那圈余量带是置顶 dock 窗口但**没有注册 drop target**，拖拽到那里既无法穿透到桌面、又无人接受 → OS 显示「禁止」。（侧 dock 的 shim 与 region 早已共享 `HitBox()`，无此问题。）
+  - **修复**：①移除「+」环标记（`DrawDragMarker`），改为在落点渲染**被拖应用的真实图标**——`OleDropTarget.DragEnter` 提取首个 `CF_HDROP` 路径经 `OnDragMove(point, iconSrc)` 回调（签名加 `string?`）传给 dock，dock 用既有 `IconExtractor.GetCached`+`GetBitmap` 解析并在落点按 `_gIcon` 尺寸、0.85 不透明度绘制（`DrawDragPreview`）。图标解析全部在渲染线程进行（`_iconCache` 线程亲和不变），UI 线程只写 `_extDragPt`/`_dragIconKey` 标量。②主 dock 提取共享的 `ContentRect()`，让 `SyncShim` 与 `ApplyWindowRegion` **用同一矩形**——drop shim 覆盖与 carve region 完全相同的鼠标实心区，消除「禁止」带；预览判定随之简化（OLE 回调只在 shim 上触发，故任意回调点都是有效落点，去掉 `InDropRegion` 门控）。Shell-namespace 项（This PC 等，无文件路径）不预览图标但仍可正常 drop。两 dock 一致。
 
 - **侧 dock 鼠标边缘召唤时跳动闪烁一下（GPU）**：
   - **现象**：鼠标触发侧 dock 显示时，dock 会先在静止位置闪现一帧再滑入，观感为「跳动闪烁」。
@@ -487,6 +497,12 @@
 - **初始版本**：托盘呼出、可配置触发键、单实例、液态玻璃圆盘、拖入添加、长按固定模式（`d0cbd69`）。
 
 ## 🔧 重构 / 工程质量
+
+- **抽取共享 GPU dock 基类 `GpuDockBase`（消除两 dock 重复的渲染循环/host 生命周期管线）**：
+  - **背景**：`MainDockWindowGpu` 与 `SideDockWindowGpu` 各自持有一份**逐字相同**的渲染线程管线——`UseRenderThread` 开关、`_loop`/`_host`/`_timer`/`_gcActive` 字段，以及 `EnsureLoop`/`RenderThreadFrame`/`StartDriver`/`StopDriver`/`RunOnRender`/`InvokeOnRender`/`OnUi`/`RequestRender` 八个辅助方法。两份副本极易随改动漂移（例如此前 `UseRenderThread` 默认值翻转、`OnUi` 的 dispatcher 差异）。
+  - **改动**：新增 `Views/GpuDockBase.cs`（`internal abstract class GpuDockBase`），集中上述字段 + 八个 `protected` 方法。dock 专属差异收敛为 4 个抽象/虚成员：`RenderThreadName`（线程名）、`UiDispatcher`（主用 `Dispatcher` 属性、侧用 `_dispatcher` 字段）、`Tick()`、`Render()`。两 dock 改为 `: GpuDockBase, …`，各只保留这 4 个 `override`，删除原本的字段/方法副本（调用点零改动，仍以 `protected` 继承访问）。
+  - **行为保持**：纯结构重构，不改任何渲染/线程逻辑（同一套代码迁位）。实测 idle 内存/线程与重构前一致（~301MB / ~100 线程）。
+  - **验证**：`dotnet build -c Release --no-incremental` 0 警告 0 错误；42 单元测试全过；用户实测双 dock 召唤/消散、拖拽重排、玻璃↔土星主题切换、notch 时钟、桌面拖入均无回归。
 
 - **共享 GPU 窗口 interop（`Interop/Win32.cs`）+ 删除死代码（−287 行/6 文件）**：
   - **背景**：4 个 GPU 表面（主 dock、侧 dock、土星凹口时钟、drop shim）各有一份近乎相同的原始 Win32 窗口机制——`WNDCLASSEXW` 结构体、`RegisterClassExW`/`CreateWindowExW`/`DefWindowProcW` 等 P/Invoke、`WS_EX_*`/`SW_*`/`SWP_*` 常量、register-once 模式各 4 份（`WNDCLASSEXW`×5、`POINT`×8、`ShowWindow`×7、`CreateWindowExW`×5…）。

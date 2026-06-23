@@ -25,7 +25,7 @@ namespace Polaris.Views;
 /// continuous magnify wave across both halves and shows the hovered icon's name.
 /// Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px, D2D target
 /// DPI = 96 × scale).</summary>
-internal sealed class SideDockWindowGpu : IDisposable, ISideDock
+internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
 {
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
@@ -60,8 +60,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
     private DropShimWindow? _dropShim; // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;        // independent desktop overlay for the dragged icon
-    private Vector2? _extDragPt;       // window-local point of an in-progress external drag (preview)
-    private CompositionHost? _host;
+    private Vector2? _extDragPt;       // window-local drop point of an in-progress external drag
+    private string? _dragIconKey;      // icon source of the dragged item, previewed at the drop point
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private IDWriteTextFormat? _hoverFormat;   // floating hover name (SemiBold, hover-scaled)
@@ -75,22 +75,18 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float _labelFitFp, _labelFitW;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
-    private Polaris.Services.Gpu.FrameClock? _timer;
     private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
     private DispatcherTimer? _mainDockChangedTimer;   // debounce host main-dock refresh notifications across rapid drags
 
-    // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
-    // Mirrors MainDockWindowGpu: the CompositionHost + Direct2D/DirectComposition device, the
-    // icon/debris caches, the laid-out _slots and all animation/wave state are owned and driven
-    // by a dedicated render thread (RenderLoop) paced to the display refresh rate via the swap
-    // chain's frame-latency waitable object. Default ON; POLARIS_GPU_RENDERTHREAD=0 falls back
-    // to the legacy UI-thread FrameClock path (_loop stays null).
-    private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    private RenderLoop? _loop;
-    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    // Render-thread infrastructure (UseRenderThread, _loop, _host, _timer, _gcActive +
+    // EnsureLoop/StartDriver/StopDriver/RunOnRender/InvokeOnRender/OnUi/RequestRender) lives in
+    // the shared GpuDockBase. The dock's _slots/caches/animation state are owned and driven by
+    // that render thread (or while it is quiesced during rebuild).
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
     private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
+
+    protected override string RenderThreadName => "PolarisSideDockGpu";
+    protected override Dispatcher UiDispatcher => _dispatcher;
     // Guards the interaction scalars written by the UI-thread WndProc and read by the render
     // thread in Tick/Render (drag point, intro animation phase). Layout/_slots/host/device are
     // mutated only on the render thread (or while it is quiesced during rebuild). Held briefly.
@@ -750,24 +746,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
     }
 
-    /// <summary>Lazily creates the dedicated render thread (frame callback paces to the display
-    /// vblank then runs <see cref="Tick"/> lock-free). The old whole-frame lock guaranteed a
-    /// coherent read of UI-written scalars, but it also let a 144Hz render loop block hot
-    /// input paths for a whole frame. We now accept a transient cross-frame read on those
-    /// scalar inputs instead; the device/layout state is still render-thread-owned.</summary>
-    private void EnsureLoop()
-    {
-        _loop ??= new RenderLoop("PolarisSideDockGpu", RenderThreadFrame);
-    }
-
-    /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate paced),
-    /// then advance + draw lock-free so UI-thread input never waits for a full render frame.</summary>
-    private void RenderThreadFrame()
-    {
-        _host?.WaitForVBlank();
-        Tick();
-    }
-
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, icon +
     /// debris caches). MUST run on the render thread (it owns the device).</summary>
     private void DisposeHostResources()
@@ -781,53 +759,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;
         _dwrite?.Dispose(); _dwrite = null;
         _host?.Dispose(); _host = null;
-    }
-
-    /// <summary>Resume per-frame rendering: the render loop or the UI-thread FrameClock.</summary>
-    private void StartDriver()
-    {
-        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
-        if (UseRenderThread) _loop?.SetActive(true);
-        else _timer?.Start();
-    }
-
-    /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
-    private void StopDriver()
-    {
-        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
-        if (UseRenderThread) _loop?.SetActive(false);
-        else _timer?.Stop();
-    }
-
-    /// <summary>Runs <paramref name="a"/> where the GPU device lives (render thread on the
-    /// render-thread path, inline otherwise).</summary>
-    private void RunOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Post(a);
-        else a();
-    }
-
-    /// <summary>Runs <paramref name="a"/> on the render thread and waits (ordering-critical
-    /// device work, e.g. host teardown before the HWND is destroyed); inline otherwise.</summary>
-    private void InvokeOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Invoke(a);
-        else a();
-    }
-
-    /// <summary>Marshals a UI-thread-only operation (Win32 on UI-owned windows, WPF popups) to
-    /// the Dispatcher when called from the render thread; inline on the default path.</summary>
-    private void OnUi(Action a)
-    {
-        if (UseRenderThread) _dispatcher.BeginInvoke(a);
-        else a();
-    }
-
-    /// <summary>Requests a repaint after a UI-thread interaction. Synchronous on the default
-    /// path; on the render-thread path the active loop already redraws every frame.</summary>
-    private void RequestRender()
-    {
-        if (!UseRenderThread) Render();
     }
 
     // ---- External drag-in (drop shim) + drag-out ghost (parity with the main dock) ----
@@ -928,14 +859,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         catch (Exception ex) { Log.Warn("SideDockGpu", "ApplyWindowRegion failed: " + ex.Message); }
     }
 
-    /// <summary>True when a window-local DIP point is within the slab box (plus icon margin)
-    /// where an OLE drop actually registers.</summary>
-    private bool InDropRegion(float lx, float ly)
-    {
-        float m = _gIcon * 0.5f;
-        return lx >= _sx - m && lx <= _sx + _sw + m && ly >= _sy - m && ly <= _sy + _sh + m;
-    }
-
     /// <summary>Lifts the icon at <paramref name="idx"/> into an independent topmost desktop
     /// overlay pinned to the cursor, so the dragged icon roams the whole desktop and never
     /// clips at the narrow side-dock window's edge (parity with the main dock / WPF).</summary>
@@ -988,38 +911,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _ghost = null;
     }
 
-    /// <summary>Called continuously while an external file/shell drag hovers the dock (null on
-    /// leave/drop). Tracks the window-local cursor point so the render draws a drag-follow
-    /// marker where a drop will register.</summary>
-    private void OnExternalDragMove((int x, int y)? screenPt)
-    {
-        if (screenPt is { } p)
-        {
-            float lx = (float)(p.x / _dpi - _winX);
-            float ly = (float)(p.y / _dpi - _winY);
-            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
-        }
-        else
-            _extDragPt = null;
-        try { RequestRender(); } catch { }
-    }
-
-    /// <summary>Soft ring + plus drawn at the cursor while an external drag hovers the slab.</summary>
-    private void DrawDragMarker(ID2D1DeviceContext ctx, Vector2 p)
-    {
-        float r = _gIcon * 0.42f;
-        using (var fill = ctx.CreateSolidColorBrush(Col(0x33, 0x5A, 0xC8, 0xFF)))
-            ctx.FillEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, fill);
-        using (var ring = ctx.CreateSolidColorBrush(Col(0xCC, 0x8F, 0xD6, 0xFF)))
-            ctx.DrawEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, ring, 2f);
-        using (var plus = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
-        {
-            float a = r * 0.5f;
-            ctx.DrawLine(new Vector2(p.X - a, p.Y), new Vector2(p.X + a, p.Y), plus, 2.4f);
-            ctx.DrawLine(new Vector2(p.X, p.Y - a), new Vector2(p.X, p.Y + a), plus, 2.4f);
-        }
-    }
-
     [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
 
@@ -1064,7 +955,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         return lx >= l && lx <= r && ly >= t && ly <= b;
     }
 
-    private void Tick()
+    protected override void Tick()
     {
         if (_host == null)
             return;
@@ -1629,7 +1520,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         return new Vector2(x, y);
     }
 
-    private void Render()
+    protected override void Render()
     {
         if (_host == null)
             return;
@@ -1710,9 +1601,8 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // Side dock icons intentionally show NO floating name label (parity request:
         // names only on the main dock). The hover-fade bookkeeping still runs so the
         // preview popup logic is unaffected; we simply don't draw the name here.
-        // External drag-follow marker (parity with the main dock's live drop feedback).
-        if (_extDragPt is { } dp)
-            DrawDragMarker(ctx, dp);
+        if (_extDragPt is { } dp && _dragIconKey != null)
+            DrawDragPreview(ctx, dp);
         ctx.EndDraw();
         _host.Present();
         satSrc?.Dispose();   // the cached _satBlurEffect is reused (disposed with the host)
@@ -2886,8 +2776,44 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         // Screen pixels → window-local DIPs.
         float lx = (float)(screenX / _dpi - _winX);
         float ly = (float)(screenY / _dpi - _winY);
+        _extDragPt = null; _dragIconKey = null;   // drag finished — clear the preview
         _dispatcher.BeginInvoke(new Action(() => InsertDroppedEntries(entries, lx, ly)),
             System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    /// <summary>Called while an external file/shell drag hovers the dock (null on leave/drop)
+    /// with the SCREEN point and the first dragged file's icon source. Tracks the window-local
+    /// drop point and the icon to preview at it.</summary>
+    private void OnExternalDragMove((int x, int y)? screenPt, string? iconSrc)
+    {
+        if (screenPt is { } p)
+        {
+            // The OLE callback fires only while the cursor is over the drop shim (== the
+            // mouse-solid dock box), so any reported point is a valid drop spot.
+            _extDragPt = new Vector2((float)(p.x / _dpi - _winX), (float)(p.y / _dpi - _winY));
+            if (iconSrc != null) _dragIconKey = iconSrc;
+        }
+        else { _extDragPt = null; _dragIconKey = null; }
+        try { RequestRender(); } catch { }
+    }
+
+    /// <summary>Previews the dragged item's icon at the drop point while an external drag
+    /// hovers the dock — the OS drag image isn't rendered over the topmost composition window.</summary>
+    private void DrawDragPreview(ID2D1DeviceContext ctx, Vector2 p)
+    {
+        var key = _dragIconKey;
+        if (key == null)
+            return;
+        var bmp = GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache));
+        if (bmp == null)
+            return;
+        float g = _gIcon, half = g / 2f;
+        var bs = bmp.Size;
+        var baseTf = ctx.Transform;
+        ctx.Transform = Matrix3x2.CreateScale(g / Math.Max(1f, bs.Width), g / Math.Max(1f, bs.Height))
+                      * Matrix3x2.CreateTranslation(p.X - half, p.Y - half) * baseTf;
+        ctx.DrawBitmap(bmp, 0.85f, InterpolationMode.HighQualityCubic);
+        ctx.Transform = baseTf;
     }
 
     /// <summary>Shared drop core: pins each resolved entry into the resident column at

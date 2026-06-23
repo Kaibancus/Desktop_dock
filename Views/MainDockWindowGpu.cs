@@ -27,7 +27,7 @@ namespace Polaris.Views;
 /// falloff, focal anchoring + neighbour spread) and a floating hover name label below the
 /// focal icon. Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px,
 /// D2D target DPI = 96 × scale).</summary>
-internal sealed class MainDockWindowGpu : IMainDock, IDisposable
+internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 {
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
     // for glass; glyphs drawn at icon*GlassIconScale).
@@ -44,22 +44,15 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private IntPtr _hwnd;
     private DropShimWindow? _dropShim;   // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;           // independent desktop overlay for the dragged icon
-    private Vector2? _extDragPt;          // window-local point of an in-progress external drag (preview)
-    private CompositionHost? _host;
+    private Vector2? _extDragPt;          // window-local drop point of an in-progress external drag
+    private string? _dragIconKey;         // icon source of the dragged item, previewed at the drop point
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
-    // ---- Independent render thread (default ON; POLARIS_GPU_RENDERTHREAD=0 to opt out) ----
-    // The dock's CompositionHost + Direct2D/DirectComposition device, the icon/Saturn caches,
-    // the laid-out _slots and all animation/wave state are owned and driven by a dedicated
-    // render thread (RenderLoop) paced to the display refresh rate via the swap chain's
-    // frame-latency waitable object — reaching the true refresh rate (60/120/144Hz) and
-    // freeing the UI thread for input. Measured 59-60fps steady vs the UI-thread FrameClock's
-    // ~38-53fps cap. Set POLARIS_GPU_RENDERTHREAD=0 to fall back to the legacy FrameClock path.
-    private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    private RenderLoop? _loop;
-    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    // Render-thread infrastructure (UseRenderThread, _loop, _host, _timer, _gcActive +
+    // EnsureLoop/StartDriver/StopDriver/RunOnRender/InvokeOnRender/OnUi/RequestRender) lives in
+    // the shared GpuDockBase. The dock's _slots/caches/animation state are owned and driven by
+    // that render thread (or while it is quiesced during rebuild).
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
     private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
     // Guards the interaction scalars written by the UI-thread WndProc and read by the
@@ -87,7 +80,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private readonly List<IconSlot> _slots = new();
 
     // ---- Stage B magnify wave state ----
-    private Polaris.Services.Gpu.FrameClock? _timer;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private float _labelFontPx = 13f;
@@ -242,6 +234,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     public Action<bool>? GlassDragActiveChanged { get; set; }
     public Dispatcher Dispatcher { get; } = Dispatcher.CurrentDispatcher;
     public bool IsShown => _shown;
+
+    protected override string RenderThreadName => "PolarisMainDockGpu";
+    protected override Dispatcher UiDispatcher => Dispatcher;
 
     private readonly struct IconSlot
     {
@@ -588,27 +583,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
     }
 
-    /// <summary>Lazily creates the dedicated render thread. Its per-frame callback paces to
-    /// the display vblank then runs <see cref="Tick"/> (advance animation + render + present)
-    /// lock-free. The old whole-frame <c>lock(_stateLock)</c> kept the render thread at 144Hz,
-    /// but also made hot UI input paths contend with an entire frame's worth of work — exactly
-    /// the kind of hidden "input feels sticky even though fps is high" problem we saw on the
-    /// high-refresh machine. The lock is now reserved only for rare UI-side multi-field state
-    /// transitions; drag/move input is scalar and can tolerate a transient cross-frame read.</summary>
-    private void EnsureLoop()
-    {
-        _loop ??= new RenderLoop("PolarisMainDockGpu", RenderThreadFrame);
-    }
-
-    /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate
-    /// paced), then advance + draw. Runs lock-free so UI-thread input never waits for a whole
-    /// frame of GPU-dock work.</summary>
-    private void RenderThreadFrame()
-    {
-        _host?.WaitForVBlank();
-        Tick();
-    }
-
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, Saturn
     /// + icon bitmap caches). MUST run on the render thread (it owns the device); the caller
     /// quiesces the loop and Invokes this before the UI thread destroys the HWND.</summary>
@@ -621,57 +595,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _dwrite?.Dispose(); _dwrite = null;
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
-    }
-
-    /// <summary>Resume per-frame rendering: the render loop on the render-thread path, or
-    /// the UI-thread FrameClock otherwise.</summary>
-    private void StartDriver()
-    {
-        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
-        if (UseRenderThread) _loop?.SetActive(true);
-        else _timer?.Start();
-    }
-
-    /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
-    private void StopDriver()
-    {
-        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
-        if (UseRenderThread) _loop?.SetActive(false);
-        else _timer?.Stop();
-    }
-
-    /// <summary>Runs <paramref name="a"/> where the GPU device lives: posted to the render
-    /// thread (fire-and-forget, FIFO) on the render-thread path, inline otherwise.</summary>
-    private void RunOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Post(a);
-        else a();
-    }
-
-    /// <summary>Runs <paramref name="a"/> on the render thread and waits (ordering-critical
-    /// device work, e.g. host teardown before the HWND is destroyed); inline otherwise.</summary>
-    private void InvokeOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Invoke(a);
-        else a();
-    }
-
-    /// <summary>Marshals a UI-thread-only operation (Win32 on UI-owned windows, WPF popups)
-    /// to the Dispatcher when called from the render thread; runs inline on the default path
-    /// (already on the UI thread).</summary>
-    private void OnUi(Action a)
-    {
-        if (UseRenderThread) Dispatcher.BeginInvoke(a);
-        else a();
-    }
-
-    /// <summary>Requests a repaint after a UI-thread interaction (drag/scroll). On the
-    /// default path it renders synchronously; on the render-thread path the active loop
-    /// already redraws every frame, so the state change is picked up on the next vblank
-    /// (sub-frame latency) and no UI-thread device access is needed.</summary>
-    private void RequestRender()
-    {
-        if (!UseRenderThread) Render();
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -916,7 +839,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// <summary>16 ms cursor poll: feeds the live pointer into the 2-D magnify wave,
     /// updates per-icon scale + neighbour-spread offsets, tracks the focal (hovered)
     /// icon, and re-renders while anything is in motion.</summary>
-    private void Tick()
+    protected override void Tick()
     {
         if (_host == null || _slots.Count == 0)
             return;
@@ -1204,7 +1127,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         });
     }
 
-    private void Render()
+    protected override void Render()
     {
         if (_host == null)
             return;
@@ -1389,11 +1312,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (!_saturn && _scrollable)
             DrawScrollBar(ctx);
 
-        // External drag-follow marker: a soft ring + plus at the cursor while a file/shell
-        // item is being dragged over the dock, so the drop point is visible (parity with the
-        // WPF dock's live drag feedback; WM_DROPFILES gave no such feedback).
-        if (_extDragPt is { } dp)
-            DrawDragMarker(ctx, dp);
+        // Preview the dragged item's icon at the drop point while an external drag hovers the
+        // dock (the OS drag image isn't shown over the topmost composition window).
+        if (_extDragPt is { } dp && _dragIconKey != null)
+            DrawDragPreview(ctx, dp);
 
         if (slid || stretching)
             ctx.Transform = System.Numerics.Matrix3x2.Identity;
@@ -1783,24 +1705,24 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
     }
 
-    /// <summary>Floating name label centred just below the magnified focal icon
-    /// (mirrors the WPF glass dock's <c>ShowGlassHoverLabel</c>: barely-there dark tint,
-    /// <summary>Draws the external-drag-follow marker at window-local point <paramref
-    /// name="p"/>: a soft translucent disc with a brighter ring and a small plus, so a file
-    /// being dragged from Explorer reads as "drop here" and tracks the cursor.</summary>
-    private void DrawDragMarker(ID2D1DeviceContext ctx, Vector2 p)
+    /// <summary>Previews the dragged item's icon at the drop point while an external drag
+    /// hovers the dock. The OS drag image isn't rendered over the topmost composition window,
+    /// so without this the user sees nothing being dragged in.</summary>
+    private void DrawDragPreview(ID2D1DeviceContext ctx, Vector2 p)
     {
-        float r = _gIcon * 0.42f;
-        using (var fill = ctx.CreateSolidColorBrush(Col(0x33, 0x5A, 0xC8, 0xFF)))
-            ctx.FillEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, fill);
-        using (var ring = ctx.CreateSolidColorBrush(Col(0xCC, 0x8F, 0xD6, 0xFF)))
-            ctx.DrawEllipse(new Ellipse { Point = p, RadiusX = r, RadiusY = r }, ring, 2f);
-        using (var plus = ctx.CreateSolidColorBrush(Col(0xEE, 0xFF, 0xFF, 0xFF)))
-        {
-            float a = r * 0.5f;
-            ctx.DrawLine(new Vector2(p.X - a, p.Y), new Vector2(p.X + a, p.Y), plus, 2.4f);
-            ctx.DrawLine(new Vector2(p.X, p.Y - a), new Vector2(p.X, p.Y + a), plus, 2.4f);
-        }
+        var key = _dragIconKey;
+        if (key == null)
+            return;
+        var bmp = GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache));
+        if (bmp == null)
+            return;
+        float g = _gIcon, half = g / 2f;
+        var bs = bmp.Size;
+        var baseTf = ctx.Transform;
+        ctx.Transform = Matrix3x2.CreateScale(g / Math.Max(1f, bs.Width), g / Math.Max(1f, bs.Height))
+                      * Matrix3x2.CreateTranslation(p.X - half, p.Y - half) * baseTf;
+        ctx.DrawBitmap(bmp, 0.85f, InterpolationMode.HighQualityCubic);
+        ctx.Transform = baseTf;
     }
 
     /// <summary>Floating name label centred just below the magnified focal icon
@@ -2113,18 +2035,32 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private void SyncShim()
     {
         if (_dropShim == null) return;
-        float m = _gIcon * 0.5f;
-        float bottomM = _saturn ? m : Math.Min(m, _effIcon * 0.12f);
-        float left = _winX + _slabX - m;
-        float top = _winY + _slabY - m;
-        float right = _winX + _slabX + _slabW + m;
-        float bottom = _winY + _slabY + _slabH + bottomM;
-        int sx = (int)Math.Round(left * _dpi);
-        int sy = (int)Math.Round(top * _dpi);
+        // Cover the shim over the SAME area the window region carves out (the full mouse-solid
+        // dock box incl. magnify/label headroom). If the shim were smaller, the headroom band
+        // would be a topmost dock-window area with no drop target → the OS shows a "no-drop"
+        // cursor there. Matching them means every solid dock pixel accepts the drag.
+        var (left, top, right, bottom) = ContentRect();
+        int sx = (int)Math.Round((_winX + left) * _dpi);
+        int sy = (int)Math.Round((_winY + top) * _dpi);
         int sw = Math.Max(1, (int)Math.Ceiling((right - left) * _dpi));
         int sh = Math.Max(1, (int)Math.Ceiling((bottom - top) * _dpi));
         _dropShim.SetBounds(sx, sy, sw, sh);
         ApplyWindowRegion();
+    }
+
+    /// <summary>The dock's visible/interactive box in window-local DIPs (slab / ring disc plus
+    /// magnification + hover-label headroom). Shared by the window region carve and the drop
+    /// shim so the mouse-solid area and the drop-accepting area are identical.</summary>
+    private (float left, float top, float right, float bottom) ContentRect()
+    {
+        float mx = _gIcon * 1.0f;
+        float mTop = _saturn ? _gIcon * 1.0f : _gIcon * 3.2f;
+        float mBot = _saturn ? _gIcon * 1.0f : _gIcon * 0.6f;
+        float left = Math.Max(0f, _slabX - mx);
+        float top = Math.Max(0f, _slabY - mTop);
+        float right = Math.Min(_winW, _slabX + _slabW + mx);
+        float bottom = Math.Min(_winH, _slabY + _slabH + mBot);
+        return (left, top, right, bottom);
     }
 
     /// <summary>Carves the dock's composition window down to just the visible content (the
@@ -2145,16 +2081,10 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (_hwnd == IntPtr.Zero) return;
         try
         {
-            // Keep generous headroom so magnified icons / hover labels are never clipped:
-            // glass icons rise + show a label well above the slab top; Saturn's disc is
-            // symmetric with the magnification already inside the slab box.
-            float mx = _gIcon * 1.0f;
-            float mTop = _saturn ? _gIcon * 1.0f : _gIcon * 3.2f;
-            float mBot = _saturn ? _gIcon * 1.0f : _gIcon * 0.6f;
-            float left = Math.Max(0f, _slabX - mx);
-            float top = Math.Max(0f, _slabY - mTop);
-            float right = Math.Min(_winW, _slabX + _slabW + mx);
-            float bottom = Math.Min(_winH, _slabY + _slabH + mBot);
+            // Keep generous headroom so magnified icons / hover labels are never clipped
+            // (see ContentRect); the drop shim covers this exact box so there is no perimeter
+            // band of solid-but-no-drop-target window.
+            var (left, top, right, bottom) = ContentRect();
             int rx = (int)Math.Floor(left * _dpi);
             int ry = (int)Math.Floor(top * _dpi);
             int rr = (int)Math.Ceiling(right * _dpi);
@@ -2231,23 +2161,20 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _ghost = null;
     }
 
-    /// <summary>Called continuously while an external file/shell drag hovers the dock (and
-    /// with null on leave/drop). Tracks the window-local cursor point so the render can draw
-    /// a drag-follow marker, mirroring the WPF dock's live drag feedback.</summary>
-    private void OnExternalDragMove((int x, int y)? screenPt)
+    /// <summary>Called while an external file/shell drag hovers the dock (null on leave/drop)
+    /// with the SCREEN point and the first dragged file's icon source. Tracks the window-local
+    /// drop point and the icon to preview at it.</summary>
+    private void OnExternalDragMove((int x, int y)? screenPt, string? iconSrc)
     {
         if (screenPt is { } p)
         {
-            float lx = (float)(p.x / _dpi - _winX);
-            float ly = (float)(p.y / _dpi - _winY);
-            // Only show the follow marker where a drop will actually register (the slab /
-            // ring box). Over the transparent headroom the drag falls through to the desktop,
-            // so a marker there would be misleading.
-            _extDragPt = InDropRegion(lx, ly) ? new Vector2(lx, ly) : (Vector2?)null;
+            // The OLE callback fires only while the cursor is over the drop shim, which now
+            // spans the whole mouse-solid dock box, so any reported point is a valid drop spot.
+            _extDragPt = new Vector2((float)(p.x / _dpi - _winX), (float)(p.y / _dpi - _winY));
+            if (iconSrc != null) _dragIconKey = iconSrc;
         }
-        else
-            _extDragPt = null;
-        // OLE callbacks run on the STA UI thread; repaint so the marker tracks the cursor
+        else { _extDragPt = null; _dragIconKey = null; }
+        // OLE callbacks run on the STA UI thread; repaint so the preview tracks the cursor
         // (synchronous on the default path, next vblank on the render-thread path).
         try { RequestRender(); } catch { }
     }
@@ -2926,7 +2853,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         // Screen pixels → window-local DIPs (icon-slot geometry space).
         float lx = (float)(screenX / _dpi - _winX);
         float ly = (float)(screenY / _dpi - _winY);
-        _extDragPt = null;   // drag finished — clear the follow marker
+        _extDragPt = null; _dragIconKey = null;   // drag finished — clear the preview
         // Defer the actual insert: it may rebuild (recreate) this window, which must
         // NOT happen while the OS is still inside the IDropTarget.Drop call. Run it
         // once the drop returns and the OLE drag loop has unwound.
