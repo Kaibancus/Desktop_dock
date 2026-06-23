@@ -25,7 +25,7 @@ namespace Polaris.Views;
 /// continuous magnify wave across both halves and shows the hovered icon's name.
 /// Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px, D2D target
 /// DPI = 96 × scale).</summary>
-internal sealed class SideDockWindowGpu : IDisposable, ISideDock
+internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
 {
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
@@ -61,7 +61,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private DropShimWindow? _dropShim; // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;        // independent desktop overlay for the dragged icon
     private Vector2? _extDragPt;       // window-local point of an in-progress external drag (preview)
-    private CompositionHost? _host;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private IDWriteTextFormat? _hoverFormat;   // floating hover name (SemiBold, hover-scaled)
@@ -75,22 +74,18 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     private float _labelFitFp, _labelFitW;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
-    private Polaris.Services.Gpu.FrameClock? _timer;
     private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
     private DispatcherTimer? _mainDockChangedTimer;   // debounce host main-dock refresh notifications across rapid drags
 
-    // ---- Independent render thread (POLARIS_GPU_RENDERTHREAD=1; default OFF) ----
-    // Mirrors MainDockWindowGpu: the CompositionHost + Direct2D/DirectComposition device, the
-    // icon/debris caches, the laid-out _slots and all animation/wave state are owned and driven
-    // by a dedicated render thread (RenderLoop) paced to the display refresh rate via the swap
-    // chain's frame-latency waitable object. Default ON; POLARIS_GPU_RENDERTHREAD=0 falls back
-    // to the legacy UI-thread FrameClock path (_loop stays null).
-    private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    private RenderLoop? _loop;
-    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    // Render-thread infrastructure (UseRenderThread, _loop, _host, _timer, _gcActive +
+    // EnsureLoop/StartDriver/StopDriver/RunOnRender/InvokeOnRender/OnUi/RequestRender) lives in
+    // the shared GpuDockBase. The dock's _slots/caches/animation state are owned and driven by
+    // that render thread (or while it is quiesced during rebuild).
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
     private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
+
+    protected override string RenderThreadName => "PolarisSideDockGpu";
+    protected override Dispatcher UiDispatcher => _dispatcher;
     // Guards the interaction scalars written by the UI-thread WndProc and read by the render
     // thread in Tick/Render (drag point, intro animation phase). Layout/_slots/host/device are
     // mutated only on the render thread (or while it is quiesced during rebuild). Held briefly.
@@ -750,24 +745,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         }
     }
 
-    /// <summary>Lazily creates the dedicated render thread (frame callback paces to the display
-    /// vblank then runs <see cref="Tick"/> lock-free). The old whole-frame lock guaranteed a
-    /// coherent read of UI-written scalars, but it also let a 144Hz render loop block hot
-    /// input paths for a whole frame. We now accept a transient cross-frame read on those
-    /// scalar inputs instead; the device/layout state is still render-thread-owned.</summary>
-    private void EnsureLoop()
-    {
-        _loop ??= new RenderLoop("PolarisSideDockGpu", RenderThreadFrame);
-    }
-
-    /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate paced),
-    /// then advance + draw lock-free so UI-thread input never waits for a full render frame.</summary>
-    private void RenderThreadFrame()
-    {
-        _host?.WaitForVBlank();
-        Tick();
-    }
-
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, icon +
     /// debris caches). MUST run on the render thread (it owns the device).</summary>
     private void DisposeHostResources()
@@ -781,53 +758,6 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         _fitFormat?.Dispose(); _fitFormat = null; _fitFormatFp = 0; _labelFitName = null;
         _dwrite?.Dispose(); _dwrite = null;
         _host?.Dispose(); _host = null;
-    }
-
-    /// <summary>Resume per-frame rendering: the render loop or the UI-thread FrameClock.</summary>
-    private void StartDriver()
-    {
-        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
-        if (UseRenderThread) _loop?.SetActive(true);
-        else _timer?.Start();
-    }
-
-    /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
-    private void StopDriver()
-    {
-        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
-        if (UseRenderThread) _loop?.SetActive(false);
-        else _timer?.Stop();
-    }
-
-    /// <summary>Runs <paramref name="a"/> where the GPU device lives (render thread on the
-    /// render-thread path, inline otherwise).</summary>
-    private void RunOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Post(a);
-        else a();
-    }
-
-    /// <summary>Runs <paramref name="a"/> on the render thread and waits (ordering-critical
-    /// device work, e.g. host teardown before the HWND is destroyed); inline otherwise.</summary>
-    private void InvokeOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Invoke(a);
-        else a();
-    }
-
-    /// <summary>Marshals a UI-thread-only operation (Win32 on UI-owned windows, WPF popups) to
-    /// the Dispatcher when called from the render thread; inline on the default path.</summary>
-    private void OnUi(Action a)
-    {
-        if (UseRenderThread) _dispatcher.BeginInvoke(a);
-        else a();
-    }
-
-    /// <summary>Requests a repaint after a UI-thread interaction. Synchronous on the default
-    /// path; on the render-thread path the active loop already redraws every frame.</summary>
-    private void RequestRender()
-    {
-        if (!UseRenderThread) Render();
     }
 
     // ---- External drag-in (drop shim) + drag-out ghost (parity with the main dock) ----
@@ -1064,7 +994,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         return lx >= l && lx <= r && ly >= t && ly <= b;
     }
 
-    private void Tick()
+    protected override void Tick()
     {
         if (_host == null)
             return;
@@ -1629,7 +1559,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         return new Vector2(x, y);
     }
 
-    private void Render()
+    protected override void Render()
     {
         if (_host == null)
             return;

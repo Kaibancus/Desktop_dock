@@ -27,7 +27,7 @@ namespace Polaris.Views;
 /// falloff, focal anchoring + neighbour spread) and a floating hover name label below the
 /// focal icon. Per-monitor DPI aware (layout in DIPs, window + swap chain in physical px,
 /// D2D target DPI = 96 × scale).</summary>
-internal sealed class MainDockWindowGpu : IMainDock, IDisposable
+internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 {
     // Mirror the WPF glass theme scale factors (see RadialWindow: _uiScale=1, _themeScale=0.9
     // for glass; glyphs drawn at icon*GlassIconScale).
@@ -45,21 +45,13 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private DropShimWindow? _dropShim;   // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;           // independent desktop overlay for the dragged icon
     private Vector2? _extDragPt;          // window-local point of an in-progress external drag (preview)
-    private CompositionHost? _host;
     private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
     private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
-    // ---- Independent render thread (default ON; POLARIS_GPU_RENDERTHREAD=0 to opt out) ----
-    // The dock's CompositionHost + Direct2D/DirectComposition device, the icon/Saturn caches,
-    // the laid-out _slots and all animation/wave state are owned and driven by a dedicated
-    // render thread (RenderLoop) paced to the display refresh rate via the swap chain's
-    // frame-latency waitable object — reaching the true refresh rate (60/120/144Hz) and
-    // freeing the UI thread for input. Measured 59-60fps steady vs the UI-thread FrameClock's
-    // ~38-53fps cap. Set POLARIS_GPU_RENDERTHREAD=0 to fall back to the legacy FrameClock path.
-    private static readonly bool UseRenderThread =
-        Environment.GetEnvironmentVariable("POLARIS_GPU_RENDERTHREAD") != "0";
-    private RenderLoop? _loop;
-    private bool _gcActive;   // balances RenderGcScope Enter/Leave across show/hide
+    // Render-thread infrastructure (UseRenderThread, _loop, _host, _timer, _gcActive +
+    // EnsureLoop/StartDriver/StopDriver/RunOnRender/InvokeOnRender/OnUi/RequestRender) lives in
+    // the shared GpuDockBase. The dock's _slots/caches/animation state are owned and driven by
+    // that render thread (or while it is quiesced during rebuild).
     private int[]? _orderBuf;            // reused draw-order scratch (avoids a per-frame alloc)
     private Comparison<int>? _orderCmp;  // cached so the sort doesn't alloc a closure each frame
     // Guards the interaction scalars written by the UI-thread WndProc and read by the
@@ -87,7 +79,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     private readonly List<IconSlot> _slots = new();
 
     // ---- Stage B magnify wave state ----
-    private Polaris.Services.Gpu.FrameClock? _timer;
     private IDWriteFactory? _dwrite;
     private IDWriteTextFormat? _labelFormat;
     private float _labelFontPx = 13f;
@@ -242,6 +233,9 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     public Action<bool>? GlassDragActiveChanged { get; set; }
     public Dispatcher Dispatcher { get; } = Dispatcher.CurrentDispatcher;
     public bool IsShown => _shown;
+
+    protected override string RenderThreadName => "PolarisMainDockGpu";
+    protected override Dispatcher UiDispatcher => Dispatcher;
 
     private readonly struct IconSlot
     {
@@ -588,27 +582,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         }
     }
 
-    /// <summary>Lazily creates the dedicated render thread. Its per-frame callback paces to
-    /// the display vblank then runs <see cref="Tick"/> (advance animation + render + present)
-    /// lock-free. The old whole-frame <c>lock(_stateLock)</c> kept the render thread at 144Hz,
-    /// but also made hot UI input paths contend with an entire frame's worth of work — exactly
-    /// the kind of hidden "input feels sticky even though fps is high" problem we saw on the
-    /// high-refresh machine. The lock is now reserved only for rare UI-side multi-field state
-    /// transitions; drag/move input is scalar and can tolerate a transient cross-frame read.</summary>
-    private void EnsureLoop()
-    {
-        _loop ??= new RenderLoop("PolarisMainDockGpu", RenderThreadFrame);
-    }
-
-    /// <summary>Render-thread frame: block until the compositor is ready (refresh-rate
-    /// paced), then advance + draw. Runs lock-free so UI-thread input never waits for a whole
-    /// frame of GPU-dock work.</summary>
-    private void RenderThreadFrame()
-    {
-        _host?.WaitForVBlank();
-        Tick();
-    }
-
     /// <summary>Disposes all render-thread-owned GPU resources (host, text formats, Saturn
     /// + icon bitmap caches). MUST run on the render thread (it owns the device); the caller
     /// quiesces the loop and Invokes this before the UI thread destroys the HWND.</summary>
@@ -621,57 +594,6 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         _dwrite?.Dispose(); _dwrite = null;
         foreach (var b in _bmpCache.Values) b?.Dispose();
         _bmpCache.Clear();
-    }
-
-    /// <summary>Resume per-frame rendering: the render loop on the render-thread path, or
-    /// the UI-thread FrameClock otherwise.</summary>
-    private void StartDriver()
-    {
-        if (!_gcActive) { _gcActive = true; Polaris.Services.Gpu.RenderGcScope.Enter(); }
-        if (UseRenderThread) _loop?.SetActive(true);
-        else _timer?.Start();
-    }
-
-    /// <summary>Pause per-frame rendering (a hidden/settled dock costs nothing).</summary>
-    private void StopDriver()
-    {
-        if (_gcActive) { _gcActive = false; Polaris.Services.Gpu.RenderGcScope.Leave(); }
-        if (UseRenderThread) _loop?.SetActive(false);
-        else _timer?.Stop();
-    }
-
-    /// <summary>Runs <paramref name="a"/> where the GPU device lives: posted to the render
-    /// thread (fire-and-forget, FIFO) on the render-thread path, inline otherwise.</summary>
-    private void RunOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Post(a);
-        else a();
-    }
-
-    /// <summary>Runs <paramref name="a"/> on the render thread and waits (ordering-critical
-    /// device work, e.g. host teardown before the HWND is destroyed); inline otherwise.</summary>
-    private void InvokeOnRender(Action a)
-    {
-        if (UseRenderThread && _loop != null) _loop.Invoke(a);
-        else a();
-    }
-
-    /// <summary>Marshals a UI-thread-only operation (Win32 on UI-owned windows, WPF popups)
-    /// to the Dispatcher when called from the render thread; runs inline on the default path
-    /// (already on the UI thread).</summary>
-    private void OnUi(Action a)
-    {
-        if (UseRenderThread) Dispatcher.BeginInvoke(a);
-        else a();
-    }
-
-    /// <summary>Requests a repaint after a UI-thread interaction (drag/scroll). On the
-    /// default path it renders synchronously; on the render-thread path the active loop
-    /// already redraws every frame, so the state change is picked up on the next vblank
-    /// (sub-frame latency) and no UI-thread device access is needed.</summary>
-    private void RequestRender()
-    {
-        if (!UseRenderThread) Render();
     }
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
@@ -916,7 +838,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
     /// <summary>16 ms cursor poll: feeds the live pointer into the 2-D magnify wave,
     /// updates per-icon scale + neighbour-spread offsets, tracks the focal (hovered)
     /// icon, and re-renders while anything is in motion.</summary>
-    private void Tick()
+    protected override void Tick()
     {
         if (_host == null || _slots.Count == 0)
             return;
@@ -1204,7 +1126,7 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         });
     }
 
-    private void Render()
+    protected override void Render()
     {
         if (_host == null)
             return;

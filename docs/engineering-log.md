@@ -493,6 +493,12 @@
 
 ## 🔧 重构 / 工程质量
 
+- **抽取共享 GPU dock 基类 `GpuDockBase`（消除两 dock 重复的渲染循环/host 生命周期管线）**：
+  - **背景**：`MainDockWindowGpu` 与 `SideDockWindowGpu` 各自持有一份**逐字相同**的渲染线程管线——`UseRenderThread` 开关、`_loop`/`_host`/`_timer`/`_gcActive` 字段，以及 `EnsureLoop`/`RenderThreadFrame`/`StartDriver`/`StopDriver`/`RunOnRender`/`InvokeOnRender`/`OnUi`/`RequestRender` 八个辅助方法。两份副本极易随改动漂移（例如此前 `UseRenderThread` 默认值翻转、`OnUi` 的 dispatcher 差异）。
+  - **改动**：新增 `Views/GpuDockBase.cs`（`internal abstract class GpuDockBase`），集中上述字段 + 八个 `protected` 方法。dock 专属差异收敛为 4 个抽象/虚成员：`RenderThreadName`（线程名）、`UiDispatcher`（主用 `Dispatcher` 属性、侧用 `_dispatcher` 字段）、`Tick()`、`Render()`。两 dock 改为 `: GpuDockBase, …`，各只保留这 4 个 `override`，删除原本的字段/方法副本（调用点零改动，仍以 `protected` 继承访问）。
+  - **行为保持**：纯结构重构，不改任何渲染/线程逻辑（同一套代码迁位）。实测 idle 内存/线程与重构前一致（~301MB / ~100 线程）。
+  - **验证**：`dotnet build -c Release --no-incremental` 0 警告 0 错误；42 单元测试全过；用户实测双 dock 召唤/消散、拖拽重排、玻璃↔土星主题切换、notch 时钟、桌面拖入均无回归。
+
 - **共享 GPU 窗口 interop（`Interop/Win32.cs`）+ 删除死代码（−287 行/6 文件）**：
   - **背景**：4 个 GPU 表面（主 dock、侧 dock、土星凹口时钟、drop shim）各有一份近乎相同的原始 Win32 窗口机制——`WNDCLASSEXW` 结构体、`RegisterClassExW`/`CreateWindowExW`/`DefWindowProcW` 等 P/Invoke、`WS_EX_*`/`SW_*`/`SWP_*` 常量、register-once 模式各 4 份（`WNDCLASSEXW`×5、`POINT`×8、`ShowWindow`×7、`CreateWindowExW`×5…）。
   - **改动**：新增 `Interop/Win32.cs`（`internal static class Win32`）集中：共享结构体（`POINT`/`RECT`/`WNDCLASSEXW`）、窗口管理 P/Invoke（`ShowWindow`/`SetWindowPos`/`DestroyWindow`/`GetCursorPos`/`GetWindowRect`/`WindowFromPoint`/`Get|SetWindowLongW`/`LoadCursorW`/`GetModuleHandleW`/`GetStockObject` 等）、窗口常量，以及一个可复用的 `CreateWindow(className, exStyle, w, h, proc, ref atom, hCursor, hbrBackground)` 助手（register-once + 创建）。4 个 GPU 窗口改用它：主/侧/notch 用 `WS_EX_NOREDIRECTIONBITMAP` 合成窗口、drop shim 用 `WS_EX_LAYERED` redirected 窗口（OLE 拖放）。两个大 dock 文件用 `using static Polaris.Interop.Win32;` 让调用点零改动，仅删本地重复声明；dock 专属 P/Invoke（`SetWindowRgn`/`SetCapture`/`Drag*`/`EnumDisplaySettings` 等）保留本地。`WNDCLASSEXW` 5→2、`POINT` 8→6。
