@@ -234,7 +234,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
         else
         {
             _suspendRefreshWhileDrag = false;
-            if (_refreshPending && !_byMain)
+            if (_refreshPending)
                 ScheduleRefresh();
         }
     }
@@ -361,13 +361,16 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
     public void RefreshFromConfig()
     {
         _refreshPending = true;
-        bool block = _suspendRefreshWhileDrag || _byMain || _byDrag || !_shown;
+        // While the MAIN dock is shown the side dock is shown-by-main (_byMain); a main-dock
+        // reorder must still propagate here, so _byMain is intentionally NOT a block reason.
+        // Active drags are still hard-suspended via _suspendRefreshWhileDrag / _byDrag (set by
+        // SetDragActive), so a refresh never lands mid-drag — it only runs once the user settles.
+        bool block = _suspendRefreshWhileDrag || _byDrag || !_shown;
         if (block)
         {
             _layoutDirty = true;
             DragPerfStats.Event("side", 0, "refresh-deferred",
                 _suspendRefreshWhileDrag ? "suspended-by-drag"
-                : _byMain ? "while-main-shown"
                 : _byDrag ? "while-dragging"
                 : "while-hidden");
             return;
@@ -2994,7 +2997,7 @@ internal sealed class SideDockWindowGpu : IDisposable, ISideDock
            _mainDockChangedTimer.Tick += (_, _) =>
            {
                _mainDockChangedTimer!.Stop();
-               try { MainDockChanged?.Invoke(); } catch { }
+                   try { MainDockChanged?.Invoke(); } catch { }
            };
        }
        _mainDockChangedTimer.Stop();

@@ -552,19 +552,18 @@ internal sealed class MainDockWindowGpu : IMainDock, IDisposable
         if (AppsChanged == null)
             return;
         _appsChangedPending = true;
-        // Do NOT refresh the side dock while this main-dock session is still on screen.
-        // The latest drag diagnostics showed the true remaining culprit: every drag drop
-        // ended with a side-dock refresh request that fired ~300ms later *during the same
-        // open main-dock session*, costing ~70-80ms and making the next drag feel heavier.
-        // While the main dock is shown, just remember that a refresh is pending; the existing
-        // FlushAppsChanged() path runs on dismiss/teardown and applies the latest state once.
-        if (_shown)
-            return;
+        // Coalesce rapid reorders and refresh the side dock once the user has settled — even
+        // while the main dock is still shown, so a main-dock reorder propagates to the side dock
+        // live instead of only on dismiss. The refresh costs ~70-80ms on the UI thread, so it
+        // must never land during an active drag: the debounce restarts on every drop and the
+        // tick re-arms while a drag is still in progress, so it fires only after the last drop
+        // with the mouse released. FlushAppsChanged on dismiss still applies any pending refresh.
         if (_appsChangedTimer == null)
         {
-            _appsChangedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _appsChangedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
             _appsChangedTimer.Tick += (_, _) =>
             {
+                if (_dragging) { _appsChangedTimer!.Stop(); _appsChangedTimer!.Start(); return; }
                 _appsChangedTimer!.Stop();
                 if (!_appsChangedPending)
                     return;

@@ -132,6 +132,11 @@
 
 ## 🐛 BUG 修复
 
+- **双 dock 都打开时，在主 dock 重排图标，侧 dock 不实时更新（GPU 迁移后引入）**：
+  - **现象**：两个 dock 都召唤着时，在**主 dock** 拖拽重排 resident 图标，**侧 dock 不跟着变**——必须先 dismiss 主 dock，侧 dock 才补刷新顺序。反方向（侧 dock 重排 → 主 dock）一直实时正常。
+  - **根因**：为拖拽流畅做的优化把主→侧刷新**全压到 dismiss**：①主 dock `NotifyAppsChangedSoon` 在 `_shown` 时直接 `return`（只置 `_appsChangedPending`，等 dismiss 由 `FlushAppsChanged` 补发 `AppsChanged`）；②侧 dock `RefreshFromConfig` 的 block 条件含 `_byMain`（主显示时阻塞）；③侧 dock `SetDragActive(false)` 的补刷条件含 `!_byMain`。三重 `_byMain` 守卫过宽——而拖拽流畅其实已由 `SetDragActive` 设的 `_suspendRefreshWhileDrag`/`_byDrag` 在拖拽期间硬挂起侧刷新单独保护，`_byMain` 是多余的。
+  - **修复**：让主→侧在拖拽 **settle 后**（而非 dismiss）即刷新，且不在拖拽中执行：①主 `NotifyAppsChangedSoon` 去掉 `if (_shown) return`，改 350ms 去抖（每次 drop 重置），tick 时若 `_dragging` 仍在则重新计时 → 仅在最后一次 drop 松手后触发 `AppsChanged`；②侧 `RefreshFromConfig` 的 block 去掉 `_byMain`（保留 `_suspendRefreshWhileDrag`/`_byDrag`/`!_shown`）；③侧 `SetDragActive(false)` 补刷去掉 `!_byMain`。连续拖拽因去抖+硬挂起不中招，`FlushAppsChanged` 仍在 dismiss 兜底。验证：主 dock 重排松手约 0.4s 后侧 dock 跟随更新，连续拖拽仍流畅。
+
 - **点击悬停预览无法前置提权（高完整性）窗口（任务管理器 / 管理员终端）**：
   - **现象**：经 explorer.exe 启动的**中完整性** Polaris，点击悬停预览图无法把**提权（High 完整性）窗口**（任务管理器、管理员 Windows Terminal 等）前置；普通（中完整性）窗口正常。激活代码 `RunningAppTracker.ActivateWindow` 为 WPF/GPU dock 共享。
   - **根因**：`ForceForeground` 用 `AttachThreadInput + SetForegroundWindow`，但**跨完整性的 `AttachThreadInput` 失败、`SetForegroundWindow` 被 UIPI 拒绝**——中完整性进程无法前置高完整性窗口。真任务栏能做是因为 explorer 是注册 shell、有特权。
