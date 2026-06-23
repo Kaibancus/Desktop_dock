@@ -1069,12 +1069,12 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             _outerAngle = (_outerAngle + satDt * 360.0 / (PlanetSpinSeconds * OuterOrbitRatio)) % 360.0;
         }
 
-        // Running-icon sweep + glow pulse: rotate the gradient (4.2s/rev) and breathe the
+        // Running-icon sweep + glow pulse: rotate the gradient (7.2s/rev) and breathe the
         // halo (2.2s) so running apps show a flowing border in BOTH themes (the WPF
         // RadialIcon RunningBorder is not theme-gated).
         if (_anyRunning)
         {
-            _runSweep = (_runSweep + frameDt * 360f / 4.2f) % 360f;
+            _runSweep = (_runSweep + frameDt * 360f / 7.2f) % 360f;
             double ph = Environment.TickCount64 / 1000.0 * 2.0 * Math.PI / 2.2;
             _runPulse = 0.575f + 0.225f * MathF.Sin((float)ph);
         }
@@ -1570,7 +1570,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 
         // Running indicator: a soft pulsing glow halo plus a flowing sweep border — a
         // rounded-rect stroke painted with a linear gradient whose axis rotates
-        // (4.2s/rev). Shown in BOTH themes, mirroring RadialIcon's RunningBorder which
+        // (7.2s/rev). Shown in BOTH themes, mirroring RadialIcon's RunningBorder which
         // is not theme-gated.
         if (s.Running)
         {
