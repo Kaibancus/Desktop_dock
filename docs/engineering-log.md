@@ -101,6 +101,10 @@
 
 ## ⚡ 性能优化 / 健壮性
 
+- **拖拽预览图标每帧在渲染线程做同步 shell/磁盘 I/O（code review 发现并修复）**：
+  - **现象/根因**：`DrawDragPreview`（拖入预览）每帧执行 `GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache))`。`IconExtractor.GetCached` **故意不缓存 null**（为冷启动重试），所以当被拖项图标解析失败时，每帧都重调 `GetIcon`（`SHGetFileInfo`/`ExtractAssociatedIcon` + `File.Exists`）。拖拽以 60–144Hz 渲染 → 每秒数十~上百次同步 shell+磁盘探测**卡在渲染线程上**。最坏场景具体：从**断连网络共享 / 已拔出 U 盘**拖文件，`File.Exists` 每帧阻塞，整个悬停期渲染线程硬卡顿。注意 `GetBitmap` 内部虽把 null 也缓存进 `_bmpCache`，但它作为**实参先求值**，拦不住重复的 `GetIcon`。
+  - **修复**：`DrawDragPreview` 先 `_bmpCache.TryGetValue(key, …)`，命中（含 null）直接用，只在 miss 时才走 `GetCached`/`GetBitmap`。因 `_bmpCache` 同时缓存命中与未命中，每个 key 至多解析/探测一次。集中在 `GpuDockBase.DrawDragPreview` 一处（见重构节）。仅影响新引入的拖入预览（原 `DrawDragMarker` 画静态环无图标解析）。
+
 - **GPU 共享单设备（每窗各建 D3D11/DXGI/D2D 设备 → 全进程共享一套，减内存 + 减线程）**：原 `CompositionHost` 每个实例（主 dock + 侧 dock + 土星 notch 时钟 + drag ghost，3-4 个活跃面）各自 `D3D11CreateDevice` + DXGI factory + D2D device——每个硬件设备各提交一大块驱动地址空间并各起一组驱动 worker 线程。新增 `Services/Gpu/GpuDevice.cs`（线程安全 `Lazy<GpuDevice>` 单例 `GpuDevice.Shared`），全进程共享**一套** `ID3D11Device` + `IDXGIDevice` + `IDXGIFactory2` + `ID2D1Device`（硬件→WARP 回退、进程生命周期常驻、退出由 OS 回收免去拆除时序风险）。`CompositionHost` 改为只持有**每窗私有**资源：swap chain、DComp device/target/visual、`ID2D1DeviceContext` + target bitmap；`Dispose` 只释放这些，不碰共享设备。
   - **线程安全**：各 dock 在自己的 `RenderLoop` 线程渲染、并发触达共享设备。共享 `ID3D11Device` 标记 `ID3D11Multithread.SetMultithreadProtected(true)`、D2D factory 用 `FactoryType.MultiThreaded`，让 D3D11/D2D 内部串行化并发访问；DComp 设备/上下文仍每窗各建、只在本窗渲染线程使用（线程亲和不变）。
   - **实测 A/B（同条件 idle，控 P1.1 notch 释放变量，启动后第 9s 取样）**：私有字节 335→301MB（**-34MB**）、线程 125→101（**-24**，合并 2 组驱动 worker 线程池）、句柄 941→915。土星双 dock 召唤时（3 活跃设备 → 1）收益更大。42 单测全过、0 警告。
@@ -497,6 +501,8 @@
 - **初始版本**：托盘呼出、可配置触发键、单实例、液态玻璃圆盘、拖入添加、长按固定模式（`d0cbd69`）。
 
 ## 🔧 重构 / 工程质量
+
+- **图标缓存 + 拖拽预览去重到 `GpuDockBase`（承接基类抽取，并修上面的每帧 I/O）**：两 dock 的 `_iconCache`/`_bmpCache` 字段、**逐字相同**的 `GetBitmap`（仅局部变量名差异），以及 `_extDragPt`/`_dragIconKey` + `OnExternalDragMove` + `DrawDragPreview` 全部上移到 `GpuDockBase`。dock 专属差异收敛为两个钩子：`ScreenToLocal(sx,sy)`（屏幕→窗口本地 DIP，用各自 `_dpi`/`_winX`/`_winY`）、`DragIconSize`（`_gIcon`）。如此「先查 `_bmpCache`」的修复只存在一处，两 dock 无法再漂移。行为保持；0 警告、42 单测过、用户实测两 dock 拖入预览正常。
 
 - **抽取共享 GPU dock 基类 `GpuDockBase`（消除两 dock 重复的渲染循环/host 生命周期管线）**：
   - **背景**：`MainDockWindowGpu` 与 `SideDockWindowGpu` 各自持有一份**逐字相同**的渲染线程管线——`UseRenderThread` 开关、`_loop`/`_host`/`_timer`/`_gcActive` 字段，以及 `EnsureLoop`/`RenderThreadFrame`/`StartDriver`/`StopDriver`/`RunOnRender`/`InvokeOnRender`/`OnUi`/`RequestRender` 八个辅助方法。两份副本极易随改动漂移（例如此前 `UseRenderThread` 默认值翻转、`OnUi` 的 dispatcher 差异）。

@@ -44,10 +44,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private IntPtr _hwnd;
     private DropShimWindow? _dropShim;   // overlay that catches external drags + forwards them
     private IDragGhost? _ghost;           // independent desktop overlay for the dragged icon
-    private Vector2? _extDragPt;          // window-local drop point of an in-progress external drag
-    private string? _dragIconKey;         // icon source of the dragged item, previewed at the drop point
-    private readonly Dictionary<string, ID2D1Bitmap?> _bmpCache = new();
-    private readonly Dictionary<string, BitmapSource?> _iconCache = new();
 
     // Render-thread infrastructure (UseRenderThread, _loop, _host, _timer, _gcActive +
     // EnsureLoop/StartDriver/StopDriver/RunOnRender/InvokeOnRender/OnUi/RequestRender) lives in
@@ -237,6 +233,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
 
     protected override string RenderThreadName => "PolarisMainDockGpu";
     protected override Dispatcher UiDispatcher => Dispatcher;
+    protected override float DragIconSize => _gIcon;
+    protected override Vector2 ScreenToLocal(int screenX, int screenY) =>
+        new((float)(screenX / _dpi - _winX), (float)(screenY / _dpi - _winY));
 
     private readonly struct IconSlot
     {
@@ -1705,26 +1704,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         }
     }
 
-    /// <summary>Previews the dragged item's icon at the drop point while an external drag
-    /// hovers the dock. The OS drag image isn't rendered over the topmost composition window,
-    /// so without this the user sees nothing being dragged in.</summary>
-    private void DrawDragPreview(ID2D1DeviceContext ctx, Vector2 p)
-    {
-        var key = _dragIconKey;
-        if (key == null)
-            return;
-        var bmp = GetBitmap(ctx, key, IconExtractor.GetCached(key, _iconCache));
-        if (bmp == null)
-            return;
-        float g = _gIcon, half = g / 2f;
-        var bs = bmp.Size;
-        var baseTf = ctx.Transform;
-        ctx.Transform = Matrix3x2.CreateScale(g / Math.Max(1f, bs.Width), g / Math.Max(1f, bs.Height))
-                      * Matrix3x2.CreateTranslation(p.X - half, p.Y - half) * baseTf;
-        ctx.DrawBitmap(bmp, 0.85f, InterpolationMode.HighQualityCubic);
-        ctx.Transform = baseTf;
-    }
-
     /// <summary>Floating name label centred just below the magnified focal icon
     /// (mirrors the WPF glass dock's <c>ShowGlassHoverLabel</c>: barely-there dark tint,
     /// 7px radius, light text). The icon zooms about its centre, so its visible bottom
@@ -1785,30 +1764,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _labelMeasureName = name;
         _labelMeasureW = Math.Max(48f, tw + 18f);
         return _labelMeasureW;
-    }
-
-    private ID2D1Bitmap? GetBitmap(ID2D1DeviceContext ctx, string key, BitmapSource? src)
-    {
-        if (string.IsNullOrEmpty(key))
-            return null;
-        if (_bmpCache.TryGetValue(key, out var cached))
-            return cached;
-        ID2D1Bitmap? d2d = null;
-        try
-        {
-            if (src != null)
-            {
-                if (src.Format != PixelFormats.Pbgra32)
-                    src = new FormatConvertedBitmap(src, PixelFormats.Pbgra32, null, 0);
-                int w = src.PixelWidth, h = src.PixelHeight, stride = w * 4;
-                var pxbuf = new byte[stride * h];
-                src.CopyPixels(pxbuf, stride, 0);
-                d2d = _host!.CreateBitmap(w, h, pxbuf, stride);
-            }
-        }
-        catch { d2d = null; }
-        _bmpCache[key] = d2d;
-        return d2d;
     }
 
     // ---- Hover window-thumbnail preview (parity with the WPF dock) -----------
@@ -2159,24 +2114,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         if (_ghost == null) return;
         try { _ghost.Close(); } catch { }
         _ghost = null;
-    }
-
-    /// <summary>Called while an external file/shell drag hovers the dock (null on leave/drop)
-    /// with the SCREEN point and the first dragged file's icon source. Tracks the window-local
-    /// drop point and the icon to preview at it.</summary>
-    private void OnExternalDragMove((int x, int y)? screenPt, string? iconSrc)
-    {
-        if (screenPt is { } p)
-        {
-            // The OLE callback fires only while the cursor is over the drop shim, which now
-            // spans the whole mouse-solid dock box, so any reported point is a valid drop spot.
-            _extDragPt = new Vector2((float)(p.x / _dpi - _winX), (float)(p.y / _dpi - _winY));
-            if (iconSrc != null) _dragIconKey = iconSrc;
-        }
-        else { _extDragPt = null; _dragIconKey = null; }
-        // OLE callbacks run on the STA UI thread; repaint so the preview tracks the cursor
-        // (synchronous on the default path, next vblank on the render-thread path).
-        try { RequestRender(); } catch { }
     }
 
     /// <summary>Routes the window messages this dock cares about. Returns true (with
