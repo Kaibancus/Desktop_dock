@@ -141,6 +141,11 @@
 
 ## 🐛 BUG 修复
 
+- **开机自启后主/侧 dock 尺寸与位置错误（GPU）**：
+  - **现象**：电脑重启、Polaris 随登录自启动后，两个 dock 召唤出来尺寸偏小、位置偏移（截图中 dock 明显比正常小且未贴合屏幕中下）。手动重启 Polaris 或显示稳定后再召唤则正常。
+  - **根因**：①两 dock 是裸 Win32（`WS_EX_NOREDIRECTIONBITMAP`）合成窗口，**不是 WPF 窗口**；而 dock 布局所依赖的 `MonitorLayout`（`UsePrimary`）与各自的 `DpiScale()` 取自 WPF `SystemParameters`（`PrimaryScreenWidth`/`WorkArea`）。WPF 的 `SystemParameters` 是**进程级缓存**，仅在某个 WPF 窗口收到 `WM_DISPLAYCHANGE`/`WM_SETTINGCHANGE` 时才失效。Polaris 静止态只有托盘 `NotifyIcon`（WinForms）+ 裸 Win32 dock，**没有常驻 WPF 窗口**（设置窗按需创建）。②登录自启时机极早：GPU 尚未套用真实显示模式/DPI、任务栏尚未占好工作区，此时读到的 `SystemParameters` 是**未稳定的临时值并被永久冻结**，dock 按错值布局。③**全代码无任何显示变化监听**，显示稳定后不会重算——错误布局一直保持到手动重启。
+  - **修复**：①`MonitorLayout.UsePrimary` 改为**实时 Win32**：`GetSystemMetrics(SM_CX/CYSCREEN)` 取屏幕物理尺寸、`SystemParametersInfo(SPI_GETWORKAREA)` 取工作区、新增 `PrimaryDpiScale`（`GetDpiForMonitor` 有效 DPI，回退 `GetDeviceCaps`），全部不经 WPF 缓存（Win32 未就绪时再回退 WPF 以免零尺寸）。②两 dock 的 `_dpi` 改用 `MonitorLayout.PrimaryDpiScale`，删除各自重复的 `DpiScale()`/`EnumDisplaySettings`/`DEVMODE`（依赖 WPF `PrimaryScreenWidth`，同样会被冻结）。③`App` 新增显示变化监听 `StartDisplayChangeWatch`：订阅 `SystemEvents.DisplaySettingsChanged` + `UserPreferenceChanged`(Desktop/General)，350ms 防抖后 `MonitorLayout.UsePrimary()` + 两 dock `RefreshForDisplayChange()`（完整 `Rebuild` 以新 DPI/工作区重算，保持当前可见性）；并加一个启动后 1.5s 的一次性兜底校正（防止登录 settle 未发事件）。`OnExit` 退订。**已稳定显示器上实测 live-Win32 与旧 WPF 值逐位一致（scale=1.5、bounds/work-area 完全相同）→ 正常情形零回归**；用户重启实测自启动后 dock 尺寸/位置恢复正常。
+
 - **拖文件到 dock 添加时：看不到被拖应用图标 + 主 dock 外围一圈「禁止」光标（GPU）**：
   - **现象**：①拖入时 dock 上看不到被拖应用的图标（OS 的分层拖拽图像不会渲染在置顶合成 dock 之上），原先只画了一个通用蓝色「+」环标记；②主 dock 可见区外围有一圈显示「禁止」(no-drop) 光标的区域。
   - **根因**：①「+」环标记被光标处的拖拽内容遮挡 / 并非用户想要的反馈——用户要看到**被拖应用本身的图标**；②主 dock 的 `SetWindowRgn` carve 出的窗口 region 含放大/悬停标签余量（玻璃顶部达 `gIcon×3.2`），而 drop shim 只盖到 `slab + gIcon×0.5`，两者**不一致**：中间那圈余量带是置顶 dock 窗口但**没有注册 drop target**，拖拽到那里既无法穿透到桌面、又无人接受 → OS 显示「禁止」。（侧 dock 的 shim 与 region 早已共享 `HitBox()`，无此问题。）

@@ -96,6 +96,9 @@ public partial class App : Application
     private Forms.NotifyIcon? _tray;
     private Polaris.Views.ISideDock? _sideDock;
     private DispatcherTimer? _edgePollTimer;
+    // Debounce for OS display / work-area changes (resolution, DPI, monitor hotplug, taskbar
+    // resize). Display changes fire in bursts during a mode set, so coalesce before relaying out.
+    private DispatcherTimer? _displayChangeTimer;
 
     // Idle working-set trimming. While both docks are hidden, Polaris's (almost
     // entirely unmanaged) footprint can be evicted to the standby list so the
@@ -249,6 +252,7 @@ public partial class App : Application
             _sideDock?.HideAll();
         };
         StartEdgePoll();
+        StartDisplayChangeWatch();
         _taskbarGuard.Start();
 
         // A left-click anywhere outside every Polaris window dismisses both docks
@@ -437,6 +441,55 @@ public partial class App : Application
             Polaris.Services.MonitorLayout.SetTargetForPhysicalPoint(pt.X, pt.Y, GetDpiScale());
         else
             Polaris.Services.MonitorLayout.UsePrimary();
+    }
+
+    /// <summary>Watches for OS display / work-area changes and re-lays out both docks. Critical
+    /// for login auto-start: Polaris launches before the GPU applies the real display mode/DPI
+    /// and before the taskbar reserves its work area, so the first layout uses pre-settle metrics
+    /// and the docks come up at the wrong size/position. The settle fires WM_DISPLAYCHANGE /
+    /// work-area changes, which land here (debounced) and force a fresh-metrics rebuild. A
+    /// one-shot delayed pass also re-checks shortly after start in case no event is raised.</summary>
+    private void StartDisplayChangeWatch()
+    {
+        _displayChangeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+        _displayChangeTimer.Tick += (_, _) => { _displayChangeTimer!.Stop(); ApplyDisplayChange(); };
+
+        // SystemEvents callbacks arrive on a dedicated SystemEvents thread, so marshal the
+        // debounce (re)start onto the UI thread where the docks live.
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayMetricsChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+
+        // Belt-and-suspenders for the boot settle: re-apply once ~1.5s after start even if no
+        // change event fires (e.g. the work area settled before our window-less process could
+        // be notified). Cheap when nothing changed (a hidden-dock rebuild).
+        var boot = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        boot.Tick += (s, _) => { ((DispatcherTimer)s!).Stop(); ApplyDisplayChange(); };
+        boot.Start();
+    }
+
+    private void OnDisplayMetricsChanged(object? sender, EventArgs e) => ScheduleDisplayChange();
+
+    private void OnUserPreferenceChanged(object? sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        // Desktop/General cover the work-area (taskbar) changes that move/resize the docks.
+        if (e.Category is Microsoft.Win32.UserPreferenceCategory.Desktop
+            or Microsoft.Win32.UserPreferenceCategory.General)
+            ScheduleDisplayChange();
+    }
+
+    private void ScheduleDisplayChange()
+    {
+        if (_displayChangeTimer == null) return;
+        Dispatcher.BeginInvoke(new Action(() => { _displayChangeTimer.Stop(); _displayChangeTimer.Start(); }));
+    }
+
+    /// <summary>Refreshes the cached monitor metrics and rebuilds both docks with the current
+    /// DPI / work area. Runs on the UI thread (via the debounce timer).</summary>
+    private void ApplyDisplayChange()
+    {
+        Polaris.Services.MonitorLayout.UsePrimary();
+        _panel?.RefreshForDisplayChange();
+        _sideDock?.RefreshForDisplayChange();
     }
 
     private void OnHotkeyReleased()
@@ -988,6 +1041,9 @@ public partial class App : Application
         FlushPersist();
         _taskbarGuard.Stop();
         _clickAway.Stop();
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayMetricsChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        _displayChangeTimer?.Stop();
         _tray?.Dispose();
         _hook?.Dispose();
         _pinnedHook?.Dispose();

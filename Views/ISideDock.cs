@@ -19,6 +19,10 @@ internal interface ISideDock
     /// <summary>Re-sync after the main dock changed its resident region.</summary>
     void RefreshFromConfig();
 
+    /// <summary>Rebuild after an OS display / work-area change (resolution, DPI, taskbar) so the
+    /// dock re-reads the current metrics — notably the post-login settle after auto-start.</summary>
+    void RefreshForDisplayChange();
+
     /// <summary>Re-read the dock-position setting and re-anchor / rebuild.</summary>
     void RefreshLayout();
 

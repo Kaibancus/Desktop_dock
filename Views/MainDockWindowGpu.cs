@@ -463,7 +463,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     {
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
-        _dpi = DpiScale();
+        _dpi = MonitorLayout.PrimaryDpiScale;
         int pw = (int)Math.Ceiling(_winW * _dpi), ph = (int)Math.Ceiling(_winH * _dpi);
         int px = (int)Math.Round(_winX * _dpi), py = (int)Math.Round(_winY * _dpi);
         SetWindowPos(_hwnd, HWND_TOPMOST, px, py, pw, ph, SWP_NOACTIVATE);
@@ -3186,6 +3186,16 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     public void ShowPanel() => Summon(pinned: false);
     public void ShowPinned() => Summon(pinned: true);
 
+    /// <summary>Forces a full rebuild so the dock re-reads the display metrics (DPI, work area,
+    /// resolution) and re-lays out. Called when the OS reports a display / work-area change —
+    /// notably the post-login settle, where auto-start ran before the real mode/DPI applied.</summary>
+    public void RefreshForDisplayChange()
+    {
+        if (!_realized) return;
+        try { Rebuild(); }
+        catch (Exception ex) { Log.Warn("MainDockGpu", "display-change refresh failed: " + ex.Message); }
+    }
+
     private void Summon(bool pinned)
     {
         Realize();
@@ -3351,47 +3361,6 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         EndDragGhost();
         _dropShim?.Dispose(); _dropShim = null;
         if (_hwnd != IntPtr.Zero) { s_instances.Remove(_hwnd); DestroyWindow(_hwnd); }
-    }
-
-    /// <summary>Device pixels per DIP for the active monitor (EnumDisplaySettings ÷ WPF
-    /// DIP width — reliable before the window is realized, unlike GetDpiForWindow).</summary>
-    private static double DpiScale()
-    {
-        try
-        {
-            var dm = new DEVMODE { dmSize = (ushort)Marshal.SizeOf<DEVMODE>() };
-            if (EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref dm) && dm.dmPelsWidth > 0)
-            {
-                double dipW = System.Windows.SystemParameters.PrimaryScreenWidth;
-                if (dipW > 0)
-                {
-                    double s = dm.dmPelsWidth / dipW;
-                    if (s >= 0.5 && s <= 4.0) return s;
-                }
-            }
-        }
-        catch { /* fall through */ }
-        return 1.0;
-    }
-
-    private const int ENUM_CURRENT_SETTINGS = -1;
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DEVMODE dm);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DEVMODE
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
-        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
-        public uint dmFields;
-        public int dmPositionX, dmPositionY;
-        public uint dmDisplayOrientation, dmDisplayFixedOutput;
-        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
-        public ushort dmLogPixels;
-        public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
-        public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2,
-            dmPanningWidth, dmPanningHeight;
     }
 
     // ---- Raw Win32 NOREDIRECTIONBITMAP window (click-through for Stage A) ----

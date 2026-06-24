@@ -385,6 +385,16 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         ScheduleRefresh();
     }
 
+    /// <summary>Forces a full rebuild so the dock re-reads the display metrics (DPI, work area,
+    /// resolution) and re-lays out. Called when the OS reports a display / work-area change —
+    /// notably the post-login settle, where auto-start ran before the real mode/DPI applied.</summary>
+    public void RefreshForDisplayChange()
+    {
+        if (!_realized) return;
+        try { Rebuild(); }
+        catch (Exception ex) { Log.Warn("SideDockGpu", "display-change refresh failed: " + ex.Message); }
+    }
+
     private void RefreshFromConfigCore()
     {
         long t0 = Stopwatch.GetTimestamp();
@@ -670,7 +680,7 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     {
         _hwnd = CreateWindow(_winW, _winH);
         s_instances[_hwnd] = this;
-        _dpi = DpiScale();
+        _dpi = MonitorLayout.PrimaryDpiScale;
         // Layout is computed in DIPs (MonitorLayout returns DIPs); the Win32 window
         // + DComp swap chain live in PHYSICAL pixels. Size the window to physical px
         // and tell D2D the target DPI so all DIP-space drawing scales up 1:1.
@@ -2969,50 +2979,6 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
 
     [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr h);
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
-
-    /// <summary>Device pixels per DIP for the active monitor. Computed from the
-    /// physical mode (EnumDisplaySettings, which is independent of the caller's DPI
-    /// awareness) over the WPF DIP width — reliable even before the GPU window is
-    /// realized, unlike GetDpiForWindow/GetDpiForMonitor which can race to 96.</summary>
-    private static double DpiScale()
-    {
-        try
-        {
-            var dm = new DEVMODE { dmSize = (ushort)Marshal.SizeOf<DEVMODE>() };
-            if (EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref dm) && dm.dmPelsWidth > 0)
-            {
-                double dipW = System.Windows.SystemParameters.PrimaryScreenWidth;
-                if (dipW > 0)
-                {
-                    double s = dm.dmPelsWidth / dipW;
-                    if (s >= 0.5 && s <= 4.0) return s;
-                }
-            }
-        }
-        catch { /* fall through to 1.0 */ }
-        return 1.0;
-    }
-
-    private const int ENUM_CURRENT_SETTINGS = -1;
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DEVMODE dm);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DEVMODE
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
-        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
-        public uint dmFields;
-        public int dmPositionX, dmPositionY;
-        public uint dmDisplayOrientation, dmDisplayFixedOutput;
-        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
-        public ushort dmLogPixels;
-        public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
-        public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2,
-            dmPanningWidth, dmPanningHeight;
-    }
-
 
     private static (float x, float y) ToLocal(DockSide side, double main, double cross, int winW, int winH) => side switch
     {

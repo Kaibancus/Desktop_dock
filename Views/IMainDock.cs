@@ -18,6 +18,10 @@ internal interface IMainDock
     /// <summary>Re-read config / theme and rebuild the icon layout in place.</summary>
     void RefreshFromConfig();
 
+    /// <summary>Rebuild after an OS display / work-area change (resolution, DPI, taskbar) so the
+    /// dock re-reads the current metrics — notably the post-login settle after auto-start.</summary>
+    void RefreshForDisplayChange();
+
     /// <summary>Summon the panel from the hotkey (transient — hides on release).</summary>
     void ShowPanel();
 

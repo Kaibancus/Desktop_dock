@@ -30,12 +30,68 @@ public static class MonitorLayout
 
     static MonitorLayout() => UsePrimary();
 
-    /// <summary>Targets the PRIMARY monitor (the single-monitor default).</summary>
+    /// <summary>Targets the PRIMARY monitor (the single-monitor default). Reads LIVE Win32
+    /// metrics (physical screen size, work area and per-monitor effective DPI) rather than WPF
+    /// <see cref="SystemParameters"/>: the docks are bare composition windows, not WPF windows,
+    /// so when no WPF window exists (the normal at-rest state) WPF never receives the
+    /// WM_DISPLAYCHANGE / WM_SETTINGCHANGE that invalidates its cached SystemParameters — at
+    /// login auto-start those cache the pre-settle (wrong) resolution/DPI/work-area and freeze
+    /// there, which made the docks lay out at the wrong size/position after a reboot.</summary>
     public static void UsePrimary()
     {
-        ActiveBounds = new Rect(0, 0,
-            SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
-        ActiveWorkArea = SystemParameters.WorkArea;
+        double scale = PrimaryDpiScale;
+        int cx = GetSystemMetrics(SM_CXSCREEN);
+        int cy = GetSystemMetrics(SM_CYSCREEN);
+        if (cx <= 0 || cy <= 0)
+        {
+            // Win32 not ready — fall back to WPF's value so we never produce a zero-size dock.
+            ActiveBounds = new Rect(0, 0,
+                SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
+            ActiveWorkArea = SystemParameters.WorkArea;
+            return;
+        }
+        ActiveBounds = new Rect(0, 0, cx / scale, cy / scale);
+
+        var wr = new RECT();
+        ActiveWorkArea = SystemParametersInfo(SPI_GETWORKAREA, 0, ref wr, 0) && wr.right > wr.left
+            ? new Rect(wr.left / scale, wr.top / scale,
+                       (wr.right - wr.left) / scale, (wr.bottom - wr.top) / scale)
+            : ActiveBounds;
+    }
+
+    /// <summary>Device pixels per DIP for the PRIMARY monitor, read LIVE from the OS (effective
+    /// per-monitor DPI, with a screen-DC fallback) so it reflects the current display even when
+    /// WPF's cached <see cref="SystemParameters"/> are stale (no WPF window to refresh them).</summary>
+    public static double PrimaryDpiScale
+    {
+        get
+        {
+            try
+            {
+                IntPtr mon = MonitorFromPoint(new POINT { X = 0, Y = 0 }, MONITOR_DEFAULTTOPRIMARY);
+                if (mon != IntPtr.Zero && GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, out uint dx, out _) == 0 && dx > 0)
+                {
+                    double s = dx / 96.0;
+                    if (s >= 0.5 && s <= 4.0) return s;
+                }
+            }
+            catch { /* shcore unavailable — fall through */ }
+            try
+            {
+                IntPtr hdc = GetDC(IntPtr.Zero);
+                if (hdc != IntPtr.Zero)
+                {
+                    try
+                    {
+                        int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+                        if (dpi > 0) { double s = dpi / 96.0; if (s >= 0.5 && s <= 4.0) return s; }
+                    }
+                    finally { ReleaseDC(IntPtr.Zero, hdc); }
+                }
+            }
+            catch { /* fall through */ }
+            return 1.0;
+        }
     }
 
     /// <summary>Targets the monitor under the given PHYSICAL-pixel point (e.g. a
@@ -64,6 +120,11 @@ public static class MonitorLayout
             (r.right - r.left) / scale, (r.bottom - r.top) / scale);
 
     private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const uint MONITOR_DEFAULTTOPRIMARY = 1;
+    private const int SM_CXSCREEN = 0, SM_CYSCREEN = 1;
+    private const uint SPI_GETWORKAREA = 0x0030;
+    private const int MDT_EFFECTIVE_DPI = 0;
+    private const int LOGPIXELSX = 88;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
@@ -86,4 +147,23 @@ public static class MonitorLayout
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref RECT pvParam, uint fWinIni);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
 }
