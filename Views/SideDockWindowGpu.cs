@@ -2551,9 +2551,11 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         if (_prevHover >= 0)
             _preview?.OnPointerLeave();
         _prevHover = hover;
-        UpdateCalendarClock(hover);
         if (hover < 0 || hover >= _slots.Count)
+        {
+            UpdateCalendarClock(hover);   // pointer off any tile → hide the clock
             return;
+        }
         var s = _slots[hover];
         // The Polaris tile shows the calendar/clock popup instead of a window
         // thumbnail preview (see IsPolarisTile). Don't drive the thumbnail popup
@@ -2563,11 +2565,20 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
         // popup linger through the close delay. The pointer has definitively
         // landed on another icon, so close any open preview at once and show only
         // the clock.
+        //
+        // Close the preview BEFORE showing the clock: tearing the thumbnail popup
+        // down (WPF popup + DWM thumbnails) runs on this UI thread and can stall it
+        // ~100ms, which — if done AFTER UpdateCalendarClock — delays the clock's
+        // first fade tick by that long, so the clock appears already shown instead
+        // of fading in (the "no fade-in when coming from an icon with a preview
+        // open" bug). Doing the teardown first lets the fade start on the next tick.
         if (IsPolarisTile(s))
         {
             _preview?.Close();
+            UpdateCalendarClock(hover);
             return;
         }
+        UpdateCalendarClock(hover);   // non-Polaris tile → hide the clock
         var src = PreviewSourceFor(s);
         if (src == null)
             return;

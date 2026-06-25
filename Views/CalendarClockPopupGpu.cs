@@ -28,7 +28,7 @@ internal sealed class CalendarClockPopupGpu : IDisposable
     private const float Pad = 16f;
     private const float CardW = 268f, CardH = 150f, CornerR = 15f, Gap = 3f;
     // Whole-popup fade durations (ms) on the GPU compositor. Short — a brief soften, not a drag.
-    private const float FadeInMs = 180f, FadeOutMs = 150f;
+    private const float FadeInMs = 200f, FadeOutMs = 170f;
     private static readonly int WinW = (int)(CardW + Pad * 2);
     private static readonly int WinH = (int)(CardH + Pad * 2);
 
@@ -175,7 +175,13 @@ internal sealed class CalendarClockPopupGpu : IDisposable
         if (_host == null)
             return;
         long now = Environment.TickCount64;
-        float dt = Math.Max(0f, now - _lastFadeTick);
+        // Clamp the per-tick delta to just above the ~33ms tick interval. The DispatcherTimer
+        // shares the UI thread, so a one-off stall — e.g. tearing down the thumbnail preview
+        // when switching straight from a previewable icon onto Polaris — would otherwise hand
+        // the first tick a huge dt, making step >= 1 and collapsing the whole fade into a single
+        // jump (looked like "no fade" when arriving from a window with a preview open). Capping
+        // dt makes the fade behave like a fixed-step animation, immune to such stalls.
+        float dt = Math.Clamp((float)(now - _lastFadeTick), 0f, 40f);
         _lastFadeTick = now;
         if (_opacity != _opacityTarget)
         {
