@@ -566,7 +566,7 @@ public partial class App : Application
                     SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
             }
 
-            const double Reach = 8.0;        // edge sensitivity in DIPs
+            const double Reach = 10.0;       // edge sensitivity in DIPs
             const double Band = 0.25;        // exclude the outer 25% at each end
             const double Edge = 2.0;         // tiny outward over-travel; keeps the trigger / keep-shown
                                              // band from extending across the screen edge onto an
