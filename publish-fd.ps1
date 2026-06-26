@@ -4,8 +4,17 @@
 # Usage:
 #   .\publish-fd.ps1                 # build + package zip only
 #   .\publish-fd.ps1 -Release v1.3.0 # also create/update the GitHub release and upload the zip
+#
+# Every run also drops a copy of the zip into the canonical local archive dir
+# (-ArchiveDir, default C:\Tools\Polaris\publish-fd) unless that is already the
+# build dir. Pass -ArchiveDir '' to disable.
 param(
-    [string]$Release
+    [string]$Release,
+    # Extra local archive dir to also drop the packaged zip into, so every
+    # publish (even from a git worktree whose output lands elsewhere) keeps a
+    # copy in the canonical local archive. Skipped automatically when it is the
+    # same folder the zip is already built in. Override or pass '' to disable.
+    [string]$ArchiveDir = 'C:\Tools\Polaris\publish-fd'
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -59,6 +68,25 @@ $zip = Join-Path $PSScriptRoot ("publish-fd\Polaris-{0}-fd-win-x64.zip" -f $tag)
 Compress-Archive -Path $exe -DestinationPath $zip -Force
 $zipMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
 Write-Host "Packaged: $zip ($zipMB MB)" -ForegroundColor Green
+
+# Also keep a copy in the canonical local archive dir. When the script runs from
+# that dir directly (e.g. C:\Tools\Polaris), the zip is already there, so skip the
+# self-copy. Never let an archive hiccup abort the actual release.
+if ($ArchiveDir) {
+    try {
+        $zipDirFull = [System.IO.Path]::GetFullPath((Split-Path -Parent $zip))
+        $archiveFull = [System.IO.Path]::GetFullPath($ArchiveDir)
+        if ($archiveFull.TrimEnd('\') -ieq $zipDirFull.TrimEnd('\')) {
+            Write-Host "Archive dir is the build dir; skipping the extra copy." -ForegroundColor DarkGray
+        } else {
+            if (-not (Test-Path $archiveFull)) { New-Item -ItemType Directory -Path $archiveFull -Force | Out-Null }
+            Copy-Item $zip -Destination $archiveFull -Force
+            Write-Host "Archived a copy to: $(Join-Path $archiveFull (Split-Path -Leaf $zip))" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Could not archive the zip to '$ArchiveDir': $($_.Exception.Message)"
+    }
+}
 
 if (-not $Release) {
     Write-Host "Tip: pass -Release <tag> (e.g. -Release v1.3.1) to publish a GitHub release with this zip." -ForegroundColor DarkGray
