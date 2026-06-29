@@ -132,7 +132,8 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private long _pressLaunchStart;
     private float _pressFromScale = 1f;  // the icon's magnify scale captured at click
     private bool _launching;             // a launch animation is in flight (suppress hover-magnify)
-    private const long PressLaunchMs = 260;
+    private float _pressShrink;          // 0..1 press feedback: how far the held icon's GLYPH is shrunk to rest (lens frame stays)
+    private const long PressLaunchMs = 320;
     private DispatcherTimer? _persistTimer;   // debounce config writes so repeated drags don't block the UI thread
     private DispatcherTimer? _appsChangedTimer;   // debounce host side-dock refresh notifications across rapid drags
     private bool _appsChangedPending;        // side dock needs one refresh once this main-dock session ends
@@ -1012,6 +1013,20 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             _dragArrangeDiagMs = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
         }
 
+        // Press feedback: while the button is held over an icon (not dragging, not yet
+        // launching) ease its GLYPH down to rest — the lens frame is kept at hover size (see
+        // DrawIcon) so only the icon shrinks. On release the launch animation grows it back to
+        // the hover peak. Eased slowly (tau ~120ms) for a soft, deliberate push.
+        bool pressing = _pressIdx >= 0 && !_dragging && !_launching;
+        float shrinkTarget = pressing ? 1f : 0f;
+        float sk = 1f - (float)Math.Exp(-frameDt / 0.090f);
+        if (Math.Abs(shrinkTarget - _pressShrink) > 0.0005f)
+        {
+            _pressShrink += (shrinkTarget - _pressShrink) * sk;
+            maxDelta = Math.Max(maxDelta, 0.02f);
+        }
+        else _pressShrink = shrinkTarget;
+
         // Launch press: override the clicked icon's scale with the button-press curve
         // (compress past rest, then spring back to 1.0) while the launch hold runs, so the
         // click reads as a tactile push. Other icons de-magnify (active was forced off
@@ -1300,7 +1315,13 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
                 DrawIcon(ctx, scaled, _waveCur[i], off * rScl, gi * rScl, rOp);
             }
             else
-                DrawIcon(ctx, _slots[i], _waveCur[i], off, gi);
+            {
+                // Pressed icon: shrink only the glyph toward rest (lens frame kept) by glyphMul.
+                float glyphMul = (!_dragging && !_launching && i == _pressIdx && _pressShrink > 0.0005f && _waveCur[i] > 1.0001f)
+                    ? (1f + (1f / _waveCur[i] - 1f) * _pressShrink)
+                    : 1f;
+                DrawIcon(ctx, _slots[i], _waveCur[i], off, gi, 1f, glyphMul);
+            }
         }
         if (clip)
             ctx.PopAxisAlignedClip();
@@ -1572,7 +1593,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private static Color4 LensCol(int a, int r, int g, int b, float mul)
         => new(r / 255f, g / 255f, b / 255f, a / 255f * mul);
 
-    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f, float opacity = 1f)
+    private void DrawIcon(ID2D1DeviceContext ctx, in IconSlot s, float scale, Vector2 off, float gIcon = 0f, float opacity = 1f, float glyphMul = 1f)
     {
         float g = gIcon > 0f ? gIcon : _gIcon, half = g / 2f, cx = s.Center.X + off.X, cy = s.Center.Y + off.Y;
         var center = new Vector2(cx, cy);
@@ -1633,8 +1654,12 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             return;
         float pad = g * 0.06f, dstX = cx - half + pad, dstY = cy - half + pad, dstSz = g - pad * 2;
         var bs = bmp.Size;
+        // glyphMul (<1 while the icon is pressed) shrinks ONLY the glyph about the cell centre;
+        // the magnify scale (and so the lens frame below) stays at its hover size, so pressing
+        // shrinks the icon but keeps the water-droplet lens frame.
+        float gScale = scale * glyphMul;
         ctx.Transform = Matrix3x2.CreateScale(dstSz / Math.Max(1f, bs.Width), dstSz / Math.Max(1f, bs.Height))
-                      * Matrix3x2.CreateTranslation(dstX, dstY) * wave;
+                      * Matrix3x2.CreateTranslation(dstX, dstY) * Matrix3x2.CreateScale(gScale, gScale, center) * baseTf;
         ctx.DrawBitmap(bmp, Math.Clamp(opacity, 0f, 1f), InterpolationMode.HighQualityCubic);
         ctx.Transform = baseTf;
 
@@ -1649,7 +1674,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
                          * Math.Clamp(opacity, 0f, 1f);
             if (lensOp > 0.01f)
             {
-                ctx.Transform = wave;
+                // The lens scales WITH the glyph (gScale), so on press the whole bead shrinks
+                // together; its opacity stays tied to the hover scale so it never vanishes.
+                ctx.Transform = Matrix3x2.CreateScale(gScale, gScale, center) * baseTf;
                 float x0 = cx - half, y0 = cy - half, rr = g * 0.18f;
                 var rrect = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(x0, y0, g, g), RadiusX = rr, RadiusY = rr };
 
@@ -2196,6 +2223,7 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
                 _dragging = false;
                 if (_pressIdx >= 0 || _pressGear)
                     SetCapture(_hwnd);
+                if (_pressIdx >= 0) RequestRender();   // animate the press-shrink to rest
                 return true;
             }
             case WM_MOUSEMOVE:
@@ -2645,13 +2673,14 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         return newIdx;
     }
 
-    /// <summary>Launch scale at normalised time t∈[0,1]: the icon first eases from its
-    /// captured magnify scale back to rest (1.0) — a visible de-magnify — then swells past
-    /// rest to an "enlarge" peak that it holds into the dismiss fade. Mirrors the original
-    /// main-dock launch ("restore to normal size, then enlarge, then close the docks").</summary>
+    /// <summary>Launch scale at normalised time t∈[0,1]. The icon is already shrunk to rest
+    /// while the button was held (see the press-shrink in Tick), so on release it just swells
+    /// from rest up to the hover-magnified peak (the size the cursor-over-icon position gives)
+    /// and holds it into the dismiss fade. A tiny settle portion covers the rare case where the
+    /// press wasn't held long enough to fully de-magnify, easing any residual scale to rest first.</summary>
     private float PressScale(float t)
     {
-        const float tSettle = 0.30f;        // de-magnify portion (restore to rest)
+        const float tSettle = 0.10f;        // brief de-magnify of any residual scale to rest
         const float enlargePeak = MagnifyPeak;  // swell back to the hover-magnified size
         if (t < tSettle)
         {
@@ -2669,13 +2698,14 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         var s = _slots[idx];
         if (s.Entry == null)
             return;
-        // Original launch order: the clicked icon first eases back to REST size (a visible
-        // de-magnify), then swells past rest to an "enlarge" peak, and only THEN does the dock
-        // launch + fade — so the restore→enlarge plays out fully instead of being cut off. The
-        // animation is scale-only and centred (no hop), so it never drifts off the icon centre.
+        // The glyph was already shrunk to rest while the button was held, so the launch starts
+        // from rest and simply grows up to the hover peak before the dock fades (the requested
+        // "press shrinks, release re-magnifies, then launch"). Capturing rest also keeps the
+        // 10% settle a no-op when the icon was held only briefly.
         _pressLaunchIdx = idx;
         _pressLaunchStart = Environment.TickCount64;
-        _pressFromScale = idx < _waveCur.Length ? _waveCur[idx] : 1f;
+        _pressFromScale = 1f;
+        _pressShrink = 0f;
         _launching = true;
         StartDriver();
         var entry = s.Entry;
@@ -2683,8 +2713,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         hold.Tick += (_, _) =>
         {
             hold.Stop();
-            _launching = false;
-            _pressLaunchIdx = -1;
+            // Keep _launching set so the wave loop pins the launched icon at the enlarged peak
+            // (PressScale clamps t→1 = MagnifyPeak) through the dismiss fade — the icon freezes
+            // at its biggest size instead of easing back to rest. Reset on the next summon.
             try { AppLauncher.Launch(entry, () => HidePanel()); }
             catch (Exception ex) { Log.Warn("MainDockGpu", "launch failed: " + ex.Message); }
         };
@@ -3238,6 +3269,8 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         Realize();
         _shown = true;
         _pinned = pinned;
+        // Clear any frozen launch-press from the previous open so the icon starts at rest.
+        _launching = false; _pressLaunchIdx = -1; _pressShrink = 0f;
         // Start fully dismissed (off-screen + transparent) so the very first frame after
         // the rebuild slides + fades in rather than popping at rest.
         _summon = 0f; _summonDir = +1; _summonLast = Environment.TickCount64;
