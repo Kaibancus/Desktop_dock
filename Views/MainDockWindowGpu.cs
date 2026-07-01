@@ -33,6 +33,14 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     // for glass; glyphs drawn at icon*GlassIconScale).
     private const double ThemeScale = 0.9;
     private const float GlassIconScale = 1.32f;
+    // Corner radius of every per-icon glass frame (running-app sweep border, the resting 3D glass
+    // rim and the hover water-lens), as a fraction of the icon box. Kept in one place so those three
+    // frames stay in lockstep; raised for a rounder, softer tile look.
+    private const float IconCornerRatio = 0.26f;
+    // The per-icon glass frame (resting rim / hover water-lens / running-app sweep) is drawn a touch
+    // larger than the icon box so the glyph's square corners tuck inside the frame's rounded corners
+    // instead of poking out past them.
+    private const float IconFrameScale = 1.08f;
 
     // Magnify wave constants — kept in lockstep with DockTuning so the GPU dock
     // feels identical to the WPF glass dock.
@@ -592,6 +600,10 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _runHaloBrush?.Dispose(); _runHaloBrush = null;
         _runSweepBrush?.Dispose(); _runSweepBrush = null;
         _runSweepStops?.Dispose(); _runSweepStops = null;
+        _iconRimBrush?.Dispose(); _iconRimBrush = null;
+        _iconRimStops?.Dispose(); _iconRimStops = null;
+        _iconShadeBrush?.Dispose(); _iconShadeBrush = null;
+        _iconShadeStops?.Dispose(); _iconShadeStops = null;
         _host?.Dispose(); _host = null;
         _labelFormat?.Dispose(); _labelFormat = null;
         _clockFormat?.Dispose(); _clockFormat = null;
@@ -610,6 +622,16 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
     private ID2D1SolidColorBrush? _runHaloBrush;
     private ID2D1GradientStopCollection? _runSweepStops;
     private ID2D1LinearGradientBrush? _runSweepBrush;
+    // Resting liquid-glass icon edge (glass theme): a cool rounded-rect hairline drawn on EVERY
+    // icon every frame so each icon always carries a glass border, not only while hovered. Its
+    // colours are constant — only the gradient axis + brush opacity change per icon — so the stop
+    // collection + brush are cached for the host's lifetime (like the running-sweep brush) to keep
+    // this allocation-free even with a full grid.
+    private ID2D1GradientStopCollection? _iconRimStops;
+    private ID2D1LinearGradientBrush? _iconRimBrush;
+    // Bevel shade stroke for the resting 3D glass rim; same caching rationale as the rim above.
+    private ID2D1GradientStopCollection? _iconShadeStops;
+    private ID2D1LinearGradientBrush? _iconShadeBrush;
 
     private static Color4 Col(byte a, byte r, byte g, byte b) => new(r / 255f, g / 255f, b / 255f, a / 255f);
 
@@ -1466,10 +1488,10 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         var lamp = new Vector2(cx + orbitR * MathF.Sin(th), cy - orbitR * MathF.Cos(th));
         using var stops = ctx.CreateGradientStopCollection(new[]
         {
-            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x58, 0xE0, 0xEC, 0xEC) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x3A, 0x88, 0xC4, 0xEC) },
-            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x1A, 0x4C, 0x9E, 0xF0) },
-            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x3A, 0x86, 0xE0) },
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x58, 0xE8, 0xEC, 0xE4) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.34f, Color = Col(0x3A, 0x98, 0xC6, 0xE2) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x1A, 0x5E, 0xA2, 0xE6) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x00, 0x4C, 0x88, 0xD6) },
         });
         using var brush = ctx.CreateRadialGradientBrush(
             new RadialGradientBrushProperties { Center = lamp, RadiusX = lampR, RadiusY = lampR }, stops);
@@ -1570,23 +1592,43 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         _glassScroll = _glassScrollTarget = frac * _glassScrollMax;
     }
 
-    /// <summary>Etched rounded frame around the resident (pinned) rows, mirroring
-    /// RadialWindow.DrawResidentRegionBorder: ~95%-transparent fill, a soft cool
-    /// glow and a brighter cool rim. Drawn in grid space (shifted by the scroll
-    /// offset) under the icons.</summary>
+    /// <summary>Rounded frame around the resident (pinned) rows: a ~95%-transparent cool
+    /// fill plus a 3D bevel border matching the per-icon glass rim — a dark shade biased to
+    /// the lower-right under a bright top-left highlight (light from top-left) — so the region
+    /// edge reads as raised glass, consistent with the icon tiles. Drawn in grid space (shifted
+    /// by the scroll offset) under the icons.</summary>
     private void DrawResidentFrame(ID2D1DeviceContext ctx, float scrollY)
     {
-        var rect = new Vortice.Mathematics.Rect(_resX, _resY - scrollY, _resW, _resH);
+        float lft = _resX, top = _resY - scrollY;
+        var rect = new Vortice.Mathematics.Rect(lft, top, _resW, _resH);
         var rr = new RoundedRectangle { Rect = rect, RadiusX = _resR, RadiusY = _resR };
         using (var fill = ctx.CreateSolidColorBrush(Col(0x10, 0xFF, 0xFF, 0xFF)))
             ctx.FillRoundedRectangle(rr, fill);
-        // Soft cool glow (a couple of falling-alpha strokes fake the WPF blur=4 halo).
-        using (var glow = ctx.CreateSolidColorBrush(Col(0x18, 0xBF, 0xE0, 0xFF)))
-            ctx.DrawRoundedRectangle(rr, glow, 4.5f);
-        using (var glow2 = ctx.CreateSolidColorBrush(Col(0x24, 0xBF, 0xE0, 0xFF)))
-            ctx.DrawRoundedRectangle(rr, glow2, 2.4f);
-        using (var rim = ctx.CreateSolidColorBrush(Col(0x66, 0xEA, 0xF4, 0xFF)))
-            ctx.DrawRoundedRectangle(rr, rim, 1.0f);
+        // 3D bevel border, identical treatment to DrawIcon's resting rim: two diagonal strokes
+        // along the frame's top-left -> lower-right axis fake a raised edge. (a) A dark cool shade
+        // deepening to the lower-right (edge facing away from the light), drawn wider and under;
+        // (b) a bright cool-white highlight strongest at the top-left, riding on top.
+        var tl = new Vector2(lft, top);
+        var brc = new Vector2(lft + _resW, top + _resH);
+        using (var shadeStops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0x00, 0x0B, 0x14, 0x24) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = Col(0x12, 0x0B, 0x14, 0x24) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x70, 0x0B, 0x14, 0x24) },
+        }))
+        using (var shade = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = tl, EndPoint = brc }, shadeStops))
+            ctx.DrawRoundedRectangle(rr, shade, 2.0f);
+        using (var rimStops = ctx.CreateGradientStopCollection(new[]
+        {
+            new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = Col(0xCA, 255, 255, 255) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.42f, Color = Col(0x22, 255, 255, 255) },
+            new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = Col(0x0C, 255, 255, 255) },
+            new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = Col(0x52, 0xD8, 0xEC, 0xFF) },
+        }))
+        using (var rim = ctx.CreateLinearGradientBrush(
+            new LinearGradientBrushProperties { StartPoint = tl, EndPoint = brc }, rimStops))
+            ctx.DrawRoundedRectangle(rr, rim, 1.2f);
     }
 
     // Lens colour with an opacity multiplier (the water-droplet lens fades in with magnification).
@@ -1602,6 +1644,9 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         // rises, instead of snapping to their docked positions while the slab slides.
         var baseTf = ctx.Transform;
         var wave = Matrix3x2.CreateScale(scale, scale, center) * baseTf;
+        // Same magnify, but blown up by IconFrameScale — used for the glass frame layers (rim /
+        // running sweep) so they sit a little outside the glyph and their rounded corners clear it.
+        var waveFrame = Matrix3x2.CreateScale(scale * IconFrameScale, scale * IconFrameScale, center) * baseTf;
 
         // Running indicator: a soft pulsing glow halo plus a flowing sweep border — a
         // rounded-rect stroke painted with a linear gradient whose axis rotates
@@ -1609,11 +1654,11 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         // is not theme-gated.
         if (s.Running)
         {
-            ctx.Transform = wave;
+            ctx.Transform = _saturn ? wave : waveFrame;
             // Frame the icon at its full nominal size (parity with the WPF RunningBorder,
             // a Border of Width/Height = IconSize) so the flow ring sits clear of the
             // glyph rather than cutting into it.
-            float box = g, rr = box * 0.18f;
+            float box = g, rr = box * IconCornerRatio;
             var rect = new Vortice.Mathematics.Rect(cx - box / 2f, cy - box / 2f, box, box);
             var rrect = new RoundedRectangle { Rect = rect, RadiusX = rr, RadiusY = rr };
             // Pulsing cool halo (a few falling-alpha strokes fake the blurred glow): reuse ONE
@@ -1663,6 +1708,63 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
         ctx.DrawBitmap(bmp, Math.Clamp(opacity, 0f, 1f), InterpolationMode.HighQualityCubic);
         ctx.Transform = baseTf;
 
+        // Always-on 3D liquid-glass edge (glass theme): every icon keeps a raised glass rim at rest,
+        // not only while hovered, so the grid reads as framed glass tiles. Two diagonal strokes fake
+        // a bevel — a dark shade biased to the lower-right, then a bright highlight biased to the
+        // top-left (light from top-left) — giving the edge real depth. It sits on the same frame as
+        // the white tile (scale space), so on press the glyph depresses inside a steady tile. The rim
+        // fades down as the magnification (hover lens below) rises, so the resting rim and the lens'
+        // wet rim don't stack into one over-thick edge on the focal icon. Cached brushes per icon.
+        if (!_saturn)
+        {
+            float rimOp = Math.Clamp(opacity, 0f, 1f)
+                        * (1f - 0.6f * Math.Clamp((scale - 1f) / Math.Max(0.001f, MagnifyPeak - 1f), 0f, 1f));
+            if (rimOp > 0.01f)
+            {
+                ctx.Transform = waveFrame;
+                float x0 = cx - half, y0 = cy - half, rr = g * IconCornerRatio;
+                var rrect = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(x0, y0, g, g), RadiusX = rr, RadiusY = rr };
+                // (a) Bevel shade: clear at the top-left, deepening to a cool shadow at the lower-right
+                // — the edge facing away from the light. Drawn slightly wider, under the highlight.
+                if (_iconShadeBrush == null)
+                {
+                    _iconShadeStops = ctx.CreateGradientStopCollection(new[]
+                    {
+                        new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = LensCol(0x00, 0x0B, 0x14, 0x24, 1f) },
+                        new Vortice.Direct2D1.GradientStop { Position = 0.55f, Color = LensCol(0x12, 0x0B, 0x14, 0x24, 1f) },
+                        new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = LensCol(0x70, 0x0B, 0x14, 0x24, 1f) },
+                    });
+                    _iconShadeBrush = ctx.CreateLinearGradientBrush(
+                        new LinearGradientBrushProperties { StartPoint = new Vector2(x0, y0), EndPoint = new Vector2(x0 + g, y0 + g) },
+                        _iconShadeStops);
+                }
+                _iconShadeBrush.StartPoint = new Vector2(x0, y0);
+                _iconShadeBrush.EndPoint = new Vector2(x0 + g, y0 + g);
+                _iconShadeBrush.Opacity = rimOp;
+                ctx.DrawRoundedRectangle(rrect, _iconShadeBrush, 2.0f);
+
+                // (b) Bevel highlight: bright cool-white at the top-left, thinning to a cool tint at
+                // the lower-right — the lit glass edge riding on top of the shade.
+                if (_iconRimBrush == null)
+                {
+                    _iconRimStops = ctx.CreateGradientStopCollection(new[]
+                    {
+                        new Vortice.Direct2D1.GradientStop { Position = 0f,    Color = LensCol(0xCA, 255, 255, 255, 1f) },
+                        new Vortice.Direct2D1.GradientStop { Position = 0.42f, Color = LensCol(0x22, 255, 255, 255, 1f) },
+                        new Vortice.Direct2D1.GradientStop { Position = 0.62f, Color = LensCol(0x0C, 255, 255, 255, 1f) },
+                        new Vortice.Direct2D1.GradientStop { Position = 1f,    Color = LensCol(0x52, 0xD8, 0xEC, 0xFF, 1f) },
+                    });
+                    _iconRimBrush = ctx.CreateLinearGradientBrush(
+                        new LinearGradientBrushProperties { StartPoint = new Vector2(x0, y0), EndPoint = new Vector2(x0 + g, y0 + g) },
+                        _iconRimStops);
+                }
+                _iconRimBrush.StartPoint = new Vector2(x0, y0);
+                _iconRimBrush.EndPoint = new Vector2(x0 + g, y0 + g);
+                _iconRimBrush.Opacity = rimOp;
+                ctx.DrawRoundedRectangle(rrect, _iconRimBrush, 1.2f);
+                ctx.Transform = baseTf;
+            }
+        }
         // Liquid-glass water-droplet lens over the magnified icon (port of the WPF RadialIcon
         // HoverGlow): a domed refraction tint + a wet rim + a specular shine + a focused
         // caustic, layered on top of the icon so a hovered icon reads as a bead of water
@@ -1675,9 +1777,10 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
             if (lensOp > 0.01f)
             {
                 // The lens scales WITH the glyph (gScale), so on press the whole bead shrinks
-                // together; its opacity stays tied to the hover scale so it never vanishes.
-                ctx.Transform = Matrix3x2.CreateScale(gScale, gScale, center) * baseTf;
-                float x0 = cx - half, y0 = cy - half, rr = g * 0.18f;
+                // together; its opacity stays tied to the hover scale so it never vanishes. The extra
+                // IconFrameScale matches the resting rim so the wet rim clears the glyph corners too.
+                ctx.Transform = Matrix3x2.CreateScale(gScale * IconFrameScale, gScale * IconFrameScale, center) * baseTf;
+                float x0 = cx - half, y0 = cy - half, rr = g * IconCornerRatio;
                 var rrect = new RoundedRectangle { Rect = new Vortice.Mathematics.Rect(x0, y0, g, g), RadiusX = rr, RadiusY = rr };
 
                 // 1) Domed refraction tint (radial, bright shoulder at 0.36,0.28 -> clear -> cool base).
@@ -1712,8 +1815,8 @@ internal sealed class MainDockWindowGpu : GpuDockBase, IMainDock, IDisposable
                 // 3) Specular shine: the bright soft dot on the droplet's shoulder.
                 using (var stops = ctx.CreateGradientStopCollection(new[]
                 {
-                    new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = LensCol(0xE0, 255, 255, 255, lensOp) },
-                    new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = LensCol(0x50, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0f,   Color = LensCol(0xC8, 255, 255, 255, lensOp) },
+                    new Vortice.Direct2D1.GradientStop { Position = 0.5f, Color = LensCol(0x48, 255, 255, 255, lensOp) },
                     new Vortice.Direct2D1.GradientStop { Position = 1f,   Color = LensCol(0x00, 255, 255, 255, lensOp) },
                 }))
                 using (var br = ctx.CreateRadialGradientBrush(new RadialGradientBrushProperties

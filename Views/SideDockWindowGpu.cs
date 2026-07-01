@@ -29,7 +29,9 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
 {
     private const float GlassIconScale = 1.32f;
     private const float SideDockScaleK = 0.70f;
-    private const float HoverScale = 1.5f;
+    // Peak magnification the icon directly under the pointer reaches. Pop-out is
+    // driven off (scale − 1), so a taller peak also pops the focal icon further.
+    private const float HoverScale = 1.68f;
     // Pointer travel (window-DIP, Euclidean) before a press becomes a drag.
     // Matches the WPF dock's 6 px Euclidean DragThreshold so small reposition
     // gestures register as drags instead of being misread as a launch-click.
@@ -108,7 +110,42 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private float _colCenterCross, _slabCrossLen, _pinnedAreaMain, _cellMain;
     private int _pinnedVisible;
     private float[] _waveCur = Array.Empty<float>();
-    private const float WaveSupport = 2.3f;
+    // Hover magnify wave, defined directly as (distance-in-cells, scale) control points tuned by feel.
+    // A monotone cubic (PCHIP) interpolates between them, so every listed distance hits its value exactly
+    // with a smooth bell crest and no overshoot. Pop-out is driven off (scale-1), so the same points also
+    // set how far each icon lifts off the edge — bigger scale = bigger pop:
+    //   d=0 -> 1.68 (focal: max magnify + max pop)   d=1 -> 1.24   d=1.5 -> 1.10   d=2 -> 1.04
+    //   d>=3 -> 1.00 (clamped: no magnify, no pop, and no push-apart at any distance)
+    // To retune, just edit a scale value (or add a control point) — the curve re-fits automatically.
+    private static readonly float[] _waveDist = { 0f, 1f, 1.5f, 2f, 3f };
+    private static readonly float[] _waveScaleY = { HoverScale, 1.24f, 1.10f, 1.04f, 1f };
+    private static readonly float[] _waveTan = BuildWaveTangents(_waveDist, _waveScaleY);
+
+    // Fritsch–Carlson monotone tangents; flat ends (0 crest/tail slope) avoid a cusp at the peak.
+    private static float[] BuildWaveTangents(float[] x, float[] y)
+    {
+        int n = x.Length;
+        var m = new float[n];
+        var d = new float[n - 1];
+        for (int i = 0; i < n - 1; i++)
+            d[i] = (y[i + 1] - y[i]) / (x[i + 1] - x[i]);
+        for (int i = 1; i < n - 1; i++)
+        {
+            if (d[i - 1] * d[i] <= 0f)
+            {
+                m[i] = 0f;
+            }
+            else
+            {
+                float h0 = x[i] - x[i - 1];
+                float h1 = x[i + 1] - x[i];
+                float w1 = 2f * h1 + h0;
+                float w2 = h1 + 2f * h0;
+                m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
+            }
+        }
+        return m;
+    }
 
     // ---- New-message attention badge (parity with the GPU main dock / WPF) -------
     private volatile System.Collections.Generic.HashSet<string> _flashKeys = new();
@@ -948,10 +985,20 @@ internal sealed class SideDockWindowGpu : GpuDockBase, IDisposable, ISideDock
     private float WaveScaleAt(float cursorMain, float iconMain)
     {
         float d = Math.Abs(cursorMain - iconMain) / _cellH;
-        if (d >= WaveSupport)
-            return 1f;
-        float f = 0.5f * (1f + (float)Math.Cos(Math.PI * d / WaveSupport));
-        return 1f + (HoverScale - 1f) * f;
+        float[] xs = _waveDist, ys = _waveScaleY, ms = _waveTan;
+        int last = xs.Length - 1;
+        if (d <= xs[0]) return ys[0];
+        if (d >= xs[last]) return 1f;
+        int i = 0;
+        while (i < last - 1 && d >= xs[i + 1]) i++;   // locate segment [xs[i], xs[i+1]]
+        float h = xs[i + 1] - xs[i];
+        float t = (d - xs[i]) / h;
+        float t2 = t * t, t3 = t2 * t;
+        float h00 = 2f * t3 - 3f * t2 + 1f;
+        float h10 = t3 - 2f * t2 + t;
+        float h01 = -2f * t3 + 3f * t2;
+        float h11 = t3 - t2;
+        return h00 * ys[i] + h10 * h * ms[i] + h01 * ys[i + 1] + h11 * h * ms[i + 1];
     }
 
     private Vector2 PopOffset(float pop) => _side switch
